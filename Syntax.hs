@@ -10,7 +10,8 @@
       PatternGuards,
       TupleSections,
       UndecidableInstances,
-      UnicodeSyntax
+      UnicodeSyntax,
+      ViewPatterns
   #-}
 module Syntax where
 
@@ -18,12 +19,11 @@ import Control.Arrow
 import Control.Applicative
 import Control.Monad
 import Control.Monad.Identity
-import qualified Control.Monad.State as CMS
+import Control.Monad.RWS   as RWS
 import Control.Monad.ST (runST)
 import qualified Data.Char as Char
 import qualified Data.List as List
 import qualified Data.Map  as Map
-import           Data.Monoid
 import qualified Data.STRef as ST
 import Text.Parsec hiding ((<|>), many)
 import Text.Parsec.Token
@@ -111,13 +111,6 @@ instance Eq Empty where
 
 type Name = String
 
--- | We use HIDE to hide data from derived instances of Eq. In
---   particular, variables will carry a name that is suitable for
---   printing, but it shouldn't have any effect on variable comparisons.
-newtype HIDE a = HIDE { unHIDE ∷ a }
-instance Eq (HIDE a) where _ == _ = True
-instance Show a ⇒ Show (HIDE a) where showsPrec p = showsPrec p . unHIDE
-
 -- | We're using the locally nameless representation for binding,
 --   which means that bound variables are represented as DeBruijn
 --   indices but free variables have some other representation as
@@ -136,15 +129,15 @@ instance Show a ⇒ Show (HIDE a) where showsPrec p = showsPrec p . unHIDE
 --
 --   we represent α with BoundVar 0 0 and γ with BoundVar 0 2.
 data Var a
-  = BoundVar !Int !Int (HIDE (Maybe Name))
+  = BoundVar !Int !Int (Perhaps Name)
   | FreeVar a
   deriving (Eq, Functor)
 
 boundVar ∷ Int → Int → Name → Var a
-boundVar ix jx n = BoundVar ix jx (HIDE (Just n))
+boundVar ix jx n = BoundVar ix jx (Here n)
 
 ---
---- Representation of types
+--- Representation of types and type annotations
 ---
 
 -- | The syntax of types allows nested quantifiers, though right now
@@ -153,8 +146,9 @@ boundVar ix jx n = BoundVar ix jx (HIDE (Just n))
 --
 --   The type parameter gives the representation of free type variables.
 data Type a
-  -- | The Int is the number of bound variables
-  = QuaTy Quant Int (Type a)
+  -- | The list of names are the suggested printing names for the bound
+  --   type variables
+  = QuaTy Quant [Perhaps Name] (Type a)
   | VarTy (Var a)
   | ConTy Name [Type a]
   deriving (Eq, Functor)
@@ -166,17 +160,26 @@ data Quant
   deriving Eq
 
 allTy, exTy ∷ Int → Type a → Type a
-allTy = QuaTy AllQu
-exTy  = QuaTy ExQu
+allTy j = QuaTy AllQu (take j (map Here tvNames))
+exTy  j = QuaTy ExQu  (take j (map Here tvNames))
 
 bvTy ∷ Int → Int → Maybe Name → Type a
-bvTy i j n = VarTy (BoundVar i j (HIDE n))
+bvTy i j n = VarTy (BoundVar i j (maybeToPerhaps n))
 
 fvTy ∷ a → Type a
 fvTy  = VarTy . FreeVar
 
 t1 ↦ t2 = ConTy "→" [t1, t2]
 infixr 4 ↦
+
+-- | A type annotation. The list of 'Name's records the free
+--   type variables in the 'Type'.
+data Annot = Annot [Name] (Type Name)
+  deriving Eq
+
+-- | The empty annotation
+annot0 :: Annot
+annot0  = Annot ["_"] (fvTy "_")
 
 -- | The type of a dereferencing function for free type variable
 --   representation @v@, in some monad @m@.
@@ -185,7 +188,7 @@ type Deref m v = v → m (Maybe (Type v))
 -- | Fold a type, while dereferencing type variables
 foldType ∷ (Monad m, ?deref ∷ Deref m v) ⇒
            -- | For quantifiers
-           (Quant → Int → r → r) →
+           (Quant → [Perhaps Name] → r → r) →
            -- | For bound variables
            (Int → Int → Maybe Name → r) →
            -- | For free variables
@@ -196,18 +199,18 @@ foldType ∷ (Monad m, ?deref ∷ Deref m v) ⇒
            Type v →
            m r
 foldType fquant fbvar ffvar fcon = loop where
-  loop (QuaTy q n t)                   = fquant q n `liftM` loop t
-  loop (VarTy (BoundVar i j (HIDE n))) = return (fbvar i j n)
-  loop (VarTy (FreeVar v))             = do
+  loop (QuaTy q n t)            = fquant q n `liftM` loop t
+  loop (VarTy (BoundVar i j n)) = return (fbvar i j (perhapsToMaybe n))
+  loop (VarTy (FreeVar v))      = do
     mt ← ?deref v
     case mt of
       Nothing → return (ffvar v)
       Just t  → loop t
-  loop (ConTy n ts)                    = fcon n `liftM` mapM loop ts
+  loop (ConTy n ts)             = fcon n `liftM` mapM loop ts
 
 -- | Monadic version of type folding
 foldTypeM ∷ (Monad m, ?deref ∷ Deref m v) ⇒
-            (Quant → Int → r → m r) →
+            (Quant → [Perhaps Name] → r → m r) →
             (Int → Int → Maybe Name → m r) →
             (v → m r) →
             (Name → [r] → m r) →
@@ -269,16 +272,18 @@ isPrenexType τ                   = isMonoType τ
 ---
 
 data Patt a
-  = VarPa
+  = VarPa (Perhaps Name)
   | WldPa
   | ConPa Name [Patt a]
+  | AnnPa (Patt a) Annot
   deriving Show
 
 -- | The number of variables bound by a pattern
 pattSize ∷ Patt a → Int
-pattSize VarPa        = 1
+pattSize (VarPa _)    = 1
 pattSize WldPa        = 0
 pattSize (ConPa _ πs) = sum (map pattSize πs)
+pattSize (AnnPa π _)  = pattSize π
 
 ---
 --- Terms
@@ -291,6 +296,7 @@ data Term a
   | VarTm (Var a)
   | ConTm Name [Term a]
   | AppTm (Term a) (Term a)
+  | AnnTm (Term a) Annot
 
 syntacticValue ∷ Term a → Bool
 syntacticValue (AbsTm _ _)       = True
@@ -298,6 +304,15 @@ syntacticValue (LetTm _ _ e1 e2) = syntacticValue e1 && syntacticValue e2
 syntacticValue (VarTm _)         = True
 syntacticValue (ConTm _ es)      = all syntacticValue es
 syntacticValue (AppTm _ _)       = False
+syntacticValue (AnnTm e _)       = syntacticValue e
+
+isAnnotated :: Term a → Bool
+isAnnotated (AbsTm _ _)      = False
+isAnnotated (LetTm _ _ _ e2) = isAnnotated e2
+isAnnotated (VarTm _)        = False
+isAnnotated (ConTm _ _)      = False
+isAnnotated (AppTm _ _)      = False
+isAnnotated (AnnTm _ _)      = True
 
 ---
 --- Initial environment
@@ -369,14 +384,19 @@ closeTy k _  (VarTy (BoundVar i j n))
   | otherwise = VarTy (BoundVar i j n)
 closeTy k vs (VarTy (FreeVar v))
   | Just j ← List.findIndex (== v) vs
-              = VarTy (BoundVar k j (HIDE Nothing))
+              = VarTy (BoundVar k j Nope)
   | otherwise = VarTy (FreeVar v)
 closeTy k vs (ConTy n ts) = ConTy n (map (closeTy k vs) ts)
 
 -- | Add the given quantifier while binding the given list of variables
 closeWith ∷ Eq a ⇒ Quant → [a] → Type a → Type a
-closeWith _ []  ρ = ρ
-closeWith q tvs ρ = QuaTy q (length tvs) (closeTy 0 tvs ρ)
+closeWith = closeWithNames []
+
+-- | Add the given quantifier while binding the given list of variables
+closeWithNames ∷ Eq a ⇒ [Perhaps Name] → Quant → [a] → Type a → Type a
+closeWithNames _   _ []  ρ = ρ
+closeWithNames pns q tvs ρ = QuaTy q pns' (closeTy 0 tvs ρ)
+  where pns' = take (length tvs) (pns ++ repeat Nope)
 
 -- | @substTy τ' α 't@ substitutes @τ'@ for free variable @α@ in @τ@.
 substTy ∷ Eq a ⇒ Type a → a → Type a → Type a
@@ -559,21 +579,25 @@ standardizeType t00 = runST (loop 0 [] t00) where
                 (foldr (++) g $
                    replicate i [(depth + i, rn)]) t
       nl ← ST.readSTRef rn
-      return $ case length nl of
-        0 → openTyN i (-1) [] t'
-        n → QuaTy u n (openTyN (i - 1) (i - 1) [] t')
+      return $ case nl of
+        [] → openTyN i (-1) [] t'
+        _  → QuaTy u [ n | (_,_,n) ← nl ] (openTyN (i - 1) (i - 1) [] t')
     ConTy con ts          → ConTy con <$> mapM (loop depth g) ts
     VarTy (BoundVar i j n)
       | (olddepth, r):_ ← drop i g
                           → do
           s  ← ST.readSTRef r
-          j' ← case List.findIndex (== (depth - i,j)) s of
+          j' ← case List.findIndex (== (depth - i,j,Nope)) s of
             Just j' → return j'
             Nothing → do
-              ST.writeSTRef r (s ++ [(depth - i,j)])
+              ST.writeSTRef r (s ++ [(depth - i,j,n)])
               return (length s)
           return (VarTy (BoundVar (depth - olddepth) j' n))
     VarTy v               → return (VarTy v)
+
+-- | To put a type annotation in standard form.
+standardizeAnnot :: Annot → Annot
+standardizeAnnot (Annot ns t) = Annot ns (standardizeType t)
 
 -- | A Parsec tokenizer
 tok ∷ TokenParser st
@@ -639,6 +663,14 @@ findVar name = loop 0 where
     Just jx → return (boundVar ix jx name)
     Nothing → loop (ix + 1) ribs
 
+-- | To parse an annotation
+instance Parsable Annot where
+  genParser  = withState [] $ do
+    τ0    ← parseType
+    somes ← getState
+    let τ = openTy 0 (map fvTy somes) τ0
+    return (standardizeAnnot (Annot somes τ))
+
 -- | To parse a closed type.
 instance Parsable (Type a) where
   genParser  = withState [] $ do
@@ -657,7 +689,7 @@ parseType  = level0 []
   level0 g = do
                (quants, tvss) ← unzip <$> parseQuantifiers
                body   ← level0 (reverse tvss ++ g)
-               return (foldr2 QuaTy body quants (map length tvss))
+               return (foldr2 QuaTy body quants (map (map Here) tvss))
          <|> level1 g
   level1 g = do
                t1 ← level2 g
@@ -690,12 +722,16 @@ parseQuantifiers = many1 ((,) <$> quant <*> tvs) <* dot tok where
 -- the list of names bound by the patern.
 parsePatt ∷ Int → P (Patt a, [Name])
 parsePatt p = withState [] $ (,) <$> level p <*> getState where
-  level 0 = level 1
+  level 0 = do
+              π ← level 1
+              option π $ do
+                reservedOp tok ":"
+                AnnPa π <$> genParser
   level 1 = ConPa <$> upperIdentifier <*> many (level 2)
         <|> level 2
   level _ = ConPa <$> upperIdentifier <*> pure []
         <|> WldPa <$  reserved tok "_"
-        <|> VarPa <$  variable
+        <|> VarPa <$> variable
         <|> parens tok (level 0)
   variable = do
     name  ← lowerIdentifier
@@ -703,6 +739,7 @@ parsePatt p = withState [] $ (,) <$> level p <*> getState where
     if name `elem` names
       then unexpected ("repeated variable in pattern: " ++ name)
       else putState (names++[name])
+    return (Here name)
 
 -- | To parse a closed term.
 instance Parsable (Term a) where
@@ -732,7 +769,11 @@ parseTerm γ0 = liftM2 (,) (level0 [γ0]) getState where
                e ← level0 (reverse names ++ γ)
                return (foldr AbsTm e πs)
          <|> level1 γ
-  level1 γ = level2 γ
+  level1 γ = do
+               e ← level2 γ
+               option e $ do
+                 reservedOp tok ":"
+                 AnnTm e <$> genParser
   level2 γ = ConTm <$> upperIdentifier <*> many (level3 γ)
          <|> chainl1 (level3 γ) (return AppTm)
   level3 γ = do
@@ -742,6 +783,9 @@ parseTerm γ0 = liftM2 (,) (level0 [γ0]) getState where
                con ← upperIdentifier
                return (ConTm con [])
          <|> parens tok (level0 γ)
+
+instance Read Annot where
+  readsPrec _ = readsPrecFromParser
 
 instance Parsable a ⇒ Read (Type a) where
   readsPrec _ = readsPrecFromParser
@@ -757,7 +801,7 @@ instance Parsable a ⇒ Read (Term a) where
 --   base name, then with a prime added, and then with numeric
 --   subscripts increasing from 1.
 namesFrom ∷ String → [Name]
-namesFrom s = [ c:n | n ← "" : "′" : map numberSubscript [1 ..], c ← s ]
+namesFrom s = [ c:n | n ← "" : "′" : map numberSubscript [0 ..], c ← s ]
 
 -- | Given a natural number, represent it as a string of number
 --   subscripts.
@@ -767,8 +811,19 @@ numberSubscript n0
   | n0 < 0         = error "numberSubscript requires non-negative Int"
   | otherwise      = reverse $ List.unfoldr each n0 where
   each 0 = Nothing
-  each n = Just (digits !! ones, rest) where (rest, ones) = n `divMod` 10
-  digits = "₀₁₂₃₄₅₆₇₈₉"
+  each n = Just (subscriptDigits !! ones, rest)
+             where (rest, ones) = n `divMod` 10
+
+-- | Clear the primes and subscripts from the end of a name
+clearScripts ∷ String → String
+clearScripts n = case reverse (dropWhile (`elem` scripts) (reverse n)) of
+  [] → n
+  n' → n'
+  where scripts = "'′" ++ subscriptDigits ++ ['0' .. '9']
+
+-- | The subscript digits
+subscriptDigits ∷ [Char]
+subscriptDigits = "₀₁₂₃₄₅₆₇₈₉"
 
 -- | Lists of name candidates for type variables, exotic type variables
 --   (during unification), and variables.
@@ -777,8 +832,37 @@ tvNames = namesFrom "αβγδ"
 exNames = namesFrom "efgh"
 varNames = namesFrom ['i' .. 'z']
 
+-- | @freshName sugg avoid cands@ attempts to generate a fresh name
+--   as follows:
+--
+--   * if @sugg@ is @Here n@, then it returns @n@ if @n@ is not in
+--     @avoid@, and otherwise subscripts @n@ until if finds a fresh
+--     name.
+--   * Otherwise, return the first name from @cands@ that isn't in
+--     @avoid@.
+--
+--   Returns the list of unused/undiscarded candidates along with the
+--   fresh name
+freshName ∷ Perhaps Name → [Name] → [Name] → Name
+freshName pn avoid cands = case pn of
+  Here n
+    | n `notElem` avoid → n
+    | otherwise         → takeFrom (namesFrom (clearScripts n))
+  Nope                  → takeFrom cands
+  where takeFrom = head . filter (`notElem` avoid)
+
+-- | Like 'freshName', but produces a list of fresh names
+freshNames ∷ [Perhaps Name] → [Name] → [Name] → [Name]
+freshNames []       _     _     = []
+freshNames (pn:pns) avoid cands = 
+  let n'  = freshName pn avoid cands
+   in n' : freshNames pns (n':avoid) cands
+
 instance Ppr Empty where
   ppr = elimEmpty
+
+instance Ppr Annot where
+  ppr (Annot _ t) = pprType [] t
 
 instance Ppr a ⇒ Ppr (Type a) where
   ppr = pprType []
@@ -789,7 +873,7 @@ pprType  = loop 0 where
   loop p g t0 = case t0 of
     QuaTy u e t           →
       let quant = case u of AllQu → "∀"; ExQu → "∃"
-          tvs   = take e (filter (`notElem` concat g) tvNames)
+          tvs   = freshNames e (concat g) tvNames
        in parensIf (p > 0) $
             Ppr.hang
               (Ppr.text quant Ppr.<+>
@@ -797,7 +881,7 @@ pprType  = loop 0 where
                Ppr.char '.')
               2
               (loop 0 (tvs : g) t)
-    VarTy (BoundVar ix jx (HIDE n)) →
+    VarTy (BoundVar ix jx (perhapsToMaybe → n)) →
       Ppr.text $ maybe "?" id $ (listNth jx <=< listNth ix $ g) `mplus` n
     VarTy (FreeVar a)        → ppr a
     ConTy c [t1, t2] | c `elem` ["->", "→"] →
@@ -808,24 +892,41 @@ pprType  = loop 0 where
       parensIf (p > 2) $
         Ppr.fsep (Ppr.text c : map (loop 3 g) ts)
 
--- | To pretty-print a pattern using the given list of names
---   for its bound variables.
-pprPatt ∷ Ppr a ⇒ Int → [Name] → Patt a → Ppr.Doc
-pprPatt p0 names0 π0 = CMS.evalState (loop p0 π0) names0 where
-  loop _ VarPa = Ppr.text <$> next
-  loop _ WldPa = return (Ppr.char '_')
+-- | To pretty-print a pattern and return the list of names of
+--   the bound variables.  (Avoiding the given list of names.)
+pprPatt ∷ Ppr a ⇒ Int → [Name] → Patt a → (Ppr.Doc, [Name])
+pprPatt p0 avoid0 π0 = evalRWS (loop p0 π0) () avoid0 where
+  loop _ (VarPa pn)   = Ppr.text <$> getName pn
+  loop _ WldPa        = return (Ppr.char '_')
   loop _ (ConPa c []) = return (Ppr.text c)
   loop p (ConPa c πs) = do
     docs ← mapM (loop 2) πs
     return $
       parensIf (p > 1) $
         Ppr.sep (Ppr.text c : docs)
-  next = do
-    name:names ← CMS.get
-    CMS.put names
+  loop p (AnnPa π annot) = do
+    πdoc ← loop 1 π
+    return $
+      parensIf (p > 0) $
+        Ppr.hang πdoc 2 (Ppr.char ':' Ppr.<+> ppr annot)
+  getName pn = do
+    avoid ← get
+    let name = freshName pn avoid varNames
+    put (name:avoid)
+    tell [name]
     return name
 
--- | Too pretty-print a closed term.
+-- | Given a pretty-printing precedence, a list of names to avoid, and
+--   a list of patterns, pretty-print the patterns and return a list
+--   of lists of their bound names.
+pprPatts ∷ Ppr a ⇒ Int → [Name] → [Patt a] → ([Ppr.Doc], [[Name]])
+pprPatts _ _     []     = ([], [])
+pprPatts p avoid (π:πs) =
+  let (doc, names)   = pprPatt p avoid π
+      (docs, names') = pprPatts p (names++avoid) πs
+   in (doc:docs, names:names')
+
+-- | To pretty-print a closed term.
 instance Ppr a ⇒ Ppr (Term a) where
   ppr = pprTerm []
 
@@ -833,38 +934,39 @@ instance Ppr a ⇒ Ppr (Term a) where
 pprTerm ∷ Ppr a ⇒ [[Name]] → Term a → Ppr.Doc
 pprTerm  = loop 0 where
   loop p g e0 = case e0 of
+    AnnTm e annot       → parensIf (p > 1) $
+      Ppr.fsep [ loop 1 g e, Ppr.text ":", ppr annot ]
     AbsTm _ _           →
-      let (πs, e) = unfoldAbs e0
-          freshNames = filter (`notElem` concat g) varNames
-          alloc (vs', fresh) π = (vs' ++ [used], fresh')
-            where (used, fresh') = splitAt (pattSize π) fresh
-          names = fst (foldl alloc ([], freshNames) πs)
+      let (πs, e)        = unfoldAbs e0
+          (πdocs, names) = pprPatts 3 (concat g) πs
        in parensIf (p > 0) $
             Ppr.hang
               (Ppr.char 'λ'
-                 Ppr.<> Ppr.fsep (zipWith (pprPatt 3) names πs)
+                 Ppr.<> Ppr.fsep πdocs
                  Ppr.<> Ppr.char '.')
               2
               (loop 0 (reverse names ++ g) e)
     LetTm rec π e1 e2   →
-      let fresh  = filter (`notElem` concat g) varNames
-          names  = take (pattSize π) fresh
+      let (πdoc, names) = pprPatt 0 (concat g) π
        in parensIf (p > 0) $
             Ppr.hang
               (Ppr.text (if rec then "let rec" else "let")
-                Ppr.<+> pprPatt 0 names π
+                Ppr.<+> πdoc
                 Ppr.<+> Ppr.char '='
                 Ppr.<+> loop 0 (if rec then names : g else g) e1
                 Ppr.<+> Ppr.text "in")
               2
               (loop 0 (names : g) e2)
-    VarTm (BoundVar ix jx (HIDE n)) →
+    VarTm (BoundVar ix jx (perhapsToMaybe → n)) →
       Ppr.text $ maybe "?" id $ (listNth jx <=< listNth ix $ g) `mplus` n
     VarTm (FreeVar name)   → ppr name
     ConTm name es       → parensIf (p > 2) $
       Ppr.sep (Ppr.text name : map (loop 3 g) es)
     AppTm e1 e2         → parensIf (p > 2) $
       Ppr.sep [loop 2 g e1, loop 3 g e2]
+
+instance Show Annot where
+  show = Ppr.render . ppr
 
 instance Ppr a ⇒ Show (Type a) where
   show = Ppr.render . ppr
@@ -924,7 +1026,7 @@ parseTypeTests = T.test
     a = ConTy "A" []
     b = ConTy "B" []
     c t = ConTy "C" [t]
-    bv m n = VarTy (BoundVar m n (HIDE Nothing))
+    bv m n = VarTy (BoundVar m n Nope)
 
 (<==>*) ∷ String → String → T.Assertion
 str1 <==>* str2 = T.assertBool (str1 ++ " <==> " ++ str2) (t1 == t2) where

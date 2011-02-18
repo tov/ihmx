@@ -13,6 +13,7 @@ module MonadRef (
   RefT, RefRef, runRefT,
   withUnsafePerformRef, withUnsafeRefToIO,
   unsafePerformRef, unsafeRefToIO,
+  UnsafeReadRef(..),
 ) where
 
 import Control.Applicative
@@ -38,7 +39,7 @@ import GHC.Conc (unsafeIOToSTM)
 -- | A class for monads with mutable references. Provides generic
 --   operations for creating, reading, writing, and modifying
 --   references.
-class Monad m ⇒ MonadRef p m | m → p where
+class (UnsafeReadRef p, Monad m) ⇒ MonadRef p m | m → p where
   newRef    ∷ a → m (p a)
   readRef   ∷ p a → m a
   writeRef  ∷ p a → a → m ()
@@ -101,7 +102,7 @@ instance Monad m ⇒ Monad (RefT s m) where
 instance MonadTrans (RefT s) where
   lift = RefT
 
-newtype RefRef s a = RefRef (IORef (Box a))
+newtype RefRef s a = RefRef { unRefRef ∷ IORef (Box a) }
 
 data Box a = Box { unBox ∷ a }
 
@@ -227,3 +228,23 @@ instance (Monoid w, MonadRef p m) ⇒ MonadRef p (WriterT w m) where
   unsafeIOToRef    = lift . unsafeIOToRef
   maybeUnsafePerformRef = withUnsafePerformRef (\next →
     next . liftM fst . runWriterT)
+
+---
+--- Unsafe reading of references
+---
+
+class UnsafeReadRef p where
+  unsafeReadRef ∷ p a → a
+
+instance UnsafeReadRef IORef where
+  unsafeReadRef = unsafePerformRef . readIORef
+
+instance UnsafeReadRef (STRef s) where
+  unsafeReadRef = unsafePerformRef . readSTRef
+
+instance UnsafeReadRef TVar where
+  unsafeReadRef = unsafePerformRef . readTVar
+
+instance UnsafeReadRef (RefRef s) where
+  unsafeReadRef = unBox . unsafeReadRef . unRefRef
+
