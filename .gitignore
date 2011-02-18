@@ -1,0 +1,5 @@
+ihmx
+*.hi
+*.o
+.svn
+.*sw?
