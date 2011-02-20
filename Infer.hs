@@ -66,8 +66,8 @@
 module Infer (
   TV, TypeR,
   MonadU(..),
-  Constraint(..),
-  infer0, infer,
+  -- Constraint(..),
+  -- infer0, infer,
 
   -- * Debugging
   unsafeReadTV, trace,
@@ -144,6 +144,7 @@ instance Ftv (TV s) (TV s) where
 --- A unification monad
 ---
 
+{-
 class (Functor m, Applicative m, Monad m, Ord (TV s), Ppr (TV s)) ⇒
       MonadU s m | m → s where
   writeTV  ∷ TV s → Type (TV s) → m ()
@@ -157,9 +158,24 @@ class (Functor m, Applicative m, Monad m, Ord (TV s), Ppr (TV s)) ⇒
   --
   newTVTy  = liftM fvTy newTV
   ftv      = ftvM where ?deref = readTV
+  -}
+
+class (Functor m, Applicative m, Monad m, Ord tv, Ppr tv) ⇒
+      MonadU tv m | m → tv where
+  writeTV  ∷ tv → Type tv → m ()
+  readTV   ∷ tv → m (Maybe (Type tv))
+  newTV    ∷ m tv
+  newTVTy  ∷ m (Type tv)
+  ftv      ∷ Ftv a tv ⇒ a → m [tv]
+  -- Unsafe operations:
+  unsafePerformU ∷ m a → a
+  unsafeIOToU    ∷ IO a → m a
+  --
+  newTVTy  = liftM fvTy newTV
+  ftv      = ftvM where ?deref = readTV
 
 -- | Fully dereference a sequence of TV indirections
-deref ∷ MonadU r m ⇒ TypeR r → m (TypeR r)
+deref ∷ MonadU r m ⇒ Type r → m (Type r)
 deref t0@(VarTy (FreeVar tv)) = do
   mt ← readTV tv
   case mt of
@@ -168,9 +184,10 @@ deref t0@(VarTy (FreeVar tv)) = do
 deref t0 = return t0
 
 -- | Fully dereference a type
-derefAll ∷ MonadU r m ⇒ TypeR r → m (TypeR r)
+derefAll ∷ MonadU r m ⇒ Type r → m (Type r)
 derefAll = foldType QuaTy bvTy fvTy ConTy where ?deref = readTV
 
+{-
 ---
 --- Implementations of MonadU
 ---
@@ -217,12 +234,13 @@ type U a = ∀ s m. MonadRef s m ⇒ UT s m a
 
 runU ∷ U a → Either String a
 runU m = runST (runErrorT (runUT m))
+-}
 
 ---
 --- Abstract constraints
 ---
 
-class (Ftv c (TV r), Monoid c) ⇒ Constraint c r | c → r where
+class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
   -- | The trivial constraint
   (⊤)        ∷ c
   (⊤)        = mempty
@@ -230,9 +248,9 @@ class (Ftv c (TV r), Monoid c) ⇒ Constraint c r | c → r where
   (⋀)        ∷ c → c → c
   (⋀)        = mappend
   -- | A subtype constraint
-  (≤)        ∷ TypeR r → TypeR r → c
+  (≤)        ∷ Type r → Type r → c
   -- | A subtype constraint in the given variance
-  relate     ∷ Variance → TypeR r → TypeR r → c
+  relate     ∷ Variance → Type r → Type r → c
   relate v τ τ' = case v of
     Covariant     → τ ≤ τ'
     Contravariant → τ' ≤ τ
@@ -241,8 +259,8 @@ class (Ftv c (TV r), Monoid c) ⇒ Constraint c r | c → r where
   --
   -- | Generalize a type under a constraint and environment,
   --   given whether the the value restriction is satisfied or not
-  gen        ∷ (MonadU r m, Ftv γ (TV r)) ⇒
-               Bool → c → γ → TypeR r → m (TypeR r, c)
+  gen        ∷ (MonadU r m, Ftv γ r) ⇒
+               Bool → c → γ → Type r → m (Type r, c)
 
 infixr 4 ⋀
 infix  5 ≤
@@ -253,7 +271,7 @@ infix  5 ≤
 --   variables.  Otherwise, if given a comparison on two different
 --   type variables, we return them as a pair.
 (~≤~) ∷ (Constraint c r, MonadU r m) ⇒
-        TypeR r → TypeR r → m (Either (c, [TV r]) (TV r, TV r))
+        Type r → Type r → m (Either (c, [r]) (r, r))
 τ0 ~≤~ τ0' = do
   τ1  ← deref τ0
   τ1' ← deref τ0'
@@ -291,9 +309,10 @@ infix  5 ≤
 --- Abstract inference
 ---
 
-type Γ r = [[TypeR r]]
-type Δ r = Map.Map Name (TypeR r)
+type Γ r = [[Type r]]
+type Δ r = Map.Map Name (Type r)
 
+{-
 check ∷ String → IO (Type String)
 check = showInfer . read
 
@@ -318,10 +337,11 @@ infer0 γ e = do
   (τ, c)  ← infer mempty γ e
   (τ', _) ← gen (syntacticValue e) (c ∷ SubtypeConstraint r) γ τ
   return τ'
+  -}
 
 -- | To infer a type and constraint for a term
 infer ∷ (MonadU r m, Constraint c r) ⇒
-        Δ r → Γ r → Term Empty → m (TypeR r, c)
+        Δ r → Γ r → Term Empty → m (Type r, c)
 infer δ γ e0 = case e0 of
   VarTm (FreeVar ff)            → elimEmpty ff
   VarTm (BoundVar i j _)        → do
@@ -344,7 +364,7 @@ infer δ γ e0 = case e0 of
   _ → fail $ "Not handled: " ++ show e0
 
 -- | Instantiate a prenex quantifier
-inst ∷ MonadU r m ⇒ TypeR r → m (TypeR r)
+inst ∷ MonadU r m ⇒ Type r → m (Type r)
 inst σ0 = do
   σ ← deref σ0
   case σ of
@@ -359,7 +379,7 @@ inst σ0 = do
 
 newtype SubtypeConstraint r
   = SC {
-      unSC ∷ [(TypeR r, TypeR r)]
+      unSC ∷ [(Type r, Type r)]
     }
   deriving (Show)
 
@@ -368,10 +388,10 @@ instance Monoid (SubtypeConstraint r) where
   mconcat     = SC . concat . map unSC
   mappend c d = mconcat [c, d]
 
-instance Ftv (SubtypeConstraint r) (TV r) where
+instance Ord r ⇒ Ftv (SubtypeConstraint r) r where
   ftvTree = ftvTree . unSC
 
-instance Constraint (SubtypeConstraint r) r where
+instance (Show r, Tv r) ⇒ Constraint (SubtypeConstraint r) r where
   τ ≤ τ' = SC [(τ, τ')]
   --
   -- Generalization proceeds in several steps:
@@ -449,7 +469,7 @@ instance Constraint (SubtypeConstraint r) r where
       --
       -- Given a list of pairs, build the graph
       buildGraph pairs =
-        snd . NM.run (Gr.empty ∷ Gr (TV r) ()) $ do
+        snd . NM.run (Gr.empty ∷ Gr r ()) $ do
           NM.insMapNodesM (map fst pairs)
           NM.insMapNodesM (map snd pairs)
           NM.insMapEdgesM [ (α, α', ()) | (α, α') ← pairs ]
@@ -586,6 +606,7 @@ labComponents = componentsWith Gr.labNode'
   componentsWith ∷ Gr.Graph gr ⇒ DFS.CFun a b c → gr a b → [[c]]
   componentsWith = map preorder <$$> udffWith'
 
+{-
 ---
 --- Implementation of simple generalization
 ---
@@ -1659,6 +1680,7 @@ inferFnTests = T.test
 --- Debugging
 ---
 
+-}
 -- | Super sketchy!
 unsafeReadTV ∷ TV s → Maybe (TypeR s)
 unsafeReadTV TV { tvRef = r } = unsafeReadRef r
