@@ -24,6 +24,7 @@ import Control.Monad.ST (runST)
 import qualified Data.Char as Char
 import qualified Data.List as List
 import qualified Data.Map  as Map
+import qualified Data.Set  as Set
 import qualified Data.STRef as ST
 import Text.Parsec hiding ((<|>), many)
 import Text.Parsec.Token
@@ -170,7 +171,7 @@ fvTy ∷ a → Type a
 fvTy  = VarTy . FreeVar
 
 t1 ↦ t2 = ConTy "→" [t1, t2]
-infixr 4 ↦
+infixr 6 ↦
 
 -- | A type annotation. The list of 'Name's records the free
 --   type variables in the 'Type'.
@@ -395,7 +396,7 @@ closeWith = closeWithNames []
 -- | Add the given quantifier while binding the given list of variables
 closeWithNames ∷ Eq a ⇒ [Perhaps Name] → Quant → [a] → Type a → Type a
 closeWithNames _   _ []  ρ = ρ
-closeWithNames pns q tvs ρ = QuaTy q pns' (closeTy 0 tvs ρ)
+closeWithNames pns q tvs ρ = standardizeType (QuaTy q pns' (closeTy 0 tvs ρ))
   where pns' = take (length tvs) (pns ++ repeat Nope)
 
 -- | @substTy τ' α 't@ substitutes @τ'@ for free variable @α@ in @τ@.
@@ -488,6 +489,9 @@ class Ord v ⇒ Ftv a v | a → v where
   ftvV     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Map.Map v Variance)
   -- | To get a map from free type variables to a list of all their
   --   occurrences' variances.
+  ftvSet   ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Set.Set v)
+  -- | To get a map from free type variables to a list of all their
+  --   occurrences' variances.
   ftvVs    ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Map.Map v [Variance])
   -- | To get a list of the free type variables in a type (with no repeats).
   ftvM     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m [v]
@@ -500,6 +504,7 @@ class Ord v ⇒ Ftv a v | a → v where
                  = foldFtvTree each zero `liftM` ftvTree a
   ftvList        = ftvFold (curry (:)) []
   ftvV           = ftvFold (Map.insertWith (+)) Map.empty
+  ftvSet         = ftvFold (const . Set.insert) Set.empty
   ftvVs          = ftvFold (\v a → Map.insertWith (++) v [a]) Map.empty
   ftvM a         = liftM (ordNub . map fst) (ftvList a)
   ftvS           = runIdentity . ftvM where ?deref = const (return Nothing)
