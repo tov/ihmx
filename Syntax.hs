@@ -535,8 +535,8 @@ instance (Ftv a v, Ftv b v) ⇒ Ftv (Either a b) v where
   ftvTree = either ftvTree ftvTree
 
 -- | A class for type variables (which are free in themselves).
-class    Ftv v v ⇒ Tv v
-instance Ftv v v ⇒ Tv v
+class    (Ftv v v, Show v) ⇒ Tv v
+instance (Ftv v v, Show v) ⇒ Tv v
 
 ---
 --- Unfolds for syntax

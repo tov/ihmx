@@ -4,6 +4,10 @@
 module Util (
   module Perhaps,
   module TupleClass,
+  module Control.Arrow,
+  module Control.Applicative,
+  module Control.Monad,
+  module Data.Monoid,
   findLastIndex, listNth,
   allM, whenM, unlessM, foldr2, ordNub,
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
@@ -13,8 +17,11 @@ module Util (
 import Perhaps
 import TupleClass
 
-import Control.Monad
+import Control.Arrow
 import Control.Applicative
+import Control.Monad
+import Data.Monoid
+
 import qualified Data.Set as Set
 
 findLastIndex :: (a -> Bool) -> [a] -> Maybe Int
