@@ -13,7 +13,7 @@ module Constraint {-(
   Constraint(..), (~≤~),
   -- * An implementation
   SubtypeConstraint,
-) -}where
+) -} where
 
 import qualified Data.List  as List
 import qualified Data.Map   as Map
@@ -89,8 +89,8 @@ tyConOrder ∷ Gr String ()
 (tyConNode, tyConOrder) = (nmLab nm, TransClos.trc g)
   where
     (_, (nm, g)) = NM.run Gr.empty $ do
-      NM.insMapNodesM [ "U", "R", "A", "L" ]
-      NM.insMapEdgesM [ ("U","R",()), ("U","A",()), ("R","L",()), ("A","L",()) ]
+      NM.insMapNodesM ["U", "R", "A", "L"]
+      NM.insMapEdgesM [("U","R",()), ("U","A",()), ("R","L",()), ("A","L",())]
       return ()
 
 -- | Is one type constructor less than or equal to another?
@@ -285,15 +285,19 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
       eliminateExistentials nm (g, γftv, τftv) = do
         cftv ← ftvSet (map snd (Gr.labNodes g))
         let extvs = cftv Set.\\ (γftv `Set.union` Map.keysSet τftv)
+        trace ("existentials are:", extvs)
         return (Set.fold (eliminateNode nm) g extvs)
         where
       -- Given a node label and a graph, remove the node, connecting
       -- all its predecessors to all its successors.
       eliminateNode nm α g =
-        Gr.insEdges [ (n1, n2, ())
-                    | n1 ← Gr.pre g node, n1 /= node
-                    , n2 ← Gr.suc g node, n2 /= node, n2 /= n1 ]
-                    (Gr.delNode node g)
+        case (Gr.pre g node, Gr.suc g node) of
+          (preds@(_:_), succs@(_:_)) →
+            Gr.insEdges [ (n1, n2, ())
+                        | n1 ← preds, n1 /= node
+                        , n2 ← succs, n2 /= node, n2 /= n1 ]
+                        (Gr.delNode node g)
+          _                          → g
         where node = nmLab nm (VarAt α)
       --
       -- Remove once-appearing type variables if covariant-source or
@@ -547,4 +551,29 @@ OPTIMIZATIONS FROM SIMONET 2003
   ∀ α ≤ C. α × α → 1
     C × C → 1
     A × B → 1
+-}
+
+{-
+("gen (begin)",
+ [(8 → 9 → 8, 7 → 10),
+  (11 → List 11 → List 11, 7 → 12),
+  (13 → List 13 → List 13, A → 14),
+  (14,List 15 → 16), (12,16 → 17),
+  (10, 17 → 18)],
+ 7 → 18)
+
+("gen (atomize)",[(VarAt 20,VarAt 18),(VarAt 31,VarAt 32),(VarAt
+30,VarAt 31),(VarAt 24,VarAt 30),(VarAt 29,VarAt 23),(VarAt
+28,VarAt 29),(VarAt 15,VarAt 27),(VarAt 13,VarAt 28),(VarAt
+27,VarAt 13),(ConAt "A",VarAt 13),(VarAt 11,VarAt 24),(VarAt
+23,VarAt 11),(VarAt 7,VarAt 11),(VarAt 8,VarAt 20),(VarAt 7,VarAt
+8)],fromList [],fromList [(7,[Contravariant]),(18,[Covariant])],7 →
+18)
+
+("existentials are:",fromList [8,11,13,15,20,23,24,27,28,29,30,31,32])
+
+("gen (existentials)",SC {unSC = [(7,18)]},fromList [],fromList
+[(7,[Contravariant]),(18,[Covariant])],7 → 18)
+
+
 -}
