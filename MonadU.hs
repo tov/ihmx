@@ -41,28 +41,41 @@ import MonadRef
 --- A unification monad
 ---
 
-class (Functor m, Applicative m, Monad m, Ord tv, Ppr tv) ⇒
+class (Functor m, Applicative m, Monad m, Tv tv) ⇒
       MonadU tv m | m → tv where
-  writeTV  ∷ tv → Type tv → m ()
-  readTV   ∷ tv → m (Maybe (Type tv))
-  newTV    ∷ m tv
-  newTVTy  ∷ m (Type tv)
-  ftv      ∷ Ftv a tv ⇒ a → m [tv]
+  writeTV   ∷ tv → Type tv → m ()
+  readTV    ∷ tv → m (Maybe (Type tv))
+  newTV     ∷ m tv
+  newTVTy   ∷ m (Type tv)
+  -- | Allows re-writing a type variable, which 'writeTV' doesn't
+  updateTV  ∷ tv → Type tv → m ()
+  ftv       ∷ Ftv a tv ⇒ a → m [tv]
   -- Unsafe operations:
   unsafePerformU ∷ m a → a
   unsafeIOToU    ∷ IO a → m a
   --
   newTVTy  = liftM fvTy newTV
   ftv      = ftvM where ?deref = readTV
+  writeTV tv t = do
+    trace ("write", tv, t)
+    old ← readTV tv
+    case old of
+      Just _  → fail "BUG: Attempted to write TV more than once"
+      Nothing → updateTV tv t
 
--- | Fully dereference a sequence of TV indirections
+-- | Fully dereference a sequence of TV indirections, with path
+--   compression
 deref ∷ MonadU tv m ⇒ Type tv → m (Type tv)
-deref t0@(VarTy (FreeVar tv)) = do
-  mt ← readTV tv
-  case mt of
-    Nothing → return t0
-    Just t1 → deref t1
-deref t0 = return t0
+deref = liftM fst . loop where
+  loop τ0@(VarTy (FreeVar α)) = do
+    mτ ← readTV α
+    case mτ of
+      Nothing → return (τ0, False)
+      Just τ1 → do
+        (τ, b) ← loop τ1
+        when b (updateTV α τ)
+        return (τ, True)
+  loop τ0 = return (τ0, False)
 
 -- | Fully dereference a type
 derefAll ∷ MonadU tv m ⇒ Type tv → m (Type tv)
@@ -127,12 +140,7 @@ instance MonadTrans (UT s) where
   lift = UT . lift
 
 instance MonadRef s m ⇒ MonadU (TV s) (UT s m) where
-  writeTV TV { tvId = i, tvRef = r } t = do
-    old ← lift (readRef r)
-    trace ("write", i, t)
-    case old of
-      Just _  → fail "BUG: Attempted to write TV more than once"
-      Nothing → lift (writeRef r (Just t))
+  updateTV TV { tvRef = r } t = lift (writeRef r (Just t))
   --
   newTV = do
     i ← UT get

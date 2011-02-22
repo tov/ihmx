@@ -132,7 +132,7 @@ type Name = String
 data Var a
   = BoundVar !Int !Int (Perhaps Name)
   | FreeVar a
-  deriving (Eq, Functor)
+  deriving (Eq, Ord, Functor)
 
 boundVar ∷ Int → Int → Name → Var a
 boundVar ix jx n = BoundVar ix jx (Here n)
@@ -152,13 +152,13 @@ data Type a
   = QuaTy Quant [Perhaps Name] (Type a)
   | VarTy (Var a)
   | ConTy Name [Type a]
-  deriving (Eq, Functor)
+  deriving (Eq, Ord, Functor)
 
 -- | Quantifiers
 data Quant
   = AllQu
   | ExQu
-  deriving Eq
+  deriving (Eq, Ord)
 
 allTy, exTy ∷ Int → Type a → Type a
 allTy j = QuaTy AllQu (take j (map Here tvNames))
@@ -535,8 +535,8 @@ instance (Ftv a v, Ftv b v) ⇒ Ftv (Either a b) v where
   ftvTree = either ftvTree ftvTree
 
 -- | A class for type variables (which are free in themselves).
-class    (Ftv v v, Show v) ⇒ Tv v
-instance (Ftv v v, Show v) ⇒ Tv v
+class    (Ftv v v, Show v, Ppr v) ⇒ Tv v
+instance (Ftv v v, Show v, Ppr v) ⇒ Tv v
 
 ---
 --- Unfolds for syntax

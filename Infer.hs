@@ -1,18 +1,7 @@
 {-#
   LANGUAGE
-    EmptyDataDecls,
-    ExistentialQuantification,
-    FlexibleContexts,
-    FlexibleInstances,
-    FunctionalDependencies,
-    GeneralizedNewtypeDeriving,
     ImplicitParams,
-    KindSignatures,
-    MultiParamTypeClasses,
-    ParallelListComp,
-    RankNTypes,
     ScopedTypeVariables,
-    TupleSections,
     UnicodeSyntax
   #-}
 {- |
@@ -65,12 +54,16 @@
 -}
 module Infer (
   infer0, infer,
-  --
+  -- * Testing
+  -- ** Interactive testing
   check, showInfer,
+  -- ** Unit tests
+  inferTests, tests,
 ) where
 
 import qualified Data.Map   as Map
--- import qualified Test.HUnit as T
+import qualified Test.HUnit as T
+import Control.Monad.RWS    as RWS
 
 import MonadU
 import Constraint
@@ -81,43 +74,57 @@ import Util
 --- Inference
 ---
 
-type Γ r = [[Type r]]
-type Δ r = Map.Map Name (Type r)
+type Γ tv = [[Type tv]]
+type Δ tv = Map.Map Name (Type tv)
 
 -- | Infer the type of a term, given a type context
-infer0 ∷ forall m r. (MonadU r m, Show r, Tv r) ⇒
-         Γ r → Term Empty → m (Type r)
+infer0 ∷ forall m tv. (MonadU tv m, Show tv, Tv tv) ⇒
+         Γ tv → Term Empty → m (Type tv)
 infer0 γ e = do
   (τ, c)  ← infer mempty γ e
-  (τ', _) ← gen (syntacticValue e) (c ∷ SubtypeConstraint r) γ τ
+  (τ', _) ← gen (syntacticValue e) (c ∷ SubtypeConstraint tv) γ τ
   return τ'
 
 -- | To infer a type and constraint for a term
-infer ∷ (MonadU r m, Constraint c r) ⇒
-        Δ r → Γ r → Term Empty → m (Type r, c)
+infer ∷ (MonadU tv m, Constraint c tv) ⇒
+        Δ tv → Γ tv → Term Empty → m (Type tv, c)
 infer δ γ e0 = case e0 of
+  AbsTm π e                     → do
+    α ← newTVTy
+    (δ', c1, τs) ← inferPatt δ π α
+    (τ2, c2)     ← infer δ' (τs:γ) e
+    return (α ↦ τ2, c1 ⋀ c2)
+  LetTm rec π e1 e2    → do
+    α ← newTVTy
+    (δ', c0, τs0) ← inferPatt δ π α
+    (τ1, c1)      ← infer δ' (if rec then τs0:γ else γ) e1
+    let genLoop []     σs c = return (reverse σs, c)
+        genLoop (τ:τs) σs c = do
+          (σ, c') ← gen (syntacticValue e1) c ((τs++σs):γ) τ
+          genLoop τs (σ:σs) c'
+    (σs, c1') ← genLoop τs0 [] (c0 ⋀ c1 ⋀ τ1 ≤ α ⋀
+                                if rec then α ≤ τ1 else (⊤))
+    (τ2, c2)  ← infer δ' (σs:γ) e2
+    return (τ2, c1' ⋀ c2)
   VarTm (FreeVar ff)            → elimEmpty ff
   VarTm (BoundVar i j _)        → do
     τ ← inst (γ !! i !! j)
     return (τ, (⊤))
-  AbsTm (VarPa _) e             → do
-    α      ← newTVTy
-    (τ, c) ← infer δ ([α]:γ) e
-    return (α ↦ τ, c)
+  ConTm n es                    → do
+    (τs, cs) ← unzip <$> mapM (infer δ γ) es
+    return (ConTy n τs, mconcat cs)
   AppTm e1 e2                   → do
     (τ1, c1) ← infer δ γ e1
     (τ2, c2) ← infer δ γ e2
     α        ← newTVTy
     return (α, c1 ⋀ c2 ⋀ τ1 ≤ τ2 ↦ α)
-  LetTm False (VarPa _) e1 e2   → do
-    (τ1, c1) ← infer δ γ e1
-    (σ, c1') ← gen (syntacticValue e1) c1 γ τ1
-    (τ2, c2) ← infer δ ([σ]:γ) e2
-    return (τ2, c1' ⋀ c2)
-  _ → fail $ "Not handled: " ++ show e0
+  AnnTm e annot                 → do
+    (δ', τ', _) ← instAnnot δ annot
+    (τ, c)      ← infer δ' γ e
+    return (τ', c ⋀ τ ≤ τ')
 
 -- | Instantiate a prenex quantifier
-inst ∷ MonadU r m ⇒ Type r → m (Type r)
+inst ∷ MonadU tv m ⇒ Type tv → m (Type tv)
 inst σ0 = do
   σ ← deref σ0
   case σ of
@@ -125,6 +132,48 @@ inst σ0 = do
       αs ← replicateM (length ns) newTVTy
       return (openTy 0 αs τ)
     τ → return τ
+
+-- | Given a type variable environment and a pattern, compute an updated
+--   type variable environment, a type for the whole pattern, a
+--   constraint, and a type for each variable bound by the pattern.
+inferPatt ∷ (MonadU tv m, Constraint c tv) ⇒
+           Δ tv → Patt Empty → Type tv →
+           m (Δ tv, c, [Type tv])
+inferPatt δ0 π0 τ0 = do
+  (τs, δ, c) ← runRWST (loop π0 τ0) () δ0
+  return (δ, c, τs)
+  where
+  loop (VarPa _)       τ = return [τ]
+  loop WldPa           _ = return []
+  loop (ConPa name πs) τ = do
+    αs ← replicateM (length πs) (lift newTVTy)
+    tell (τ ≤ ConTy name αs)
+    concat <$> zipWithM loop πs αs
+  loop (AnnPa π annot) τ = do
+    δ ← get
+    (δ', τ', _) ← lift (instAnnot δ annot)
+    put δ'
+    tell (τ ≤ τ')
+    loop π τ'
+
+-- | Given a tyvar environment (mapping some-bound names to tyvars) and
+--   an annotation, create new universal type variables for any new
+--   some-bound names in the annotation and update the environment
+--   accordingly. Return the annotation instantiated to a type and the
+--   list of new universal tyvars.
+instAnnot ∷ MonadU tv m ⇒
+            Δ tv → Annot →
+            m (Δ tv, Type tv, [Type tv])
+instAnnot δ (Annot names σ0) = do
+  αs ← mapM eachName names
+  let δ' = foldr2 insert δ names αs
+      σ  = totalSubst names αs =<< σ0
+  trace ("instAnnot", δ, δ', σ, αs)
+  return (δ', σ, αs)
+  where
+    insert ('_':_) = const id
+    insert k       = Map.insert k
+    eachName name  = maybe newTVTy return (Map.lookup name δ)
 
 ---
 --- Testing functions
@@ -478,62 +527,6 @@ inferApp δ γ σ0 e1n = do
     then inferApp δ γ σ (drop (length σ1m) e1n)
     else return σ
 
--- | Given a type variable environment, a pattern, and maybe a
---   type annotation, compute an updated type variable environment,
---   a type for the whole pattern, a type for each variable bound by
---   the pattern, and a list of type variables that should stay as
---   monotypes.
---
--- Postcondition:
---   If
---     (δ', σ, σs, αs) ← instPatt δ π (Just σ0)
---   then
---     σ0 <: σ
-instPatt ∷ MonadU s m ⇒
-           Δ s → Patt Empty → Maybe (TypeR s) ->
-           m (Δ s, TypeR s, [TypeR s], [TypeR s])
-instPatt δ0 π0 mσ0 = do
-  trace ("instPatt {", δ0, π0, mσ0)
-  ((σ, σs), δ, αs) ← runRWST (loop π0 mσ0) () δ0
-  αs' ← filterM isTauU αs
-  trace ("} ttaPtsni", δ, σ, σs, αs')
-  return (δ, σ, σs, αs')
-  where
-  loop π mσ = case π of
-    VarPa          → do
-      σ ← instM mσ
-      return (σ, [σ])
-    WldPa          → do
-      σ ← instM mσ
-      return (σ, [])
-    ConPa c πs     → do
-      σ ← instM mσ
-      αs ← lift $ replicateM (length πs) (newTVTy Universal)
-      tell αs
-      lift $ σ <: ConTy c αs
-      (_, σss) ← unzip <$> zipWithM loop πs (Just <$> αs)
-      return (σ, concat σss)
-    AnnPa π' annot → do
-      σi ← instA annot
-      σo ← case mσ of
-        Nothing → return σi
-        Just σo → do lift (σo <: σi); return σo
-      (_, σs) ← loop π' (Just σi)
-      return (σo, σs)
-  -- make a new univar if given nothing
-  instM (Just σ) = return σ
-  instM Nothing  = do
-    α ← lift (newTVTy Universal)
-    tell [α]
-    return α
-  -- instantiate an annotation:
-  instA annot = do
-    δ ← get
-    (δ', σ, αs) ← lift (instAnnot δ annot)
-    put δ'
-    tell αs
-    return σ
-
 -- | Is the pattern annotated everywhere?
 fullyAnnotatedPatt ∷ Patt Empty → Bool
 fullyAnnotatedPatt VarPa        = False
@@ -553,25 +546,6 @@ extractPattAnnot π0 = do
   loop (AnnPa _ (Annot ns σ)) = do
     modify (`List.union` ns)
     return σ
-
--- | Given a tyvar environment (mapping some-bound names to tyvars) and
---   an annotation, create new universal type variables for any new
---   some-bound names in the annotation and update the environment
---   accordingly. Return the annotation instantiated to a type and the
---   list of new universal tyvars.
-instAnnot ∷ MonadU s m ⇒
-            Δ s → Annot →
-            m (Δ s, TypeR s, [TypeR s])
-instAnnot δ (Annot names σ0) = do
-  αs ← mapM eachName names
-  let δ' = foldr2 insert δ names αs
-      σ  = totalSubst names αs =<< σ0
-  trace ("instAnnot", δ, δ', σ, αs)
-  return (δ', σ, αs)
-  where
-    insert ('_':_) = const id
-    insert k       = Map.insert k
-    eachName name  = maybe (newTVTy Universal) return (Map.lookup name δ)
 
 -- | Generalize type variables not found in the context. Generalize
 --   universal tyvars into universal quantifiers and existential tyvars
@@ -655,171 +629,32 @@ i a = do
   either putStrLn print $
     showInfer (read a)
 
+-}
+
 tests, inferTests ∷ IO ()
 
 inferTests = tests
 tests      = do
   syntaxTests
-  T.runTestTT unifyAnnotTests
-  T.runTestTT subsumeAnnotTests
   T.runTestTT inferFnTests
   return ()
-
-unifyAnnotTests ∷ T.Test
-unifyAnnotTests = T.test
-  [ "α"                 <=> "β"
-  , "α"                 <=> "C"
-  , "α"                 <=> "C → C"
-  , "α → α"             <=> "C → C"
-  , "α → β"             <=> "C → D"
-  , "α → α"             <=> "β → β"
-  , "α → α → β"         <=> "α → β → β"
-  , "∀ α. α → α"        <=> "∀ α. α → α"
-  , "∃ α. α → α"        <=> "∃ α. α → α"
-  , "∀ α. α → β"        <=> "∀ α β γ. β → δ"
-  , "∃ α. α → β"        <=> "∃ α β γ. β → δ"
-  , "C"                 <!> "D"
-  , "α → α"             <!> "C → D"
-  , "A β γ β γ"         <!> "A B C α α"
-  -- insuffiently polymorphic:
-  , "∀ α. α → β"        <!> "∀ α. α → α"
-  , "∃ α. α → β"        <!> "∃ α. α → α"
-  -- doesn't match:
-  , "∀ α. α → α"        <!> "∃ α. α → α"
-  -- occurs check:
-  , "α → A → α"         <!> "β → β"
-  ]
-  where
-  a <=> b = T.assertBool (a ++ " <=> " ++ b)
-              (either f t (showUnifyAnnot (nr a) (nr b)))
-  a <!> b = T.assertBool (a ++ " <!> " ++ b)
-              (either t f (showUnifyAnnot (nr a) (nr b)))
-  nr = normalizeAnnot . read
-  f = const False
-  t = const True
-
-subsumeAnnotTests ∷ T.Test
-subsumeAnnotTests = T.test
-  [ "α" ≥ "β"
-  , "α" ≥ "C"
-  , "C" ≥ "α"
-  , "C → C" ≥ "∀ α. α → α"
-  , "C → C" ≥ "∀ α β. α → β"
-  , "C → D" /≥ "∀ α. α → α"
-  , "C → D" ≥ "∀ α β. α → β"
-  , "∀ α. α → α" ≥ "∀ α. α → α"
-  , "∀ α. α → α" ≥ "∀ α β. α → β"
-  , "∀ α. α → C" ≥ "∀ α β. α → β"
-  , "∀ α. C → α" ≥ "∀ α β. α → β"
-  , "∀ α. α → α" /≥ "α → α"
-  , "β → γ" ≥ "∀ α. α → α"
-  , "(∀ α. C α) → (∀ α. C α)" ≥ "∀ α. α → α"
-  , "∀ β. (∀ α. C α β) → (∀ α. C α β)" ≥ "∀ α. α → α"
-  , "∀ β γ. (∀ α. C α β) → (∀ α. C α γ)" /≥ "∀ α. α → α"
-  , "(∀ α. C α β) → (∀ α. C α γ)" ≥ "∀ α. α → α"
-  , "(∀ α. C α β β D) → (∀ α. C α γ D γ)" ≥ "∀ α. α → α"
-  , "(∀ α. C α β β D) → (∀ α. C α γ E γ)" /≥ "∀ α. α → α"
-  , "∀ β. β" ≤ "∀ α. α → Int"
-  , "∀ β. β" /≥ "∀ α. α → Int"
-  -- existentials:
-  , "C → C" ≤ "∃ α. α → α"
-  , "C → C" ≤ "∃ α β. α → β"
-  , "C → D" /≤ "∃ α. α → α"
-  , "C → D" ≤ "∃ α β. α → β"
-  , "∃ α. α → α" ≤ "∃ α. α → α"
-  , "∃ α. α → α" ≤ "∃ α β. α → β"
-  , "∃ α. α → C" ≤ "∃ α β. α → β"
-  , "∃ α. C → α" ≤ "∃ α β. α → β"
-  , "∃ α. α → α" ≤ "α → α" -- weird?
-  , "∃ α. α → α" /≤ "A → A"
-  , "β → γ" ≤ "∃ α. α → α"
-  , "(∀ α. C α) → (∀ α. C α)" ≤ "∃ α. α → α"
-  , "∃ β. (∀ α. C α β) → (∀ α. C α β)" ≤ "∃ α. α → α"
-  , "∃ β γ. (∀ α. C α β) → (∀ α. C α γ)" /≤ "∃ α. α → α"
-  , "(∀ α. C α β) → (∀ α. C α γ)" ≤ "∃ α. α → α"
-  , "(∀ α. C α β β D) → (∀ α. C α γ D γ)" ≤ "∃ α. α → α"
-  , "(∀ α. C α β β D) → (∀ α. C α γ E γ)" /≤ "∃ α. α → α"
-  -- universal/existential interaction
-  , "∀ α. C α" ≤  "∃ α. C α"
-  , "∀ α. C α" /≥ "∃ α. C α"
-  , "∀α. ∃β. C α β" ≤ "∃β. C α β"
-  -- quantifiers don't commute
-  , "∀α. ∃β. C α β" /≤ "∃β. ∀α. C α β"
-  , "∃β. ∀α. C α β" /≤ "∀α. ∃β. C α β"
-  -- deep subsumption
-  {-
-  , "A → (∀α. L α)"   ≤ "A → L B"
-  , "L B → A"         ≤ "(∀α. L α) → A"
-  , "A → (∀α. L α)"  /≥ "A → L B"
-  , "L B → A"        /≥ "(∀α. L α) → A"
-  , "Maybe (∀α. L α)" ≤ "Maybe (L B)"
-  , "Ref (∀α. L α)"  /≤ "Ref (L B)"
-  , "Ref (∀α. L α)"  /≥ "Ref (L B)"
-  , "A → (∃α. L α)"   ≥ "A → L B"
-  , "L B → A"         ≥ "(∃α. L α) → A"
-  , "A → (∃α. L α)"  /≤ "A → L B"
-  , "L B → A"        /≤ "(∃α. L α) → A"
-  , "Maybe (∃α. L α)" ≥ "Maybe (L B)"
-  , "Ref (∃α. L α)"  /≥ "Ref (L B)"
-  , "Ref (∃α. L α)"  /≤ "Ref (L B)"
-  , "((∀α. A α) → ∃β. B β) → ∀γ. C γ"
-                      ≤ "(A X → B Y) → C Z"
-  -}
-  -- don't allow existential hoisting
-  , "∀α. α → (∃β. List β)" /≤ "∀α ∃β. α → List β"
-  , "∀α. α → (∃β. β)"       ≤ "∀α ∃γ. α → γ" -- not actually hoisting
-  ]
-  where
-  a ≥ b  = T.assertBool (a ++ " ≥ " ++ b)
-              (either f t (showSubsumeAnnot (nr a) (nr b)))
-  a /≥ b = T.assertBool (a ++ " /≥ " ++ b)
-              (either t f (showSubsumeAnnot (nr a) (nr b)))
-  a ≤ b  = b ≥ a
-  a /≤ b = b /≥ a
-  nr = normalizeAnnot . read
-  f = const False
-  t = const True
 
 inferFnTests ∷ T.Test
 inferFnTests = T.test
   [ "A"         -: "A"
   , "A B C"     -: "A B C"
-  , "λx.x"     -: "∀ α. α → α"
-  -- predicative vs. impredicative
-  , "λα.id id" -: "∀ α β. α → β → β"
-  , "id (id : ∀ α. α → α)"
-                -: "∀ α. α → α"
-  , "(id : (∀ α. α → α) → β) id"
-                -: "∀ α. α → α"
-  , "(id : β → (∀ α. α → α)) id"
-                -: "∀ α. α → α"
-  , "(id : (∀ α. α → α) → ∀ α. α → α) id"
-                -: "∀ α. α → α"
-  , "auto id"   -: "∀ α. α → α"
-  , "apply auto id" -: "∀ α. α → α"
+  , "λx.x"      -: "∀ α. α → α"
+  , "λa.id id"  -: "∀ α β. α → β → β"
   , "λx.choose id"
                 -: "∀ β α. β → (α → α) → α → α"
-  , "λx.(choose : (∀ α. α → α) → β → β) id"
-                -: "∀ β. β → (∀ α. α → α) → (∀ α. α → α)"
-  , "λx.choose (id : ∀ α. α → α)"
-                -: "∀ β. β → (∀ α. α → α) → (∀ α. α → α)"
-  , "λx.choose id auto"
-                -: "∀ α. α → (∀ α. α → α) → (∀ α. α → α)"
-  , "λx.choose auto id"
-                -: "∀ α. α → (∀ α. α → α) → (∀ α. α → α)"
-  , "λx.choose xauto xauto"
-                -: "∀ α β. α → (∀ γ. γ → γ) → β → β"
-  , "λx. choose nil ids"
-                -: "∀ β. β → List (∀ α. α → α)"
-  , "λx. choose ids nil"
-                -: "∀ β. β → List (∀ α. α → α)"
-  , "poly id"   -: "Pair Int Bool"
-  , "apply poly id"     -: "Pair Int Bool"
-  , "revapp id poly"    -: "Pair Int Bool"
-  , "head ids A"        -: "A"
+  , "λx.choose (id : α → α)"
+                -: "∀ α β. α → (β → β) → (β → β)"
+  {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"
+  -}
   , te "λf. P (f A) (f B)"
+  {-
   , "λx. single id" -: "∀ α β. α → List (β → β)"
   , "(single : (∀ α. α → α) → List (∀ α. α → α)) id"
                 -: "List (∀ α. α → α)"
@@ -948,9 +783,11 @@ inferFnTests = T.test
                 -: "∀ α. A α → α"
   , "λ(A x) (B y z). x y z"
                 -: "∀ α β γ. A (α → β → γ) → B α β → γ"
+  -}
   , pe "λ(A x x). B"
-  , "λ(A α (B β γ) (C δ (D e f g))). E"
+  , "λ(A a (B b c) (C d (D e f g))). E"
                 -: "∀ α β γ δ e f g. A α (B β γ) (C δ (D e f g)) → E"
+  {-
   , "λ(A α (B β γ) (C δ (D e f g))). (E α g : E m m)"
                 -: "∀ α β γ δ e f. A α (B β γ) (C δ (D e f α)) → E α α"
   , "λ(A α (B β γ)). (C α (B β γ) : C m m)"
@@ -1176,19 +1013,7 @@ inferFnTests = T.test
   , "let e : ∃α. Pair α (α → C α) = Pair Int (λx.C x) in  \
     \(λp. (snd p) (fst p)) e"
                 -: "∃α. C α"
-  ----
-  ---- Deep subsumption
-  ----
-  {-
-  , "let f = λx.x in f : (∀α. α → α) → Z → Z"
-                -: "(∀α. α → α) → Z → Z"
-  , "λ_.choose id xauto"
-                -: "∀α β. α → (∀γ. γ → γ) → β → β"
-  -- previous and next -> odd
-  , te "λ_.choose xauto id"
   -}
-  -- don't allow existential hoisting
-  -- , "λ(f : ∀α → ∃β. List β) x. f x"
   ]
   where
   a -: b = T.assertBool ("⊢ " ++ a ++ " : " ++ b)
@@ -1198,4 +1023,3 @@ inferFnTests = T.test
   pe a   = T.assertBool ("expected syntax error: " ++ a)
              (length (reads a ∷ [(Term Empty, String)]) /= 1)
 
--}
