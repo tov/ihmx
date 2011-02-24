@@ -79,11 +79,10 @@ type Δ tv = Map.Map Name (Type tv)
 
 -- | Infer the type of a term, given a type context
 infer0 ∷ forall m tv. (MonadU tv m, Show tv, Tv tv) ⇒
-         Γ tv → Term Empty → m (Type tv)
+         Γ tv → Term Empty → m (Type tv, SubtypeConstraint tv)
 infer0 γ e = do
   (τ, c)  ← infer mempty γ e
-  (τ', _) ← gen (syntacticValue e) (c ∷ SubtypeConstraint tv) γ τ
-  return τ'
+  gen (syntacticValue e) c γ τ
 
 -- | To infer a type and constraint for a term
 infer ∷ (MonadU tv m, Constraint c tv) ⇒
@@ -127,11 +126,13 @@ infer δ γ e0 = case e0 of
 inst ∷ MonadU tv m ⇒ Type tv → m (Type tv)
 inst σ0 = do
   σ ← deref σ0
-  case σ of
+  τ ← case σ of
     QuaTy AllQu ns τ → do
       αs ← replicateM (length ns) newTVTy
       return (openTy 0 αs τ)
     τ → return τ
+  trace ("inst", σ, τ)
+  return τ
 
 -- | Given a type variable environment and a pattern, compute an updated
 --   type variable environment, a type for the whole pattern, a
@@ -179,15 +180,16 @@ instAnnot δ (Annot names σ0) = do
 --- Testing functions
 ---
 
-check ∷ String → IO (Type String)
+check ∷ String → IO (Type String, String)
 check e = case showInfer (read e) of
   Left err → fail err
-  Right τ  → return τ
+  Right τc → return τc
 
-showInfer ∷ Term Empty → Either String (Type String)
+showInfer ∷ Term Empty → Either String (Type String, String)
 showInfer e = runU $ do
-  τ ← infer0 [map (fmap elimEmpty) γ0] e
-  stringifyType τ
+  (τ, c) ← infer0 [map (fmap elimEmpty) γ0] e
+  τ'     ← stringifyType τ
+  return (τ', show c)
 
 stringifyType ∷ (MonadU s m, Show s) ⇒ Type s → m (Type String)
 stringifyType = foldType QuaTy bvTy (fvTy . show) ConTy where ?deref = readTV
@@ -1017,7 +1019,9 @@ inferFnTests = T.test
   ]
   where
   a -: b = T.assertBool ("⊢ " ++ a ++ " : " ++ b)
-             (showInfer (read a) == Right (fmap elimEmpty (read b)))
+             (case showInfer (read a) of
+                Left _       → False
+                Right (τ, _) → τ == fmap elimEmpty (read b))
   te a   = T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))
   pe a   = T.assertBool ("expected syntax error: " ++ a)

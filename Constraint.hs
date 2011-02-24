@@ -32,6 +32,7 @@ import Syntax
 import MonadU
 import Util
 import Ppr
+import qualified UnionFind as UF
 
 ---
 --- Abstract constraints
@@ -410,6 +411,32 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
         let αs   = genCandidates value τftv (γftv `Set.union` cftv)
         closeWith AllQu (Set.toList αs) <$> derefAll τ
 
+data InternalSC tv gr
+  = ISC {
+      iscGraph   ∷ gr tv (),
+      iscNodeMap ∷ NM.NodeMap tv,
+      iscSkels   ∷ [(Set.Set tv, Maybe (Name, Int))]
+    }
+
+internalize ∷ (Gr.DynGraph gr, MonadU tv m) ⇒
+              SubtypeConstraint tv → m (InternalSC tv gr)
+internalize = foldM addSC (ISC Gr.empty NM.new []) . unSC where
+  addSC (ISC g0 nm0 skels0) (τ1, τ2) = do
+    α1 ← tvOf τ1
+    α2 ← tvOf τ2
+    let (g1, nm1, (node1, _)) = NM.insMapNode nm0 α1 g0
+        (g2, nm2, (node2, _)) = NM.insMapNode nm1 α2 g1
+        g3                    = Gr.insEdge (node1, node2, ()) g2
+    skels1 ← addToSkels α1 α2 skels0
+    return (ISC g3 nm2 skels1)
+  addToSkels α1 α2 skels0 = do
+    undefined
+
+
+{-
+    return (ISC g3 nm2 ([fvTy α1,fvTy α2]:skels0))
+-}
+
 {-
 g ∷ Gr Int ()
 g = Gr.insEdges [ (n,n+1,()) | n ← [1..9] ] $
@@ -456,6 +483,7 @@ labComponents = componentsWith Gr.labNode'
   componentsWith ∷ Gr.Graph gr ⇒ DFS.CFun a b c → gr a b → [[c]]
   componentsWith = map preorder <$$> udffWith'
 
+
 {-
 check "let rec f = \\(C x).f (C (f x)) in f"
 
@@ -475,7 +503,6 @@ diverges like this:
 [(5,C 9),(9,8),(7,3),(3,8),(7,4),(8,5),(4,7),(5,8),(7,4)],C 8 → 7)
 
 NEED BETTER OCCURS CHECK
-
 
 [(1, C 2), (C 1, 2)]
 [(C 3, C 2), (C C 3, 2)]

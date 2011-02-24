@@ -103,6 +103,7 @@ instance MonadTrans (RefT s) where
   lift = RefT
 
 newtype RefRef s a = RefRef { unRefRef ∷ IORef (Box a) }
+  deriving Eq
 
 data Box a = Box { unBox ∷ a }
 

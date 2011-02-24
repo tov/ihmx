@@ -35,47 +35,88 @@ import qualified Text.PrettyPrint as Ppr
 
 import Syntax
 import Ppr
+import Util
 import MonadRef
 
 ---
 --- A unification monad
 ---
 
+-- | A class for type variables and unification.
+--   Minimal definition: @newTV@, @writeTV_@, @readTV_@,
+--   @unsafePerformU#, and @unsafeIOToU@
 class (Functor m, Applicative m, Monad m, Tv tv) ⇒
       MonadU tv m | m → tv where
-  writeTV   ∷ tv → Type tv → m ()
-  readTV    ∷ tv → m (Maybe (Type tv))
+  -- | Allocate a new, empty type variable
   newTV     ∷ m tv
+  -- | Write a type into a type variable. Not meant to be used
+  --   directly by client.
+  writeTV_  ∷ tv → Type tv → m ()
+  -- | Read a type variable. Not meant to be used directly by
+  --   clients.
+  readTV_   ∷ tv → m (Maybe (Type tv))
+  -- | Get the canonical representative (root) of a tree of type
+  --   variables, and any non-tv type stored at the root, if it
+  --   exists.  Performs path compression.
+  rootTV   ∷ tv → m (tv, Maybe (Type tv))
+  rootTV α = do
+    mτ ← readTV_ α
+    case mτ of
+      Just (VarTy (FreeVar α')) → do
+        (α'', mτ') ← rootTV α'
+        when (α'' /= α') $ writeTV_ α (fvTy α'')
+        return (α'', mτ')
+      Just τ  → return (α, Just τ)
+      Nothing → return (α, Nothing)
+  -- | Get the canonical representation of a tree of type variables.
+  reprTV    ∷ tv → m tv
+  reprTV    = liftM fst . rootTV
+  -- | Fully dereference a type variable, getting a @Right τ@ if the
+  --   chain ends with a non-type variable type @τ@, and @Left α$ if
+  --   the type variable is empty, where @α@ is the representative.
+  readTV    ∷ tv → m (Either tv (Type tv))
+  readTV    = liftM (uncurry (flip maybe Right . Left)) . rootTV
+  -- | Follow a type variable to the end of the chain, whatever that is.
+  derefTV   ∷ tv → m (Type tv)
+  derefTV   = liftM (uncurry (fromMaybe . fvTy)) . rootTV
+  -- | Get a type variable pointing to a type. If the type is already
+  --   a type variable, then we get the canonical representation.
+  tvOf ∷ Type tv → m tv
+  tvOf (VarTy (FreeVar α)) = reprTV α
+  tvOf τ = do
+    α ← newTV
+    writeTV_ α τ
+    return α
+  -- | Combine two type variables to point to the same root.
+  --   If both type variables have a type at the root, that's
+  --   an error.
+  linkTV    ∷ tv → tv → m ()
+  linkTV α β = do
+    (α', mτα) ← rootTV α
+    (β', mτβ) ← rootTV β
+    trace ("linkTV", (α', mτα), (β', mτβ))
+    case (mτα, mτβ) of
+      (Nothing, _) → writeTV_ α' (fvTy β')
+      (_, Nothing) → writeTV_ β' (fvTy α')
+      _ → fail "BUG! linkTV: Tried to overwrite type variable"
+  -- | Write a type into an empty type variable.
+  writeTV   ∷ tv → Type tv → m ()
+  writeTV α τ = linkTV α =<< tvOf τ
+  -- | Allocate a new type variable and wrap it in a type
   newTVTy   ∷ m (Type tv)
-  -- | Allows re-writing a type variable, which 'writeTV' doesn't
-  updateTV  ∷ tv → Type tv → m ()
+  newTVTy   = liftM fvTy newTV
+  -- | Compute the free type variables in a type
   ftv       ∷ Ftv a tv ⇒ a → m [tv]
+  ftv       = ftvM where ?deref = readTV
   -- Unsafe operations:
   unsafePerformU ∷ m a → a
   unsafeIOToU    ∷ IO a → m a
-  --
-  newTVTy  = liftM fvTy newTV
-  ftv      = ftvM where ?deref = readTV
-  writeTV tv t = do
-    trace ("write", tv, t)
-    old ← readTV tv
-    case old of
-      Just _  → fail "BUG: Attempted to write TV more than once"
-      Nothing → updateTV tv t
 
 -- | Fully dereference a sequence of TV indirections, with path
 --   compression
 deref ∷ MonadU tv m ⇒ Type tv → m (Type tv)
-deref = liftM fst . loop where
-  loop τ0@(VarTy (FreeVar α)) = do
-    mτ ← readTV α
-    case mτ of
-      Nothing → return (τ0, False)
-      Just τ1 → do
-        (τ, b) ← loop τ1
-        when b (updateTV α τ)
-        return (τ, True)
-  loop τ0 = return (τ0, False)
+deref (VarTy (FreeVar α)) = derefTV α
+deref τ                   = return τ
 
 -- | Fully dereference a type
 derefAll ∷ MonadU tv m ⇒ Type tv → m (Type tv)
@@ -91,7 +132,7 @@ derefAll = foldType QuaTy bvTy fvTy ConTy where ?deref = readTV
 data TV r
   = UnsafeReadRef r ⇒ TV {
       tvId     ∷ !Int,
-      tvRef    ∷ !(r (Maybe (TypeR r)))
+      tvRef    ∷ !(r (Maybe (Type (TV r))))
     }
 
 -- | For type inference, we use types with free type variables
@@ -140,21 +181,21 @@ instance MonadTrans (UT s) where
   lift = UT . lift
 
 instance MonadRef s m ⇒ MonadU (TV s) (UT s m) where
-  updateTV TV { tvRef = r } t = lift (writeRef r (Just t))
-  --
   newTV = do
-    i ← UT get
-    r ← lift $ newRef Nothing
+    i ← UT $ get `before` put . succ
     trace ("new", i)
-    UT $ put (i + 1)
+    r ← lift $ newRef Nothing
     return (TV i r)
   --
-  readTV TV { tvRef = r } = UT (readRef r)
+  writeTV_ TV { tvRef = r } t = lift (writeRef r (Just t))
+  --
+  readTV_ TV { tvRef = r } = UT (readRef r)
   --
   unsafePerformU = unsafePerformRef . unUT
   unsafeIOToU    = lift . unsafeIOToRef
 
-instance Defaultable Int where getDefault = 0
+instance Defaultable Int where
+  getDefault = error "BUG! getDefault[Int]: can't gensym here"
 
 runUT ∷ Monad m ⇒ UT s m a → m a
 runUT m = evalStateT (unUT m) 0

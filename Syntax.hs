@@ -184,7 +184,7 @@ annot0  = Annot ["_"] (fvTy "_")
 
 -- | The type of a dereferencing function for free type variable
 --   representation @v@, in some monad @m@.
-type Deref m v = v → m (Maybe (Type v))
+type Deref m v = v → m (Either v (Type v))
 
 -- | Fold a type, while dereferencing type variables
 foldType ∷ (Monad m, ?deref ∷ Deref m v) ⇒
@@ -205,8 +205,8 @@ foldType fquant fbvar ffvar fcon = loop where
   loop (VarTy (FreeVar v))      = do
     mt ← ?deref v
     case mt of
-      Nothing → return (ffvar v)
-      Just t  → loop t
+      Left v' → return (ffvar v')
+      Right t → loop t
   loop (ConTy n ts)             = fcon n `liftM` mapM loop ts
 
 -- | Monadic version of type folding
@@ -246,7 +246,7 @@ typeMapM f = foldTypeM (return <$$$> QuaTy)
                        (return <$$$> bvTy)
                        f
                        (return <$$> ConTy)
-             where ?deref = const $ return Nothing
+             where ?deref = return . Left
 
 -- | Is the given type ground (type-variable and quantifier free)?
 isGroundType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
@@ -265,7 +265,8 @@ isMonoType = foldType (\_ _ _ → False) (\_ _ _ → True) (\_ → True) (\_ →
 --   (Precondition: the argument is standard)
 isPrenexType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
 isPrenexType (QuaTy AllQu _ τ)   = isMonoType τ
-isPrenexType (VarTy (FreeVar r)) = maybe (return True) isPrenexType =<< ?deref r
+isPrenexType (VarTy (FreeVar r)) =
+  either (\_ → return True) isPrenexType =<< ?deref r
 isPrenexType τ                   = isMonoType τ
 
 ---
@@ -495,10 +496,6 @@ class Ord v ⇒ Ftv a v | a → v where
   ftvVs    ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Map.Map v [Variance])
   -- | To get a list of the free type variables in a type (with no repeats).
   ftvM     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m [v]
-  -- | To get a list of the APPARENTLY free type variables in a type
-  --   (with no repeats).  Makes no attempt to dereference type
-  --   variables.
-  ftvS     ∷ a → [v]
   --
   ftvFold each zero a
                  = foldFtvTree each zero `liftM` ftvTree a
@@ -507,7 +504,6 @@ class Ord v ⇒ Ftv a v | a → v where
   ftvSet         = ftvFold (const . Set.insert) Set.empty
   ftvVs          = ftvFold (\v a → Map.insertWith (++) v [a]) Map.empty
   ftvM a         = liftM (ordNub . map fst) (ftvList a)
-  ftvS           = runIdentity . ftvM where ?deref = const (return Nothing)
 
 instance Ord v ⇒ Ftv (Type v) v where
   ftvTree = foldType
