@@ -1,12 +1,15 @@
 {-#
   LANGUAGE
     ExistentialQuantification,
+    FlexibleContexts,
+    FlexibleInstances,
     FunctionalDependencies,
     GeneralizedNewtypeDeriving,
     KindSignatures,
     ImplicitParams,
     MultiParamTypeClasses,
     RankNTypes,
+    TypeFamilies,
     UnicodeSyntax
   #-}
 module MonadU (
@@ -108,9 +111,13 @@ class (Functor m, Applicative m, Monad m, Tv tv) ⇒
   -- | Compute the free type variables in a type
   ftv       ∷ Ftv a tv ⇒ a → m [tv]
   ftv       = ftvM where ?deref = readTV
-  -- Unsafe operations:
+  -- | Unsafe operations:
   unsafePerformU ∷ m a → a
   unsafeIOToU    ∷ IO a → m a
+  -- | Arbitrary references inside the unification monad
+  type URef m ∷ * → *
+  -- | Run a reference computation
+  liftRef     ∷ (MonadRef (URef m) m ⇒ m a) → m a
 
 -- | Fully dereference a sequence of TV indirections, with path
 --   compression
@@ -180,6 +187,12 @@ instance Monad m ⇒ Applicative (UT s m) where
 instance MonadTrans (UT s) where
   lift = UT . lift
 
+instance MonadRef s m ⇒ MonadRef s (UT s m) where
+  newRef        = UT . newRef
+  readRef       = UT . readRef
+  writeRef      = UT <$$> writeRef
+  unsafeIOToRef = UT . unsafeIOToRef
+
 instance MonadRef s m ⇒ MonadU (TV s) (UT s m) where
   newTV = do
     i ← UT $ get `before` put . succ
@@ -193,6 +206,9 @@ instance MonadRef s m ⇒ MonadU (TV s) (UT s m) where
   --
   unsafePerformU = unsafePerformRef . unUT
   unsafeIOToU    = lift . unsafeIOToRef
+  --
+  type URef (UT s m) = s
+  liftRef = id
 
 instance Defaultable Int where
   getDefault = error "BUG! getDefault[Int]: can't gensym here"

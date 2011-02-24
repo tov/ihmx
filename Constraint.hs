@@ -1,9 +1,11 @@
 {-#
   LANGUAGE
+    FlexibleContexts,
     FlexibleInstances,
     FunctionalDependencies,
     ImplicitParams,
     MultiParamTypeClasses,
+    ParallelListComp,
     ScopedTypeVariables,
     TupleSections,
     UnicodeSyntax
@@ -30,6 +32,7 @@ import qualified Data.Graph.Inductive.Query.TransClos   as TransClos
 
 import Syntax
 import MonadU
+import MonadRef
 import Util
 import Ppr
 import qualified UnionFind as UF
@@ -110,6 +113,30 @@ tyConHasSuccs c = Gr.gelem n tyConOrder && Gr.outdeg tyConOrder n > 1
   where n = tyConNode c
 tyConHasPreds c = Gr.gelem n tyConOrder && Gr.indeg tyConOrder n > 1
   where n = tyConNode c
+
+-- | Find the join or meet of a pair of type constructors, if possible
+tyConJoin, tyConMeet ∷ Monad m ⇒ Name → Name → m Name
+tyConJoin = tyConCombine (Gr.suc tyConOrder) (Gr.outdeg tyConOrder)
+                         "least upper bound"
+tyConMeet = tyConCombine (Gr.suc tyConOrder) (Gr.indeg tyConOrder)
+                         "greatest lower bound"
+
+tyConCombine ∷ Monad m ⇒ 
+               (Gr.Node → [Gr.Node]) → (Gr.Node → Int) → String →
+               Name → Name → m Name
+tyConCombine next countNext goalName c1 c2 =
+  let n1      = tyConNode c1
+      n2      = tyConNode c2
+      neighs1 = next n1
+      neighs2 = next n2
+      common  = [ (countNext n, Gr.lab tyConOrder n)
+                | n ← neighs1 `List.intersect` neighs2 ]
+   in case List.sort common of
+        [(_,Just c)]               → return c
+        (j,Just c):(k,_):_ | j > k → return c
+        _                          → fail $
+          "Type constructors " ++ c1 ++ " and " ++ c2 ++
+          " have no " ++ goalName ++ "."
 
 -- | Generate the constraints to subtype-unify two types.  If both
 --   types are atoms, return them as a pair (Right); otherwise
@@ -411,31 +438,99 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
         let αs   = genCandidates value τftv (γftv `Set.union` cftv)
         closeWith AllQu (Set.toList αs) <$> derefAll τ
 
-data InternalSC tv gr
+data InternalSC gr tv r
   = ISC {
       iscGraph   ∷ gr tv (),
       iscNodeMap ∷ NM.NodeMap tv,
-      iscSkels   ∷ [(Set.Set tv, Maybe (Name, Int))]
+      iscSkels   ∷ Map.Map tv (Skeleton tv r)
     }
 
-internalize ∷ (Gr.DynGraph gr, MonadU tv m) ⇒
-              SubtypeConstraint tv → m (InternalSC tv gr)
-internalize = foldM addSC (ISC Gr.empty NM.new []) . unSC where
-  addSC (ISC g0 nm0 skels0) (τ1, τ2) = do
-    α1 ← tvOf τ1
-    α2 ← tvOf τ2
-    let (g1, nm1, (node1, _)) = NM.insMapNode nm0 α1 g0
-        (g2, nm2, (node2, _)) = NM.insMapNode nm1 α2 g1
-        g3                    = Gr.insEdge (node1, node2, ()) g2
-    skels1 ← addToSkels α1 α2 skels0
-    return (ISC g3 nm2 skels1)
-  addToSkels α1 α2 skels0 = do
-    undefined
+type Skeleton tv r = UF.Proxy r (Set.Set tv, Maybe (Name, [tv]))
 
-
-{-
-    return (ISC g3 nm2 ([fvTy α1,fvTy α2]:skels0))
--}
+internalize ∷ forall gr tv m. (Gr.DynGraph gr, MonadU tv m) ⇒
+              SubtypeConstraint tv → m (InternalSC gr tv (URef m))
+internalize sc0 = liftRef $ do
+  rskels ← newRef Map.empty
+  let -- | Record that @τ1@ is a subtype of @τ2@, and do some
+      --   unification.
+      addSubtype (g0, nm0) (τ1, τ2) = do
+        α1 ← tvOf τ1
+        α2 ← tvOf τ2
+        let (g1, nm1, (n1, _)) = NM.insMapNode nm0 α1 g0
+            (g2, nm2, (n2, _)) = NM.insMapNode nm1 α2 g1
+            g3                    = Gr.insEdge (n1, n2, ()) g2
+        relateTVs α1 α2
+        return (g3, nm2)
+      -- | Relate two type variables in the same skeleton
+      relateTVs α1 α2 = do
+        skel1 ← getSkel α1
+        skel2 ← getSkel α2
+        UF.coalesce combiner skel1 skel2
+      -- | Get the skeleton associated with a type variable. If it doesn't
+      --   exist, create it. This may require creating a shape, which may
+      --   recursively create skeletons for type constructor arguments.
+      getSkel α = do
+        skels ← readRef rskels
+        case Map.lookup α skels of
+          Just skel → return skel
+          Nothing   → do
+            shape ← getShape α
+            skel  ← UF.create (Set.singleton α, shape)
+                    ∷ m (Skeleton tv (URef m))
+            modifyRef (Map.insert α skel) rskels
+            return skel
+      -- | Build a new shape for a type variable. A shape is a "small type"
+      --   comprising a type constructor name and type variables as
+      --   arguments.  This may require generating more type variables to
+      --   abstract concrete parameters appearing in the type.
+      getShape α = do
+        τ ← readTV α
+        case τ of
+          Left _               → return Nothing
+          Right (ConTy con τs) → do
+            αs     ← mapM tvOf τs
+            mapM_ getSkel αs
+            return (Just (con, αs))
+          Right _              → fail $ "BUG! internalize"
+      --
+      -- Combine two skeletons
+      combiner (αs1, shape1) (αs2, shape2) = do
+        shape' ← case (shape1, shape2) of
+          (Nothing, _)                   → return shape2
+          (_, Nothing)                   → return shape1
+          (Just (c1, []), Just (c2, [])) → Just . (,[]) <$> tyConJoin c1 c2
+          (Just (c1, βs1), Just (c2, βs2))
+            | c1 == c2 && length βs1 == length βs2
+                                         → do
+            sequence_ [ do
+                          relateTVs β1 β2
+                          when (var == Invariant) $ unifyTVs β1 β2
+                      | var ← getVariances c1 (length βs1)
+                      | β1  ← βs1
+                      | β2  ← βs2 ]
+            return (Just (c1, βs1))
+          _                              → fail $
+            "Could not unify " ++ show shape1 ++ " and " ++ show shape2
+        return (Set.union αs1 αs2, shape')
+      -- Unify (at equality) two type variables
+      unifyTVs α1 α2 = do
+        τ1 ← readTV α1
+        τ2 ← readTV α2
+        case (τ1, τ2) of
+          (Left _, _) → linkTV α1 α2
+          (_, Left _) → linkTV α2 α1
+          (Right (ConTy c1 τs1), Right (ConTy c2 τs2))
+            | c1 == c2 && length τs1 == length τs2 → do
+                αs1 ← mapM tvOf τs1
+                αs2 ← mapM tvOf τs2
+                zipWithM_ unifyTVs αs1 αs2
+            | otherwise →
+                fail $ "Could not unify " ++ show τ1 ++ " and " ++ show τ2
+          _ → fail "BUG! internalize (unifyTVs): not yet supported"
+      --
+  (g', nm') ← foldM addSubtype (Gr.empty, NM.new) (unSC sc0)
+  skels'    ← readRef rskels
+  return (ISC g' nm' skels')
 
 {-
 g ∷ Gr Int ()

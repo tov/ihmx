@@ -36,10 +36,12 @@ import Control.Monad.Writer
 import System.IO.Unsafe
 import GHC.Conc (unsafeIOToSTM)
 
+import Eq1
+
 -- | A class for monads with mutable references. Provides generic
 --   operations for creating, reading, writing, and modifying
 --   references.
-class (UnsafeReadRef p, Monad m) ⇒ MonadRef p m | m → p where
+class (UnsafeReadRef p, Monad m, Eq1 p) ⇒ MonadRef p m | m → p where
   newRef    ∷ a → m (p a)
   readRef   ∷ p a → m a
   writeRef  ∷ p a → a → m ()
@@ -104,6 +106,9 @@ instance MonadTrans (RefT s) where
 
 newtype RefRef s a = RefRef { unRefRef ∷ IORef (Box a) }
   deriving Eq
+
+instance Eq1 (RefRef s) where eq1 = (==)
+instance Eq2 RefRef where eq2 = (==)
 
 data Box a = Box { unBox ∷ a }
 
