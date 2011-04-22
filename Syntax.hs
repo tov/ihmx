@@ -92,6 +92,7 @@ getVariances "->"    2 = [Contravariant, Covariant]
 getVariances "→"     2 = [Contravariant, Covariant]
 getVariances "Ref"   1 = [Invariant]
 getVariances "Const" i = replicate i Omnivariant
+getVariances "Anti"  i = replicate i Contravariant
 getVariances _       i = replicate i Covariant
 
 ---
@@ -531,8 +532,8 @@ instance (Ftv a v, Ftv b v) ⇒ Ftv (Either a b) v where
   ftvTree = either ftvTree ftvTree
 
 -- | A class for type variables (which are free in themselves).
-class    (Ftv v v, Show v, Ppr v) ⇒ Tv v
-instance (Ftv v v, Show v, Ppr v) ⇒ Tv v
+class    (Ftv v v, Show v, Ppr v) ⇒ Tv v where
+  tvUniqueID ∷ v → Int
 
 ---
 --- Unfolds for syntax

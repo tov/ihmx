@@ -11,7 +11,7 @@ module Util (
   module Data.Monoid,
   module Data.Maybe,
   findLastIndex, listNth,
-  allM, whenM, unlessM, foldr2, ordNub,
+  allM, whenM, unlessM, foldr2, ordNub, concatMapM,
   before,
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
   (<$.>), (<$$.>), (<$$$.>), (<$$$$.>),
@@ -55,6 +55,9 @@ ordNub = loop Set.empty where
     | x `Set.member` seen = loop seen xs
     | otherwise           = x : loop (Set.insert x seen) xs
   loop _    []     = []
+
+concatMapM   ∷ Monad m ⇒ (a → m [b]) → [a] → m [b]
+concatMapM f = foldr (liftM2 (++) . f) (return [])
 
 before ∷ Monad m ⇒ m a → (a → m b) → m a
 before m k = do

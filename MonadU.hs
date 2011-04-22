@@ -17,7 +17,7 @@ module MonadU (
   MonadU(..), deref, derefAll,
   -- * Implementations of 'MonadU'
   -- ** Representation of type variables
-  TV,
+  TV, TypeR,
   -- ** Transformer
   UT, runUT, UIO, UST,
   -- ** Pure
@@ -48,7 +48,7 @@ import MonadRef
 -- | A class for type variables and unification.
 --   Minimal definition: @newTV@, @writeTV_@, @readTV_@,
 --   @unsafePerformU#, and @unsafeIOToU@
-class (Functor m, Applicative m, Monad m, Tv tv) ⇒
+class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
       MonadU tv m | m → tv where
   -- | Allocate a new, empty type variable
   newTV     ∷ m tv
@@ -104,7 +104,12 @@ class (Functor m, Applicative m, Monad m, Tv tv) ⇒
       _ → fail "BUG! linkTV: Tried to overwrite type variable"
   -- | Write a type into an empty type variable.
   writeTV   ∷ tv → Type tv → m ()
-  writeTV α τ = linkTV α =<< tvOf τ
+  writeTV α τ = do
+    (α', mτα) ← rootTV α
+    trace ("writeTV", (α', mτα), τ)
+    case mτα of
+      Nothing → writeTV_ α' τ
+      Just _  → fail "BUG! writeTV: Tried to overwrite type variable"
   -- | Allocate a new type variable and wrap it in a type
   newTVTy   ∷ m (Type tv)
   newTVTy   = liftM fvTy newTV
@@ -116,8 +121,6 @@ class (Functor m, Applicative m, Monad m, Tv tv) ⇒
   unsafeIOToU    ∷ IO a → m a
   -- | Arbitrary references inside the unification monad
   type URef m ∷ * → *
-  -- | Run a reference computation
-  liftRef     ∷ (MonadRef (URef m) m ⇒ m a) → m a
 
 -- | Fully dereference a sequence of TV indirections, with path
 --   compression
@@ -141,6 +144,8 @@ data TV r
       tvId     ∷ !Int,
       tvRef    ∷ !(r (Maybe (Type (TV r))))
     }
+
+instance Tv (TV r) where tvUniqueID = tvId
 
 -- | For type inference, we use types with free type variables
 --   represented by a 'TV', where the parameter gives the represention
@@ -180,7 +185,7 @@ type UIO a = UT IORef IO a
 -- | 'UT' over 'ST'
 type UST s a = UT (STRef s) (ST s) a
 
-instance Monad m ⇒ Applicative (UT s m) where
+instance (Functor m, Monad m) ⇒ Applicative (UT s m) where
   pure  = return
   (<*>) = ap
 
@@ -193,7 +198,7 @@ instance MonadRef s m ⇒ MonadRef s (UT s m) where
   writeRef      = UT <$$> writeRef
   unsafeIOToRef = UT . unsafeIOToRef
 
-instance MonadRef s m ⇒ MonadU (TV s) (UT s m) where
+instance (Functor m, MonadRef s m) ⇒ MonadU (TV s) (UT s m) where
   newTV = do
     i ← UT $ get `before` put . succ
     trace ("new", i)
@@ -208,15 +213,14 @@ instance MonadRef s m ⇒ MonadU (TV s) (UT s m) where
   unsafeIOToU    = lift . unsafeIOToRef
   --
   type URef (UT s m) = s
-  liftRef = id
 
 instance Defaultable Int where
   getDefault = error "BUG! getDefault[Int]: can't gensym here"
 
-runUT ∷ Monad m ⇒ UT s m a → m a
+runUT ∷ (Functor m, Monad m) ⇒ UT s m a → m a
 runUT m = evalStateT (unUT m) 0
 
-type U a = ∀ s m. MonadRef s m ⇒ UT s m a
+type U a = ∀ s m. (Functor m, MonadRef s m) ⇒ UT s m a
 
 runU ∷ U a → Either String a
 runU m = runST (runErrorT (runUT m))

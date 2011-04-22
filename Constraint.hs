@@ -4,6 +4,7 @@
     FlexibleInstances,
     FunctionalDependencies,
     ImplicitParams,
+    KindSignatures,
     MultiParamTypeClasses,
     ParallelListComp,
     ScopedTypeVariables,
@@ -26,7 +27,7 @@ import qualified Data.Tree  as Tree
 import Data.Graph.Inductive.PatriciaTree (Gr)
 import Data.Graph.Inductive.Basic        (preorder)
 import qualified Data.Graph.Inductive.Graph             as Gr
-import qualified Data.Graph.Inductive.NodeMap           as NM
+import qualified NodeMap                                as NM
 import qualified Data.Graph.Inductive.Query.DFS         as DFS
 import qualified Data.Graph.Inductive.Query.TransClos   as TransClos
 
@@ -68,8 +69,8 @@ infix  5 ≤
 
 -- | We reduce constraints to inequalities on atoms, which are either
 --   type variables or nullary type constructors.
-data Atom tv = VarAt tv
-             | ConAt Name
+data Atom tv = VarAt !tv
+             | ConAt !Name
   deriving (Eq, Ord, Show)
 
 instance Ppr tv ⇒ Ppr (Atom tv) where
@@ -95,11 +96,12 @@ tyConOrder ∷ Gr String ()
     (_, (nm, g)) = NM.run Gr.empty $ do
       NM.insMapNodesM ["U", "R", "A", "L"]
       NM.insMapEdgesM [("U","R",()), ("U","A",()), ("R","L",()), ("A","L",())]
-      return ()
 
 -- | Is one type constructor less than or equal to another?
 tyConLe ∷ Name → Name → Bool
-tyConLe c1 c2 = Gr.gelem n1 tyConOrder && n2 `elem` Gr.suc tyConOrder n1
+tyConLe c1 c2
+  | c1 == c2  = True
+  | otherwise = Gr.gelem n1 tyConOrder && n2 `elem` Gr.suc tyConOrder n1
   where
     n1 = tyConNode c1
     n2 = tyConNode c2
@@ -118,23 +120,26 @@ tyConHasPreds c = Gr.gelem n tyConOrder && Gr.indeg tyConOrder n > 1
 tyConJoin, tyConMeet ∷ Monad m ⇒ Name → Name → m Name
 tyConJoin = tyConCombine (Gr.suc tyConOrder) (Gr.outdeg tyConOrder)
                          "least upper bound"
-tyConMeet = tyConCombine (Gr.suc tyConOrder) (Gr.indeg tyConOrder)
+tyConMeet = tyConCombine (Gr.pre tyConOrder) (Gr.indeg tyConOrder)
                          "greatest lower bound"
 
 tyConCombine ∷ Monad m ⇒ 
                (Gr.Node → [Gr.Node]) → (Gr.Node → Int) → String →
                Name → Name → m Name
-tyConCombine next countNext goalName c1 c2 =
-  let n1      = tyConNode c1
-      n2      = tyConNode c2
-      neighs1 = next n1
-      neighs2 = next n2
-      common  = [ (countNext n, Gr.lab tyConOrder n)
-                | n ← neighs1 `List.intersect` neighs2 ]
-   in case List.sort common of
-        [(_,Just c)]               → return c
-        (j,Just c):(k,_):_ | j > k → return c
-        _                          → fail $
+tyConCombine next countNext goalName c1 c2
+  | c1 == c2               = return c1
+  | n1 ← tyConNode c1
+  , n2 ← tyConNode c2
+  , Gr.gelem n1 tyConOrder
+  , Gr.gelem n2 tyConOrder =
+    let common  = [ (countNext n, Gr.lab tyConOrder n)
+                  | n ← next n1 `List.intersect` next n2 ]
+     in case reverse (List.sort common) of
+          [(_,Just c)]               → return c
+          (j,Just c):(k,_):_ | j > k → return c
+          _                          → giveUp
+  | otherwise              = giveUp
+  where giveUp = fail $
           "Type constructors " ++ c1 ++ " and " ++ c2 ++
           " have no " ++ goalName ++ "."
 
@@ -190,7 +195,7 @@ tyConCombine next countNext goalName c1 c2 =
 --- An implementation of constraints
 ---
 
--- | Simple subtype constraints
+-- | Simple subtype constraints relate pairs of types:
 newtype SubtypeConstraint r
   = SC {
       unSC ∷ [(Type r, Type r)]
@@ -215,7 +220,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
   --
   -- Generalization proceeds in several steps:
   --
-  --  1. atomize: subtype-unify all subtype constraints until we have
+  --  1. decompose: subtype-unify all subtype constraints until we have
   --     constraints only on type variables, which we consider as a
   --     directed graph.
   --
@@ -249,12 +254,18 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
   --
   --  9. generalize: candidates that are not free in the constraint
   gen value (SC c0) γ τ = do
-    trace ("gen (begin)", c0, τ)
     let ?deref = readTV
-    c1           ← atomize c0 []
+    trace ("gen (begin)", c0, τ)
+    skm1         ← internalize (SC c0)
+    trace ("gen (internalized)", skm1)
+    αs           ← occursCheck skm1
+    trace ("gen (occursCheck)", αs)
+    skm2         ← expand skm1 αs
+    trace ("gen (expand)", skm2)
+    c1           ← decompose c0
     γftv         ← ftvSet γ
     τftv         ← ftvVs τ
-    trace ("gen (atomize)", c1, γftv, τftv, τ)
+    trace ("gen (decompose)", c1, γftv, τftv, τ)
     let (nm, g) = buildGraph c1
     checkSatisfiable g -- add to list
     g            ← eliminateExistentials nm (g, γftv, τftv)
@@ -275,21 +286,52 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
     trace ("gen (generalize)", σ)
     return (σ, c)
     where
-      -- atomize takes a list of subtype constraint pairs and a list
+      -- decompose takes a list of subtype constraint pairs and a list
       -- of type variables, and returns when all of the constraint is
       -- reduced to pairs of atoms.
-      atomize []           done = return done
-      atomize ((τ, τ'):c') done = do
-        ec ← τ ~≤~ τ'
-        case ec of
-          Left (SC c'', αs) →
-            let hasChanged (VarAt β, _) | β `elem` αs = True
-                hasChanged (_, VarAt β) | β `elem` αs = True
-                hasChanged _                          = False
-                (changed, done')  = List.partition hasChanged done
-                liftTy            = map (first atomTy . second atomTy)
-             in atomize (c'' ++ liftTy changed ++ c') done'
-          Right (α, β)      → atomize c' ((α, β):done)
+      decompose = concatMapM decompLe where
+        decompLe (τ10, τ20) = do
+          τ1 ← deref τ10
+          τ2 ← deref τ20
+          case (τ1, τ2) of
+            (VarTy (FreeVar α), VarTy (FreeVar β))
+              | α == β
+              → return []
+              | otherwise
+              → return [(VarAt α, VarAt β)]
+            (ConTy c [],        ConTy c' [])
+              | c `tyConLe` c'
+              → return []
+            (VarTy (FreeVar α), ConTy c' [])
+              | tyConHasPreds c'
+              → return [(VarAt α, ConAt c')]
+            (ConTy c [], VarTy (FreeVar β))
+              | tyConHasSuccs c
+              → return [(ConAt c, VarAt β)]
+            (ConTy c1 τs1,      ConTy c2 τs2)
+              | c1 == c2
+              → concatMapM id
+                  [ case var of
+                      Covariant     → decompLe (τ1', τ2')
+                      Contravariant → decompLe (τ2', τ1')
+                      Invariant     → (++) <$> decompLe (τ1', τ2')
+                                           <*> decompLe (τ2', τ1')
+                      Omnivariant   → return []
+                  | τ1' ← τs1
+                  | τ2' ← τs2
+                  | var ← getVariances c1 (length τs1) ]
+              | otherwise
+              → fail $
+                  "Could not unify type constructors: " ++ c1 ++ " and " ++ c2
+            (VarTy (FreeVar _), ConTy _ _)
+              → fail "BUG! gen (decompose) saw unexpanded tyvar"
+            (ConTy _ _,         VarTy (FreeVar _))
+              → fail "BUG! gen (decompose) saw unexpanded tyvar"
+            (_,                 _)
+              → do
+                τ1' ← derefAll τ1
+                τ2' ← derefAll τ2
+                fail $ "Could not unify: " ++ show τ2' ++ " ≤ " ++ show τ1'
       --
       -- Given a list of pairs, build the graph
       buildGraph pairs =
@@ -353,7 +395,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                   (_, state') ← coalesce lnode (labelNode g succ) state
                   return (True, state')
               _ → return (changed, state)
-          findSingles = Map.foldWithKey keep []
+          findSingles = Map.foldrWithKey keep []
           keep α [1]  = ((NM.mkNode_ nm (VarAt α), Covariant):)
           keep α [-1] = ((NM.mkNode_ nm (VarAt α), Contravariant):)
           keep _ _    = id
@@ -438,29 +480,67 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
         let αs   = genCandidates value τftv (γftv `Set.union` cftv)
         closeWith AllQu (Set.toList αs) <$> derefAll τ
 
-data InternalSC gr tv r
-  = ISC {
-      iscGraph   ∷ gr tv (),
-      iscNodeMap ∷ NM.NodeMap tv,
-      iscSkels   ∷ Map.Map tv (Skeleton tv r)
+-- | A representation of equivalence classes of same-sized type
+--   variables and their shapes.
+newtype SkelMap tv m
+  = SkelMap {
+      -- | Associates each type variable with the “skeleton” that
+      --   contains it, which is a set of related type variables and
+      --   maybe a constructor applied to some type variables, which
+      --   determines the shape of the skeleton.
+      unSkelMap   ∷ Map.Map tv (Skeleton tv (URef m))
     }
-
 type Skeleton tv r = UF.Proxy r (Set.Set tv, Maybe (Name, [tv]))
 
-internalize ∷ forall gr tv m. (Gr.DynGraph gr, MonadU tv m) ⇒
-              SubtypeConstraint tv → m (InternalSC gr tv (URef m))
-internalize sc0 = liftRef $ do
+type ExtSkels tv = [(tv, [tv], Maybe (Name, [tv]))]
+
+instance (Tv tv, MonadU tv m) ⇒
+         Show (SkelMap tv m) where
+  show skm = concat $
+    [ " ⋀ {" ++ show α ++ " ∈ " ++
+      concat (List.intersperse "≈" [ show (tvUniqueID β) | β ← βs ]) ++
+      case shape of
+        Nothing      → ""
+        Just (c, γs) →
+          " ≈ " ++ unwords (c : [ show (tvUniqueID γ) | γ ← γs ])
+      ++ "}"
+    | (α, βs, shape) ← extSkels skm ]
+
+extSkels ∷ MonadU tv m ⇒ SkelMap tv m → ExtSkels tv
+extSkels = unsafePerformU . extSkelsM
+
+-- | Produce a showable representation of an internalized subtype
+--   constraint
+extSkelsM ∷ MonadU tv m ⇒ SkelMap tv m → m (ExtSkels tv)
+extSkelsM = mapM each . Map.toList . unSkelMap
+  where
+    each (α, proxy) = do
+      (set, mshape) ← UF.desc proxy
+      return (α, Set.toList set, mshape)
+
+newtype SHOW_GRAPH gr v = SHOW_GRAPH { unSHOW_GRAPH ∷ gr v () }
+
+instance (Gr.Graph gr, Show v) ⇒ Show (SHOW_GRAPH gr v) where
+  showsPrec _ (SHOW_GRAPH gr) =
+    showChar '{' .
+    foldr (.) id
+      (List.intersperse (showString " ⋀ ")
+         [ shows n1 . showChar '≤' . shows n2
+         | (n1, n2) ← labEdges gr ])
+    . showChar '}'
+
+-- | Build an internal subtype constraint from an external subtype
+--   constraint.
+internalize ∷ MonadU tv m ⇒
+              SubtypeConstraint tv → m (SkelMap tv m)
+internalize sc0 = do
   rskels ← newRef Map.empty
   let -- | Record that @τ1@ is a subtype of @τ2@, and do some
       --   unification.
-      addSubtype (g0, nm0) (τ1, τ2) = do
+      addSubtype (τ1, τ2) = do
         α1 ← tvOf τ1
         α2 ← tvOf τ2
-        let (g1, nm1, (n1, _)) = NM.insMapNode nm0 α1 g0
-            (g2, nm2, (n2, _)) = NM.insMapNode nm1 α2 g1
-            g3                    = Gr.insEdge (n1, n2, ()) g2
         relateTVs α1 α2
-        return (g3, nm2)
       -- | Relate two type variables in the same skeleton
       relateTVs α1 α2 = do
         skel1 ← getSkel α1
@@ -476,7 +556,6 @@ internalize sc0 = liftRef $ do
           Nothing   → do
             shape ← getShape α
             skel  ← UF.create (Set.singleton α, shape)
-                    ∷ m (Skeleton tv (URef m))
             modifyRef (Map.insert α skel) rskels
             return skel
       -- | Build a new shape for a type variable. A shape is a "small type"
@@ -503,7 +582,7 @@ internalize sc0 = liftRef $ do
             | c1 == c2 && length βs1 == length βs2
                                          → do
             sequence_ [ do
-                          relateTVs β1 β2
+                          when (var /= Omnivariant) $ relateTVs β1 β2
                           when (var == Invariant) $ unifyTVs β1 β2
                       | var ← getVariances c1 (length βs1)
                       | β1  ← βs1
@@ -523,14 +602,78 @@ internalize sc0 = liftRef $ do
             | c1 == c2 && length τs1 == length τs2 → do
                 αs1 ← mapM tvOf τs1
                 αs2 ← mapM tvOf τs2
-                zipWithM_ unifyTVs αs1 αs2
+                sequence_ [ when (var /= Omnivariant) $ unifyTVs α1 α2
+                          | var ← getVariances c1 (length αs1)
+                          | α1  ← αs1
+                          | α2  ← αs2 ]
             | otherwise →
                 fail $ "Could not unify " ++ show τ1 ++ " and " ++ show τ2
           _ → fail "BUG! internalize (unifyTVs): not yet supported"
       --
-  (g', nm') ← foldM addSubtype (Gr.empty, NM.new) (unSC sc0)
-  skels'    ← readRef rskels
-  return (ISC g' nm' skels')
+  mapM_ addSubtype (unSC sc0)
+  SkelMap <$> readRef rskels
+
+-- | Make sure an internal subtype constraint is consistent with a
+--   finite model. Returns the type variables topologically sorted by
+--   size (smallest first).
+occursCheck ∷ ∀ tv m. MonadU tv m ⇒
+              SkelMap tv m → m [tv]
+occursCheck skm = do
+  let skels = Map.toList (unSkelMap skm)
+      gr0   = Gr.insNodes [ (tvUniqueID α, α) | (α, _) ← skels ] Gr.empty
+  gr  ← foldM addSkel gr0 skels
+  let scc = labScc (gr ∷ Gr tv ())
+  trace ("occursCheck", Gr.edges gr, scc)
+  mapM checkSCC scc
+  where
+  addSkel gr (α, proxy) = do
+    (_, mshape) ← UF.desc proxy
+    case mshape of
+      Nothing      → return gr
+      Just (_, βs) → foldM (assertGt α) gr βs
+  assertGt α gr β = case Map.lookup β (unSkelMap skm) of
+    Nothing        → fail "BUG! occursCheck (1)"
+    Just proxy     → do
+      (βs, _) ← UF.desc proxy
+      return (foldr (addEdgeTo α) gr (Set.toList βs))
+  addEdgeTo α β    = Gr.insEdge (tvUniqueID β, tvUniqueID α, ())
+  checkSCC [(_,α)] = return α
+  checkSCC lns     = fail $ "Occurs check failed: " ++ show (map snd lns)
+
+-- | Expand all type variables to their full shape.
+expand ∷ MonadU tv m ⇒
+         SkelMap tv m → [tv] → m (SkelMap tv m)
+expand skm0 αs0 = do
+  rskels ← newRef (unSkelMap skm0)
+  let expandTVs []     = return ()
+      expandTVs (α:αs) = do
+        αs' ← expandTV α
+        expandTVs (αs'++αs)
+      expandTV α = do
+        eτ         ← readTV α
+        case eτ of
+          Right _ → return []
+          Left α' → do
+            Just proxy ← Map.lookup α <$> readRef rskels
+            (_, shape) ← UF.desc proxy
+            case shape of
+              Nothing      → return []
+              Just (_, []) → return []
+              Just (c, βs) → do
+                βs' ← replicateM (length βs) newTV
+                writeTV α' (ConTy c (map fvTy βs'))
+                sequence_
+                  [ do
+                      Just proxy   ← Map.lookup β <$> readRef rskels
+                      (γs, shape') ← UF.desc proxy
+                      UF.setDesc proxy (Set.insert β' γs, shape')
+                      modifyRef (Map.insert β' proxy) rskels
+                  | β  ← βs
+                  | β' ← βs' ]
+                return βs'
+  expandTVs αs0
+  skels' ← readRef rskels
+  return skm0 { unSkelMap = skels' }
 
 {-
 g ∷ Gr Int ()
@@ -578,6 +721,14 @@ labComponents = componentsWith Gr.labNode'
   componentsWith ∷ Gr.Graph gr ⇒ DFS.CFun a b c → gr a b → [[c]]
   componentsWith = map preorder <$$> udffWith'
 
+-- | Get the edges of a graph as pairs of node labels
+labEdges ∷ Gr.Graph gr ⇒ gr n e → [(n, n)]
+labEdges g =
+  [ (α, β)
+  | (n1, n2) ← Gr.edges g
+  , let Just α = Gr.lab g n1
+  , let Just β = Gr.lab g n2
+  ]
 
 {-
 check "let rec f = \\(C x).f (C (f x)) in f"
@@ -684,7 +835,7 @@ OPTIMIZATIONS FROM SIMONET 2003
   (10, 17 → 18)],
  7 → 18)
 
-("gen (atomize)",[(VarAt 20,VarAt 18),(VarAt 31,VarAt 32),(VarAt
+("gen (decompose)",[(VarAt 20,VarAt 18),(VarAt 31,VarAt 32),(VarAt
 30,VarAt 31),(VarAt 24,VarAt 30),(VarAt 29,VarAt 23),(VarAt
 28,VarAt 29),(VarAt 15,VarAt 27),(VarAt 13,VarAt 28),(VarAt
 27,VarAt 13),(ConAt "A",VarAt 13),(VarAt 11,VarAt 24),(VarAt

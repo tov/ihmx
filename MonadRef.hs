@@ -2,9 +2,9 @@
   LANGUAGE
     FlexibleInstances,
     FunctionalDependencies,
-    ImpredicativeTypes,
     MultiParamTypeClasses,
     RankNTypes,
+    TypeFamilies,
     UndecidableInstances,
     UnicodeSyntax
   #-}
@@ -52,9 +52,9 @@ class (UnsafeReadRef p, Monad m, Eq1 p) ⇒ MonadRef p m | m → p where
   -- Unsafe operations.  Minimal definition: unsafeIOToRef, and either
   -- maybeUnsafeRefToIO or maybeUnsafePerformRef
   unsafeIOToRef         ∷ IO a → m a
-  maybeUnsafeRefToIO    ∷ Maybe (forall a. m a → IO a)
+  maybeUnsafeRefToIO    ∷ Maybe (m a → IO a)
   maybeUnsafeRefToIO    = withUnsafePerformRef (\it → return . it)
-  maybeUnsafePerformRef ∷ Maybe (forall a. m a → a)
+  maybeUnsafePerformRef ∷ Maybe (m a → a)
   maybeUnsafePerformRef = withUnsafeRefToIO (\it → unsafePerformIO . it)
 
 ---
@@ -62,13 +62,13 @@ class (UnsafeReadRef p, Monad m, Eq1 p) ⇒ MonadRef p m | m → p where
 ---
 
 withUnsafePerformRef ∷ (MonadRef p m, Monad m') ⇒
-                       ((forall a. m a → a) → r) → m' r
+                       ((m a → a) → r) → m' r
 withUnsafePerformRef kont =
   maybe (fail "withUnsafePerformRef: not found")
         (return . kont) maybeUnsafePerformRef
 
 withUnsafeRefToIO ∷ (MonadRef p m, Monad m') ⇒
-                    ((forall a. m a → IO a) → r) → m' r
+                    ((m a → IO a) → r) → m' r
 withUnsafeRefToIO kont =
   maybe (fail "withUnsafeRefToIO: not found") (return . kont) maybeUnsafeRefToIO
 
