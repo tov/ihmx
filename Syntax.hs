@@ -79,6 +79,13 @@ infix 4 ⊑, ⊒
 data QLit = U | R | A | L
   deriving (Eq, Show)
 
+readQLit ∷ String → Maybe QLit
+readQLit "U" = Just U
+readQLit "R" = Just R
+readQLit "A" = Just A
+readQLit "L" = Just U
+readQLit _   = Nothing
+
 instance Bounded QLit where
   minBound = U
   maxBound = L
@@ -94,19 +101,24 @@ instance Lattice QLit where
   A ⊓ A = A; A ⊓ R = U
   L ⊓ q = q; q ⊓ L = q
 
-data QExp tv = QExp { qeLit ∷ QLit, qeTVs ∷ Set.Set tv }
+newtype QExp tv = QExp { unQExp ∷ Type tv }
 
-qlitexp ∷ QLit → QExp tv
-qlitexp = flip QExp Set.empty
+qexp      ∷ QLit → [Var tv] → QExp tv
+qexp q vs = QExp (ConTy (show q) (map VarTy vs))
 
-qvarexp ∷ Ord tv ⇒ tv → QExp tv
-qvarexp = QExp minBound . Set.singleton
+qlitexp   ∷ QLit → QExp tv
+qlitexp q = qexp q []
 
-instance Ord tv ⇒ Eq (QExp tv) where
-  QExp L _   == QExp L _   = True
-  QExp q1 αs == QExp q2 βs = q1 == q2 && αs == βs
+qvarexp   ∷ Var tv → QExp tv
+qvarexp v = qexp U [v]
 
-instance Ord tv ⇒ Bounded (QExp tv) where
+
+{-
+instance Eq (QExp tv) where
+  QExp (ConTy "L" _) == QExp (ConTy "L" _) = True
+  QExp (ConTy q1 αs) == QExp (ConTy q2 βs) = q1 == q2 && αs == βs
+
+instance Bounded (QExp tv) where
   minBound = qlitexp U
   maxBound = qlitexp L
 
@@ -121,18 +133,21 @@ instance Ord tv ⇒ Lattice (QExp tv) where
   --
   _          ⊑ QExp L _   = True
   QExp q1 αs ⊑ QExp q2 βs = q1 ⊑ q2 && αs `Set.isSubsetOf` βs
+-}
 
 -- | For now, we hard-code the variances of several type constructors
 --   and consider the rest to be covariant by default.
-getQualifier ∷ Ord tv ⇒ Name → [QExp tv] → QExp tv
-getQualifier "U"     _        = qlitexp U
-getQualifier "R"     _        = qlitexp R
-getQualifier "A"     _        = qlitexp A
-getQualifier "L"     _        = qlitexp L
+getQualifier ∷ Name → [QExp tv] → QExp tv
+getQualifier "→"     [_,qe,_] = qe
+getQualifier "U"     qes      = QExp (ConTy "U" (map unQExp qes))
+getQualifier "R"     qes      = QExp (ConTy "R" (map unQExp qes))
+getQualifier "A"     qes      = QExp (ConTy "A" (map unQExp qes))
+getQualifier "L"     qes      = QExp (ConTy "L" (map unQExp qes))
 getQualifier "Ref"   [_]      = qlitexp U
 getQualifier "Ref"   [qe,_]   = qe
 getQualifier "Const" _        = qlitexp U
-getQualifier _       qes      = bigJoin qes
+getQualifier _       [qe]     = qe
+getQualifier _       qes      = QExp (ConTy "U" (map unQExp qes))
 
 ---
 --- Type constructor variance
@@ -186,6 +201,7 @@ instance Num Variance where
 -- | For now, we hard-code the variances of several type constructors
 --   and consider the rest to be covariant by default.
 getVariances ∷ Name → Int → [Variance]
+getVariances "→"     3 = [-1, 1, 1]
 getVariances "Ref"   i = replicate i Invariant
 getVariances "Const" i = replicate i Omnivariant
 getVariances "Anti"  i = replicate i Contravariant
@@ -251,18 +267,14 @@ data Type a
   --   type variables
   = QuaTy Quant [(Perhaps Name, QLit)] (Type a)
   | VarTy (Var a)
-  | ArrTy (Type a) (QExpV a) (Type a)
   | ConTy Name [Type a]
-  deriving Eq
-
--- | Qualifier expression with free and bound variables
-type QExpV a = QExp (Var a)
+  deriving (Eq, Functor)
 
 -- | Quantifiers
 data Quant
   = AllQu
   | ExQu
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Show)
 
 allTy, exTy ∷ [QLit] → Type a → Type a
 allTy j = QuaTy AllQu (zip (map Here tvNames) j)
@@ -274,7 +286,10 @@ bvTy i j n = VarTy (BoundVar i j (maybeToPerhaps n))
 fvTy ∷ a → Type a
 fvTy  = VarTy . FreeVar
 
-t1 ↦ t2 = ArrTy t1 minBound t2
+arrTy ∷ Type a → QExp a → Type a → Type a
+arrTy t1 qe t2 = ConTy "→" [t1, unQExp qe, t2]
+
+t1 ↦ t2 = arrTy t1 (qlitexp U) t2
 infixr 6 ↦
 
 -- | A type annotation. The list of 'Name's records the free
@@ -291,21 +306,19 @@ annot0  = Annot ["_"] (fvTy "_")
 type Deref m v = v → m (Either v (Type v))
 
 -- | Fold a type, while dereferencing type variables
-foldType ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒
+foldType ∷ (Monad m, ?deref ∷ Deref m v) ⇒
            -- | For quantifiers
            (Quant → [(Perhaps Name, QLit)] → r → r) →
            -- | For bound variables
            (Int → Int → Maybe Name → Maybe QLit → r) →
            -- | For free variables
            (v → r) →
-           -- | For arrows
-           (r → QExpV v → r → r) →
            -- | For constructor applications
            (Name → [r] → r) →
            -- | Type to fold
            Type v →
            m r
-foldType fquant fbvar ffvar farr fcon t0 =
+foldType fquant fbvar ffvar fcon t0 =
   let ?deref = lift . ?deref in CMR.runReaderT (loop t0) []
   where
   loop (QuaTy q αs t)           = do
@@ -319,68 +332,48 @@ foldType fquant fbvar ffvar farr fcon t0 =
     case mt of
       Left v' → return (ffvar v')
       Right t → loop t
-  loop (ArrTy t1 qe t2)         = do
-    env ← CMR.ask
-    let each (FreeVar v) = do
-          mt ← ?deref v
-          case mt of
-            Left v' → return (qvarexp (FreeVar v'))
-            Right t → qualifier t
-        each (BoundVar i j _)
-          | Just ql ← look i j env
-                         = return (qlitexp ql)
-        each v           = return (qvarexp v)
-    qes' ← mapM each (Set.toList (qeTVs qe))
-    let qe' = bigJoin (qlitexp (qeLit qe) : qes')
-    liftM3 farr (loop t1) (return qe') (loop t2)
   loop (ConTy n ts)             = fcon n `liftM` mapM loop ts
   --
-  look i j = List.lookup i . zip [0..] >=> List.lookup j . zip [0..]
+  look i j env
+    | rib:_ ← drop i env
+    , elt:_ ← drop j rib = Just elt
+  look _ _ _             = Nothing
 
 -- | Get the qualifier of a type
-qualifier ∷ (Monad m, ?deref ∷ Deref m v, Ord v) ⇒
-            Type v → m (QExpV v)
-qualifier = foldType fquant fbvar ffvar farr fcon
+qualifier ∷ (Monad m, ?deref ∷ Deref m v) ⇒
+            Type v → m (QExp v)
+qualifier = foldType fquant fbvar ffvar fcon
   where
   fquant _ _            = id
   fbvar _ _ _ (Just ql) = qlitexp ql
   fbvar i j n Nothing   = qvarexp (BoundVar i j (maybeToPerhaps n))
   ffvar                 = qvarexp . FreeVar
-  farr _ qe _           = qe
   fcon n qes            = getQualifier n qes
 
 -- | Get something in the *form* of a qualifier without dereferencing
-pureQualifier ∷ Ord v ⇒ Type v → QExpV v
+pureQualifier ∷ Type v → QExp v
 pureQualifier t = runIdentity (qualifier t) where ?deref = return . Left
 
 -- | Monadic version of type folding
-foldTypeM ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒
+foldTypeM ∷ (Monad m, ?deref ∷ Deref m v) ⇒
             (Quant → [(Perhaps Name, QLit)] → r → m r) →
             (Int → Int → Maybe Name → Maybe QLit → m r) →
             (v → m r) →
-            (r → QExpV v → r → m r) →
             (Name → [r] → m r) →
             Type v →
             m r
-foldTypeM fquant fbvar ffvar farr fcon t =
-  join (foldType fquantM fbvar ffvar farrM fconM t) where
+foldTypeM fquant fbvar ffvar fcon t =
+  join (foldType fquantM fbvar ffvar fconM t) where
     fquantM q αs mr  = fquant q αs =<< mr
     fconM c mrs      = fcon c =<< sequence mrs
-    farrM mt1 qe mt2 = join (liftM3 farr mt1 (return qe) mt2)
 
-{-
 -- The type monad does substitution
 instance Monad Type where
   QuaTy u e t            >>= f = QuaTy u e (t >>= f)
   VarTy (FreeVar r)      >>= f = f r
   VarTy (BoundVar i j n) >>= _ = VarTy (BoundVar i j n)
-  -- ArrTy t1 qe t2         >>= f = do
   ConTy n ts             >>= f = ConTy n (map (>>= f) ts)
   return = VarTy . FreeVar
-
-mapType ∷ Ord b ⇒ (a → b) → Type a → Type b
-mapType = undefined
--}
 
 -- | Apply a total substitution to a free type variable.  Total in this
 --   case simply means that the type variable must be in the domain of
@@ -393,51 +386,34 @@ totalSubst _ _ _ = error "BUG! substsAll saw unexpected free tv"
 
 -- | Use the given function to substitute for the free variables
 --   of a type; allows changing the ftv representation.
-typeMapM ∷ (Ord a, Ord b, Monad m) ⇒ (a → m (Type b)) → Type a → m (Type b)
+typeMapM ∷ Monad m ⇒ (a → m (Type b)) → Type a → m (Type b)
 typeMapM f = foldTypeM (return <$$$> QuaTy)
                        (const <$> return <$$$> bvTy)
                        f
-                       (\t1 qe t2 → do
-                          qe' ← qexpMapM f qe
-                          return (ArrTy t1 qe' t2))
                        (return <$$> ConTy)
              where ?deref = return . Left
 
-qexpMapM ∷ (Ord b, Monad m) ⇒ (a → m (Type b)) → QExpV a → m (QExpV b)
-qexpMapM f (QExp ql tvs) = do
-  let each (FreeVar v) = do
-        t ← f v
-        qualifier t where ?deref = return . Left
-      each (BoundVar i j n) = return (qvarexp (BoundVar i j n))
-  qes' ← mapM each (Set.toList tvs)
-  return (bigJoin (qlitexp ql : qes'))
-
-qexpMap ∷ Ord b ⇒ (a → Type b) → QExpV a → QExpV b
-qexpMap f qe = runIdentity (qexpMapM (return . f) qe)
-
 -- | Is the given type ground (type-variable and quantifier free)?
-isGroundType ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isGroundType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
 isGroundType = foldType (\_ _ _ → False) (\_ _ _ _ → False)
-                        (\_ → False) (const . (&&)) (\_ → and)
+                        (\_ → False) (\_ → and)
 
 -- | Is the given type closed? (ASSUMPTION: The type is locally closed)
-isClosedType ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isClosedType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
 isClosedType = foldType (\_ _ → id) (\_ _ _ _ → True) (\_ → False)
-                        (const . (&&)) (\_ → and)
+                        (\_ → and)
 
 -- | Is the given type quantifier free?
-isMonoType ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isMonoType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
 isMonoType = foldType (\_ _ _ → False) (\_ _ _ _ → True) (\_ → True)
-                      (const . (&&)) (\_ → and)
+                      (\_ → and)
 
 -- | Is the given type (universal) prenex?
 --   (Precondition: the argument is standard)
-isPrenexType ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isPrenexType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
 isPrenexType (QuaTy AllQu _ τ)   = isMonoType τ
 isPrenexType (VarTy (FreeVar r)) =
   either (\_ → return True) isPrenexType =<< ?deref r
-isPrenexType (ArrTy t1 _ t2)     =
-  liftM2 (&&) (isMonoType t1) (isMonoType t2)
 isPrenexType τ                   = isMonoType τ
 
 ---
@@ -492,7 +468,6 @@ isAnnotated (ConTm _ _)      = False
 isAnnotated (AppTm _ _)      = False
 isAnnotated (AnnTm _ _)      = True
 
-{-
 ---
 --- Initial environment
 ---
@@ -529,7 +504,6 @@ isAnnotated (AnnTm _ _)      = True
 
 γ0 ∷ [Type Empty]
 γ0  = map (read . snd) γ0'
--}
 
 ---
 --- Locally nameless operations
@@ -538,26 +512,15 @@ isAnnotated (AnnTm _ _)      = True
 -- | @openTy k τs τ@ substitutes @τs@ for the bound type variables at
 --   rib level @k@.  DeBruijn indices higher than @k@ are adjusted downward,
 --   since opening a type peels off a quantifier.
-openTy ∷ Ord a ⇒ Int → [Type a] → Type a → Type a
+openTy ∷ Int → [Type a] → Type a → Type a
 openTy  = openTyN 1
 
 -- | Generalization of 'openTy': the first argument specifies how much
 --   to adjust indices that exceed @k@.
-openTyN ∷ Ord a ⇒ Int → Int → [Type a] → Type a → Type a
+openTyN ∷ Int → Int → [Type a] → Type a → Type a
 openTyN n k vs (QuaTy u e t)    = QuaTy u e (openTyN n (k + 1) vs t)
 openTyN n k vs (VarTy v)        = openTV_N n k vs v
-openTyN n k vs (ArrTy t1 qe t2) = ArrTy (openTyN n k vs t1)
-                                        (openQeN n k vs qe)
-                                        (openTyN n k vs t2)
 openTyN n k vs (ConTy name ts)  = ConTy name (map (openTyN n k vs) ts)
-
-openQeN ∷ Ord a ⇒ Int → Int → [Type a] → QExpV a → QExpV a
-openQeN n k vs = qexpMap (openTV_N n k vs)
-{-
-(QExp ql tvs) =
-  bigJoin (qlitexp ql : [ pureQualifier (openTV_N n k vs tv)
-                        | tv ← Set.toList tvs ])
-  -}
 
 openTV_N ∷ Int → Int → [Type a] → Var a → Type a
 openTV_N n k vs (BoundVar i j name)
@@ -571,7 +534,7 @@ openTV_N _ _ _  (FreeVar v) = VarTy (FreeVar v)
 --   with bound variables at rib level @k@.  The position of each type
 --   variable in @αs@ gives the index of each bound variable into the
 --   new rib.
-closeTy ∷ Ord a ⇒ Int → [a] → Type a → Type a
+closeTy ∷ Eq a ⇒ Int → [a] → Type a → Type a
 closeTy k vs (QuaTy u e t) = QuaTy u e (closeTy (k + 1) vs t)
 closeTy k _  (VarTy (BoundVar i j n))
   | i >= k    = VarTy (BoundVar (i + 1) j n)
@@ -580,21 +543,22 @@ closeTy k vs (VarTy (FreeVar v))
   | Just j ← List.findIndex (== v) vs
               = VarTy (BoundVar k j Nope)
   | otherwise = VarTy (FreeVar v)
-closeTy k vs (ArrTy t1 qe t2) = ArrTy (closeTy k vs t1)
-                                      undefined -- (closeQe k vs qe)
-                                      (closeTy k vs t2)
 closeTy k vs (ConTy n ts) = ConTy n (map (closeTy k vs) ts)
 
-{-
 -- | Add the given quantifier while binding the given list of variables
 closeWith ∷ Eq a ⇒ Quant → [a] → Type a → Type a
 closeWith = closeWithNames []
 
 -- | Add the given quantifier while binding the given list of variables
-closeWithNames ∷ Eq a ⇒ [Perhaps Name] → Quant → [a] → Type a → Type a
+closeWithQuals ∷ Eq a ⇒ [QLit] → Quant → [a] → Type a → Type a
+closeWithQuals qls = closeWithNames (map (Nope,) qls)
+
+-- | Add the given quantifier while binding the given list of variables
+closeWithNames ∷ Eq a ⇒
+                 [(Perhaps Name, QLit)] → Quant → [a] → Type a → Type a
 closeWithNames _   _ []  ρ = ρ
 closeWithNames pns q tvs ρ = standardizeType (QuaTy q pns' (closeTy 0 tvs ρ))
-  where pns' = take (length tvs) (pns ++ repeat Nope)
+  where pns' = take (length tvs) (pns ++ repeat (Nope, L))
 
 -- | @substTy τ' α 't@ substitutes @τ'@ for free variable @α@ in @τ@.
 substTy ∷ Eq a ⇒ Type a → a → Type a → Type a
@@ -728,7 +692,6 @@ instance Ord v ⇒ Ftv (Type v) v where
              (\_ _ tree → tree)
              (\_ _ _ → mempty)
              FTSingle
-             undefined
              (\c trees → FTBranch
                  [ FTVariance (* var) tree
                  | tree ← trees
@@ -758,11 +721,12 @@ class    (Ftv v v, Show v, Ppr v) ⇒ Tv v where
 ---
 
 -- To strip off as many of the specified quantifier as possible,
--- counting how many layers are stripped.
-unfoldQua ∷ Quant → Type a → (Int, Type a)
-unfoldQua u (QuaTy u' _ t)
-  | u == u' || lcTyK 0 t     = first (+ 1) (unfoldQua u t)
-unfoldQua _ t                = (0, t)
+-- building a qualifier bound environment for the layers.
+unfoldQua ∷ Quant → Type a → ([[QLit]], Type a)
+unfoldQua u0 = first reverse . loop where
+  loop (QuaTy u tvs t)
+    | u0 == u || lcTyK 0 t = first (map snd tvs:) (loop t)
+  loop t                   = ([], t)
 
 -- To find the operator and operands of a curried application.
 unfoldApp ∷ Term a → (Term a, [Term a])
@@ -797,24 +761,25 @@ standardizeType ∷ Type a → Type a
 standardizeType t00 = runST (loop 0 [] t00) where
   loop depth g t0 = case t0 of
     QuaTy u _ _ → do
-      let (i, t) = unfoldQua u t0
       rn ← ST.newSTRef []
-      t' ← loop (depth + i)
-                (foldr (++) g $
-                   replicate i [(depth + i, rn)]) t
+      let (qls, t) = unfoldQua u t0
+          i        = length qls
+          g'       = (depth + i, rn,) <$$> qls
+      t' ← loop (depth + i) (g' ++ g) t
       nl ← ST.readSTRef rn
       return $ case nl of
         [] → openTyN i (-1) [] t'
-        _  → QuaTy u [ n | (_,_,n) ← nl ] (openTyN (i - 1) (i - 1) [] t')
+        _  → QuaTy u [ n | (_,n) ← nl ] (openTyN (i - 1) (i - 1) [] t')
     ConTy con ts          → ConTy con <$> mapM (loop depth g) ts
     VarTy (BoundVar i j n)
-      | (olddepth, r):_ ← drop i g
+      | rib:_               ← drop i g
+      , (olddepth, r, ql):_ ← drop j rib
                           → do
           s  ← ST.readSTRef r
-          j' ← case List.findIndex (== (depth - i,j,Nope)) s of
+          j' ← case List.findIndex ((== (depth - i,j)) . fst) s of
             Just j' → return j'
             Nothing → do
-              ST.writeSTRef r (s ++ [(depth - i,j,n)])
+              ST.writeSTRef r (s ++ [((depth - i,j),(n,ql))])
               return (length s)
           return (VarTy (BoundVar (depth - olddepth) j' n))
     VarTy v               → return (VarTy v)
@@ -835,12 +800,16 @@ tok  = makeTokenParser LanguageDef {
   opStart      = empty,
   opLetter     = empty,
   reservedNames   = ["all", "ex", "let", "in", "rec", "and", "match", "with"],
-  reservedOpNames = ["->", "→", ".", "\\", "λ", "=", ":", "∀", "∃", "|"],
+  reservedOpNames = ["->", "→", "⊸", "∀", "∃", ".",
+                     "\\", "λ", "=", ":", "|"],
   caseSensitive   = True
 }
   -- 'λ' is not an identifier character, so that we can use it as
   -- a reserved operator. Otherwise, we'd need a space after it.
   where noλ p = notFollowedBy (char 'λ') *> p
+
+parseArrow ∷ P ()
+parseArrow = reservedOp tok "→" <|> reservedOp tok "->"
 
 -- | Run a parser in the context of a different parsing state.
 withState ∷ st → Parsec String st a → Parsec String st a
@@ -912,35 +881,59 @@ parseType  = level0 []
   where
   level0 g = do
                (quants, tvss) ← unzip <$> parseQuantifiers
-               body   ← level0 (reverse tvss ++ g)
-               return (foldr2 QuaTy body quants (map (map Here) tvss))
+               body   ← level0 (reverse (fst <$$> tvss) ++ g)
+               return (foldr2 QuaTy body quants (first Here <$$> tvss))
          <|> level1 g
   level1 g = do
                t1 ← level2 g
                option t1 $ do
-                 parseArrow
-                 t2 ← level0 g
-                 return (t1 ↦ t2)
+                 mkArr ← parseTypeArrow (tyvarp g) (level0 g)
+                 t2    ← level0 g
+                 return (t1 `mkArr` t2)
   level2 g = ConTy <$> upperIdentifier <*> many (level3 g)
          <|> level3 g
-  level3 g = do
-               tv ← lowerIdentifier
-               VarTy <$> findVar tv g
+  level3 g = VarTy <$> tyvarp g
          <|> do
                con ← upperIdentifier
                return (ConTy con [])
          <|> parens tok (level0 g)
+  tyvarp g = join (findVar <$> lowerIdentifier <*> pure g)
 
 -- To parse a sequence of quantifiers along with their bound variables.
-parseQuantifiers ∷ P [(Quant, [Name])]
+parseQuantifiers ∷ P [(Quant, [(Name, QLit)])]
 parseQuantifiers = many1 ((,) <$> quant <*> tvs) <* dot tok where
   quant   = AllQu <$ (reserved tok "all" <|> reservedOp tok "∀")
         <|> ExQu  <$ (reserved tok "ex"  <|> reservedOp tok "∃")
   tvs     = do
-    ids ← many1 lowerIdentifier
+    idss ← sepBy1 tvGroup (comma tok)
+    let ids = concatMap (map fst) idss
     when (List.nub ids /= ids) $
       fail "repeated tyvar in quantifier group"
-    return ids
+    return (concat idss)
+  tvGroup = do
+    ids ← many1 lowerIdentifier
+    ql  ← option L (colon tok >> parseQLit)
+    return (map (,ql) ids)
+
+-- | To parse a qualifier literal
+parseQLit ∷ P QLit
+parseQLit = choice
+              [ symbol tok "U" >> return U
+              , symbol tok "R" >> return R
+              , symbol tok "A" >> return A
+              , symbol tok "L" >> return L ]
+
+parseTypeArrow ∷ P (Var a) → P (Type a) → P (Type a → Type a → Type a)
+parseTypeArrow tyvarp typep = flip arrTy <$> choice
+  [ qlitexp U <$ reservedOp tok "→"
+  , qlitexp U <$ reservedOp tok "->"
+  , qlitexp L <$ reservedOp tok "⊸"
+  , qlitexp L <$ try (symbol tok "-o")
+  , between (try (symbol tok "-{")) (try (symbol tok "}>")) $
+      QExp <$> typep
+  , between (symbol tok "-") (symbol tok ">") $ do
+      qexp <$> option U parseQLit <*> many tyvarp
+  ]
 
 -- To parse a pattern. Produces the pattern (which is nameless) and
 -- the list of names bound by the patern.
@@ -1045,9 +1038,6 @@ parseLetRec term γ = do
   let adjust = openTmN 0 0 (map VarTm vars')
   return (RecTm (map (Here *** adjust) bs) (adjust e2))
 
-parseArrow ∷ P ()
-parseArrow = reservedOp tok "→" <|> reservedOp tok "->"
-
 instance Read Annot where
   readsPrec _ = readsPrecFromParser
 
@@ -1061,7 +1051,6 @@ instance Parsable a ⇒ Read (Term a) where
 --- Pretty-printing
 ---
 
--}
 -- | Given a base name, produces the list of names starting with the
 --   base name, then with a prime added, and then with numeric
 --   subscripts increasing from 1.
@@ -1096,7 +1085,6 @@ tvNames, exNames, varNames ∷ [Name]
 tvNames = namesFrom "αβγδ"
 exNames = namesFrom "efgh"
 varNames = namesFrom ['i' .. 'z']
-{-
 
 -- | @freshName sugg avoid cands@ attempts to generate a fresh name
 --   as follows:
@@ -1139,24 +1127,49 @@ pprType  = loop 0 where
   loop p g t0 = case t0 of
     QuaTy u e t           →
       let quant = case u of AllQu → "∀"; ExQu → "∃"
-          tvs   = freshNames e (concat g) tvNames
+          (tvs0, qls) = unzip e
+          tvs         = freshNames tvs0 (concat g) tvNames -- XXX TODO
+          btvs        = groupByQLits tvs qls
        in parensIf (p > 0) $
             Ppr.hang
               (Ppr.text quant Ppr.<+>
-               Ppr.fsep (map Ppr.text tvs) Ppr.<>
-               Ppr.char '.')
+               (Ppr.fsep $ Ppr.punctuate Ppr.comma
+                [ Ppr.fsep $
+                    map Ppr.text names ++
+                    if ql == L
+                      then []
+                      else [Ppr.char ':' Ppr.<+> Ppr.text (show ql)]
+                | (ql,names) ← btvs ])
+               Ppr.<> Ppr.char '.')
               2
               (loop 0 (tvs : g) t)
     VarTy (BoundVar ix jx (perhapsToMaybe → n)) →
       Ppr.text $ maybe "?" id $ (listNth jx <=< listNth ix $ g) `mplus` n
     VarTy (FreeVar a)        → ppr a
-    ConTy c [t1, t2] | c `elem` ["->", "→"] →
-      parensIf (p > 1) $
-        Ppr.sep [loop 2 g t1, Ppr.text "→", loop 0 g t2]
+    ConTy "→" [t1, qe, t2] →
+      let qedoc = case qe of
+            ConTy "U" [] → Ppr.char '→'
+            ConTy "L" _  → Ppr.char '⊸'
+            ConTy c   ts
+              | Just _ ← readQLit c
+              , all isVarTy ts
+                         → Ppr.char '-' Ppr.<>
+                           (if c == "U" then id else (Ppr.text c Ppr.<+>))
+                              (Ppr.fsep (pprType g <$> ts))
+                           Ppr.<> Ppr.char '>'
+            _ → Ppr.text "-{" Ppr.<> pprType g qe Ppr.<> Ppr.text "}>"
+          isVarTy (VarTy _) = True
+          isVarTy _         = False
+       in parensIf (p > 1) $
+          Ppr.sep [loop 2 g t1, qedoc, loop 0 g t2]
     ConTy c []          → Ppr.text c
     ConTy c ts          →
       parensIf (p > 2) $
         Ppr.fsep (Ppr.text c : map (loop 3 g) ts)
+  groupByQLits = foldr2 each [] where
+    each tv ql ((ql',tvs):rest)
+      | ql == ql'   = ((ql',tv:tvs):rest)
+    each tv ql rest = (ql,[tv]):rest
 
 -- | To pretty-print a pattern and return the list of names of
 --   the bound variables.  (Avoiding the given list of names.)
@@ -1282,28 +1295,34 @@ parseTypeTests ∷ T.Test
 parseTypeTests = T.test
   [ "A"                         ==> a
   , "A → B"                     ==> (a ↦ b)
-  , "∀ α. α"                    ==> allTy 1 (bv 0 0)
-  , "∀ α β. α"                  ==> allTy 2 (bv 0 0)
-  , "∀ α β. β"                  ==> allTy 2 (bv 0 1)
-  , "∃ α. α"                    ==> exTy 1 (bv 0 0)
-  , "∃ α β. α"                  ==> exTy 2 (bv 0 0)
-  , "∃ α β. β"                  ==> exTy 2 (bv 0 1)
+  , "∀ α. α"                    ==> allTy [L] (bv 0 0)
+  , "∀ α : U. α"                ==> allTy [U] (bv 0 0)
+  , "∀ α : R. α"                ==> allTy [R] (bv 0 0)
+  , "∀ α : A. α"                ==> allTy [A] (bv 0 0)
+  , "∀ α : L. α"                ==> allTy [L] (bv 0 0)
+  , "∀ α β. α"                  ==> allTy [L,L] (bv 0 0)
+  , "∀ α β. β"                  ==> allTy [L,L] (bv 0 1)
+  , "∀ α, β. α"                 ==> allTy [L,L] (bv 0 0)
+  , "∀ α, β : U. β"             ==> allTy [L,U] (bv 0 1)
+  , "∃ α. α"                    ==> exTy [L] (bv 0 0)
+  , "∃ α β. α"                  ==> exTy [L,L] (bv 0 0)
+  , "∃ α β. β"                  ==> exTy [L,L] (bv 0 1)
   , "∀ α β. C α → C β"
-      ==> allTy 2 (c (bv 0 0) ↦ c (bv 0 1))
+      ==> allTy [L,L] (c (bv 0 0) ↦ c (bv 0 1))
   , "∀ α. ∀ β. C α → C β → A"
-      ==> allTy 1 (allTy 1 (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
+      ==> allTy [L] (allTy [L] (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
   , "∀ α. α → ∀ β. β → α"
-      ==> allTy 1 (bv 0 0 ↦ allTy 1 (bv 0 0 ↦ bv 1 0))
+      ==> allTy [L] (bv 0 0 ↦ allTy [L] (bv 0 0 ↦ bv 1 0))
   , "∃ α β. C α → C β"
-      ==> exTy 2 (c (bv 0 0) ↦ c (bv 0 1))
+      ==> exTy [L,L] (c (bv 0 0) ↦ c (bv 0 1))
   , "∃ α. ∃ β. C α → C β → A"
-      ==> exTy 1 (exTy 1 (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
+      ==> exTy [L] (exTy [L] (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
   , "∃ α. α → ∃ β. β → α"
-      ==> exTy 1 (bv 0 0 ↦ exTy 1 (bv 0 0 ↦ bv 1 0))
+      ==> exTy [L] (bv 0 0 ↦ exTy [L] (bv 0 0 ↦ bv 1 0))
   , "∃ α ∀ β. C α → C β → A"
-      ==> exTy 1 (allTy 1 (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
+      ==> exTy [L] (allTy [L] (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
   , "∃ α. α → ∀ β. β → α"
-      ==> exTy 1 (bv 0 0 ↦ allTy 1 (bv 0 0 ↦ bv 1 0))
+      ==> exTy [L] (bv 0 0 ↦ allTy [L] (bv 0 0 ↦ bv 1 0))
   , "∀ α β. α → β"              <==> "∀ β α. β → α"
   , "∀ α. C α → ∀ α. C α"       <==> "∀ δ. C δ → ∀ e. C e"
   , "∃ α β. α → β"              <==> "∃ β α. β → α"
@@ -1356,9 +1375,9 @@ standardizeTypeTests = T.test
   , let str = "∀ α. α → ∀ β. β → α" in
     T.assertBool str
       ((standardizeType (read str) ∷ Type Empty) ==
-       allTy 1 (VarTy (boundVar 0 0 "α") ↦
-                allTy 1 (VarTy (boundVar 0 0 "β") ↦
-                         VarTy (boundVar 1 0 "α"))))
+       allTy [L] (VarTy (boundVar 0 0 "α") ↦
+                  allTy [L] (VarTy (boundVar 0 0 "β") ↦
+                             VarTy (boundVar 1 0 "α"))))
   ]
 
 {-
@@ -1368,5 +1387,4 @@ tryParsePprPatt s =
     Left e              → print e
     Right (patt, names) → print (pprPatt 0 names (patt ∷ Patt Empty))
 
--}
 -}
