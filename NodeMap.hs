@@ -10,7 +10,7 @@
 module NodeMap (
   MonadNM(..),
   module Data.Graph.Inductive.NodeMap,
-  NodeMapT, runNodeMapT, runNodeMapT_,
+  NodeMapT, runNodeMapT, execNodeMapT, runNodeMapT_,
 ) where
 
 import Data.Graph.Inductive (DynGraph, LNode, LEdge)
@@ -76,6 +76,11 @@ runNodeMapT  ∷ (DynGraph g, Ord a, Monad m) ⇒
                NodeMap a → g a b → NodeMapT a b g m r →
                m (r, (NodeMap a, g a b))
 runNodeMapT nm g m = runStateT m (nm, g)
+
+execNodeMapT  ∷ (DynGraph g, Ord a, Monad m) ⇒
+                NodeMap a → g a b → NodeMapT a b g m r →
+                m (g a b)
+execNodeMapT nm g m = (snd . snd) `liftM` runNodeMapT nm g m
 
 runNodeMapT_ ∷ (DynGraph g, Ord a, Monad m) ⇒
                g a b → NodeMapT a b g m r →

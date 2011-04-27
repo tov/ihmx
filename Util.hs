@@ -1,5 +1,6 @@
 {-# LANGUAGE
       BangPatterns,
+      TypeOperators,
       UnicodeSyntax
   #-}
 module Util (
@@ -11,7 +12,7 @@ module Util (
   module Data.Monoid,
   module Data.Maybe,
   findLastIndex, listNth,
-  allM, whenM, unlessM, foldr2, ordNub, concatMapM,
+  allM, whenM, unlessM, foldr2, ordNub, concatMapM, foldM1,
   before,
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
   (<$.>), (<$$.>), (<$$$.>), (<$$$$.>),
@@ -59,6 +60,10 @@ ordNub = loop Set.empty where
 concatMapM   ∷ Monad m ⇒ (a → m [b]) → [a] → m [b]
 concatMapM f = foldr (liftM2 (++) . f) (return [])
 
+foldM1       ∷ Monad m ⇒ (a → a → m a) → [a] → m a
+foldM1 _ []     = fail "foldM1: empty"
+foldM1 f (x:xs) = foldM f x xs
+
 before ∷ Monad m ⇒ m a → (a → m b) → m a
 before m k = do
   a ← m
@@ -67,42 +72,51 @@ before m k = do
 
 infixl 8 `before`
 
-(<$$>) ∷ (b → c) → (a1 → a2 → b) →
-         a1 → a2 → c
-(f <$$> g) x = f <$> g x
+(<$$>) ∷ (Functor f, Functor g) ⇒ 
+         (b → c) → g (f b) → g (f c)
+(<$$>) = fmap . fmap
 
-(<$$$>) ∷ (b → c) → (a1 → a2 → a3 → b) →
-          a1 → a2 → a3 → c
-(f <$$$> g) x = f <$$> g x
+(<$$$>) ∷ (Functor f, Functor g, Functor h) ⇒
+          (b → c) → h (g (f b)) →
+          h (g (f c))
+(<$$$>) = fmap . fmap . fmap
 
-(<$$$$>) ∷ (b → c) → (a1 → a2 → a3 → a4 → b) →
-           a1 → a2 → a3 → a4 → c
-(f <$$$$> g) x = f <$$$> g x
+(<$$$$>) ∷ (Functor f, Functor g, Functor h, Functor i) ⇒
+           (b → c) → i (h (g (f b))) →
+           i (h (g (f c)))
+(<$$$$>) = fmap . fmap . fmap . fmap
 
-(<$$$$$>) ∷ (b → c) → (a1 → a2 → a3 → a4 → a5 → b) →
-            a1 → a2 → a3 → a4 → a5 → c
-(f <$$$$$> g) x = f <$$$$> g x
+(<$$$$$>) ∷ (Functor f, Functor g, Functor h, Functor i, Functor j) ⇒
+            (b → c) → j (i (h (g (f b)))) →
+            j (i (h (g (f c))))
+(<$$$$$>) = fmap . fmap . fmap . fmap . fmap
 
-(<$$$$$$>) ∷ (b → c) → (a1 → a2 → a3 → a4 → a5 → a6 → b) →
-             a1 → a2 → a3 → a4 → a5 → a6 → c
-(f <$$$$$$> g) x = f <$$$$$> g x
+(<$$$$$$>) ∷ (Functor f, Functor g, Functor h,
+              Functor i, Functor j, Functor k) ⇒
+             (b → c) → k (j (i (h (g (f b))))) →
+             k (j (i (h (g (f c)))))
+(<$$$$$$>) = fmap . fmap . fmap . fmap . fmap . fmap
 
 infixl 4 <$$>, <$$$>, <$$$$>, <$$$$$>, <$$$$$$>
 
-(<$.>) ∷ (b1 → b2 → c) → (a → b2) →
-         b1 → a → c
-f <$.> g = flip (<$>) g . f
+(<$.>) ∷ (Arrow (⇝), Functor f) ⇒
+         f (b ⇝ c) → (a ⇝ b) →
+         f (a ⇝ c)
+f <$.> g = (g >>>) <$> f
 
-(<$$.>) ∷ (b1 → b2 → b3 → c) → (a → b3) →
-          b1 → b2 → a → c
-f <$$.> g = flip (<$.>) g . f
+(<$$.>) ∷ (Arrow (⇝), Functor f, Functor g) ⇒
+          g (f (b ⇝ c)) → (a ⇝ b) →
+          g (f (a ⇝ c))
+f <$$.> g = (g >>>) <$$> f
 
-(<$$$.>) ∷ (b1 → b2 → b3 → b4 → c) → (a → b4) →
-           b1 → b2 → b3 → a → c
-f <$$$.> g = flip (<$$.>) g . f
+(<$$$.>) ∷ (Arrow (⇝), Functor f, Functor g, Functor h) ⇒
+           h (g (f (b ⇝ c))) → (a ⇝ b) →
+           h (g (f (a ⇝ c)))
+f <$$$.> g = (g >>>) <$$$> f
 
-(<$$$$.>) ∷ (b1 → b2 → b3 → b4 → b5 → c) → (a → b5) →
-            b1 → b2 → b3 → b4 → a → c
-f <$$$$.> g = flip (<$$$.>) g . f
+(<$$$$.>) ∷ (Arrow (⇝), Functor f, Functor g, Functor h, Functor i) ⇒
+            i (h (g (f (b ⇝ c)))) → (a ⇝ b) →
+            i (h (g (f (a ⇝ c))))
+f <$$$$.> g = (g >>>) <$$$$> f
 
 infixl 4 <$.>, <$$.>, <$$$.>, <$$$$.>

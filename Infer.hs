@@ -1,6 +1,7 @@
 {-#
   LANGUAGE
     ImplicitParams,
+    ParallelListComp,
     ScopedTypeVariables,
     UnicodeSyntax
   #-}
@@ -61,9 +62,11 @@ module Infer (
   inferTests, tests,
 ) where
 
+import qualified Data.List  as List
 import qualified Data.Map   as Map
 import qualified Test.HUnit as T
 import Control.Monad.RWS    as RWS
+import Control.Monad.State  as CMS
 
 import MonadU
 import Constraint
@@ -85,41 +88,57 @@ infer0 γ e = do
   gen (syntacticValue e) c γ τ
 
 -- | To infer a type and constraint for a term
-infer ∷ (MonadU tv m, Constraint c tv) ⇒
+infer ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
         Δ tv → Γ tv → Term Empty → m (Type tv, c)
 infer δ γ e0 = case e0 of
   AbsTm π e                     → do
-    α ← newTVTy
-    (δ', c1, τs) ← inferPatt δ π α
-    (τ2, c2)     ← infer δ' (τs:γ) e
-    return (α ↦ τ2, c1 ⋀ c2)
-  LetTm rec π e1 e2    → do
-    α ← newTVTy
-    (δ', c0, τs0) ← inferPatt δ π α
-    (τ1, c1)      ← infer δ' (if rec then τs0:γ else γ) e1
-    let genLoop []     σs c = return (reverse σs, c)
-        genLoop (τ:τs) σs c = do
-          (σ, c') ← gen (syntacticValue e1) c ((τs++σs):γ) τ
-          genLoop τs (σ:σs) c'
-    (σs, c1') ← genLoop τs0 [] (c0 ⋀ c1 ⋀ τ1 ≤ α ⋀
-                                if rec then α ≤ τ1 else (⊤))
-    (τ2, c2)  ← infer δ' (σs:γ) e2
-    return (τ2, c1' ⋀ c2)
+    (δ', c1, τ1, τs) ← inferPatt δ π Nothing
+    (τ2, c2)         ← infer δ' (τs:γ) e
+    return (τ1 ↦ τ2, c1 ⋀ c2)
+  LetTm π e1 e2                 → do
+    (τ1, c1)         ← infer δ γ e1
+    (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1)
+    (τs', c')        ← genList (syntacticValue e1) (c1 ⋀ cπ) γ τs
+    (τ2, c2)         ← infer δ' (τs':γ) e2
+    return (τ2, c' ⋀ c2)
+  MatTm e1 bs                   → do
+    α                ← newTVTy
+    (τ1, c1)         ← infer δ γ e1
+    cs               ← sequence
+      [ do
+          (δ', ci, _, τs) ← inferPatt δ πi (Just τ1)
+          (τi, ci') ← infer δ' (τs:γ) ei
+          return (ci ⋀ ci' ⋀ τi ≤ α)
+      | (πi, ei) ← bs ]
+    return (α, c1 ⋀ mconcat cs)
+  RecTm bs e2                   → do
+    αs               ← replicateM (length bs) newTVTy
+    cs               ← sequence
+      [ do
+          unless (syntacticValue ei) $
+            fail "In let rec, binding not a syntactic value"
+          (τi, ci) ← infer δ (αs:γ) ei
+          return (ci ⋀ αi ≤≥ τi)
+      | (_, ei) ← bs
+      | αi      ← αs ]
+    (τs', c')        ← genList True (mconcat cs) γ αs
+    (τ2, c2)         ← infer δ (τs':γ) e2
+    return (τ2, c' ⋀ c2)
   VarTm (FreeVar ff)            → elimEmpty ff
   VarTm (BoundVar i j _)        → do
     τ ← inst (γ !! i !! j)
     return (τ, (⊤))
   ConTm n es                    → do
-    (τs, cs) ← unzip <$> mapM (infer δ γ) es
+    (τs, cs)         ← unzip <$> mapM (infer δ γ) es
     return (ConTy n τs, mconcat cs)
   AppTm e1 e2                   → do
-    (τ1, c1) ← infer δ γ e1
-    (τ2, c2) ← infer δ γ e2
-    α        ← newTVTy
+    (τ1, c1)         ← infer δ γ e1
+    (τ2, c2)         ← infer δ γ e2
+    α                ← newTVTy
     return (α, c1 ⋀ c2 ⋀ τ1 ≤ τ2 ↦ α)
   AnnTm e annot                 → do
-    (δ', τ', _) ← instAnnot δ annot
-    (τ, c)      ← infer δ' γ e
+    (δ', τ', _)      ← instAnnot δ annot
+    (τ, c)           ← infer δ' γ e
     return (τ', c ⋀ τ ≤ τ')
 
 -- | Instantiate a prenex quantifier
@@ -134,28 +153,48 @@ inst σ0 = do
   trace ("inst", σ, τ)
   return τ
 
--- | Given a type variable environment and a pattern, compute an updated
---   type variable environment, a type for the whole pattern, a
---   constraint, and a type for each variable bound by the pattern.
+-- | Given a type variable environment, a pattern, and optionally an
+--   expected type, and
+--   compute an updated type variable environment, a constraint,
+--   a type for the whole pattern, and a type for each variable bound by
+--   the pattern.
 inferPatt ∷ (MonadU tv m, Constraint c tv) ⇒
-           Δ tv → Patt Empty → Type tv →
-           m (Δ tv, c, [Type tv])
-inferPatt δ0 π0 τ0 = do
-  (τs, δ, c) ← runRWST (loop π0 τ0) () δ0
-  return (δ, c, τs)
+           Δ tv → Patt Empty → Maybe (Type tv) →
+           m (Δ tv, c, Type tv, [Type tv])
+inferPatt δ0 π0 mτ0 = do
+  (σ, δ, (c, τs)) ← runRWST (loop π0 1 mτ0) () δ0
+  return (δ, c, σ, τs)
   where
-  loop (VarPa _)       τ = return [τ]
-  loop WldPa           _ = return []
-  loop (ConPa name πs) τ = do
-    αs ← replicateM (length πs) (lift newTVTy)
-    tell (τ ≤ ConTy name αs)
-    concat <$> zipWithM loop πs αs
-  loop (AnnPa π annot) τ = do
+  bind τ      = do tell ((⊤), [τ]); return τ
+  constrain c = tell (c, [])
+  loop (VarPa _)       v mτ = bind =<< loop WldPa v mτ
+  loop WldPa           _ mτ = maybe newTVTy return mτ
+  loop (ConPa name πs) v mτ = do
+    case mτ of
+      Nothing → ConTy name <$> sequence [ loop πi 1 Nothing | πi ← πs ]
+      Just τ0 → do
+        τ ← deref τ0
+        case τ of
+          ConTy name' τs@(_:_) | length τs == length πs, name == name' →
+            ConTy name <$> sequence
+              [ loop πi (v*vi) (Just τi)
+              | πi ← πs
+              | τi ← τs
+              | vi ← getVariances name (length τs) ]
+          _ → do
+            τ' ← ConTy name <$> sequence [ loop πi 1 Nothing | πi ← πs ]
+            constrain (relate v τ τ')
+            return τ
+  loop (AnnPa π annot) v mτ = do
     δ ← get
     (δ', τ', _) ← lift (instAnnot δ annot)
     put δ'
-    tell (τ ≤ τ')
-    loop π τ'
+    τ ← loop π v (Just τ')
+    case mτ of
+      Just τ'' → do
+        constrain (relate v τ'' τ)
+        return τ''
+      Nothing  → return τ
 
 -- | Given a tyvar environment (mapping some-bound names to tyvars) and
 --   an annotation, create new universal type variables for any new
@@ -175,6 +214,19 @@ instAnnot δ (Annot names σ0) = do
     insert ('_':_) = const id
     insert k       = Map.insert k
     eachName name  = maybe newTVTy return (Map.lookup name δ)
+
+-- | If the pattern is fully annotated, extract the annotation.
+extractPattAnnot ∷ Monad m ⇒ Patt Empty → m Annot
+extractPattAnnot π0 = do
+  (σ, ns) ← runStateT (loop π0) []
+  return (Annot ns σ)
+  where
+  loop (VarPa _)              = fail "Unannotated variable pattern"
+  loop WldPa                  = fail "Unannotated wildcard pattern"
+  loop (ConPa c πs)           = ConTy c `liftM` mapM loop πs
+  loop (AnnPa _ (Annot ns σ)) = do
+    modify (`List.union` ns)
+    return σ
 
 ---
 --- Testing functions
@@ -539,14 +591,14 @@ fullyAnnotatedPatt (AnnPa _ _)  = True
 -- | If the pattern is fully annotated, extract the annotation.
 extractPattAnnot ∷ Monad m ⇒ Patt Empty → m Annot
 extractPattAnnot π0 = do
-  (σ, ns) ← runStateT (loop π0) []
+  (σ, ns) ← CMS.runStateT (loop π0) []
   return (Annot ns σ)
   where
   loop VarPa                  = fail "Unannotated variable pattern"
   loop WldPa                  = fail "Unannotated wildcard pattern"
   loop (ConPa c πs)           = ConTy c <$> mapM loop πs
   loop (AnnPa _ (Annot ns σ)) = do
-    modify (`List.union` ns)
+    CMS.modify (`List.union` ns)
     return σ
 
 -- | Generalize type variables not found in the context. Generalize
@@ -651,13 +703,66 @@ inferFnTests = T.test
                 -: "∀ β α. β → (α → α) → α → α"
   , "λx.choose (id : α → α)"
                 -: "∀ α β. α → (β → β) → (β → β)"
+  , te "λf. P (f A) (f B)"
+  , "λx. single id" -: "∀ α β. α → List (β → β)"
+  , "λf x. f (f x)"     -: "∀ α. (α → α) → α → α"
+  -- Patterns
+  , "λC. B"     -: "C → B"
+  , "λA. B"     -: "A → B"
+  , "λ(L:U). B" -: "U → B"
+  , te "λ(R:A). B"
+  , "λ(A x). x"
+                -: "∀ α. A α → α"
+  , "λ(A x) (B y z). x y z"
+                -: "∀ α β γ. A (α → β → γ) → B α β → γ"
+  , pe "λ(A x x). B"
+  , "λ(A a (B b c) (C d (D e f g))). E"
+                -: "∀ α β γ δ e f g. A α (B β γ) (C δ (D e f g)) → E"
+  -- Occurs check
+  , te "λf. f f"
+  , te "let rec f = λ(C x).f (C (f x)) in f"
+  -- Subtyping
+  , "λf. C (f L)" -: "∀ α. (L → α) → C α"
+  , "λf. C (f L) (f L)" -: "∀ α. (L → α) → C α α"
+  , "λf. C (f R) (f L)" -: "∀ α. (L → α) → C α α"
+  , "λf. C (f A) (f L)" -: "∀ α. (L → α) → C α α"
+  , "λf. C (f L) (f R)" -: "∀ α. (L → α) → C α α"
+  , "λf. C (f L) (f A)" -: "∀ α. (L → α) → C α α"
+  , "λf. C (f U) (f L)" -: "∀ α. (L → α) → C α α"
+  , "λf. C (f A) (f A)" -: "∀ α. (A → α) → C α α"
+  , "λf. C (f R) (f A)" -: "∀ α. (L → α) → C α α"
+  , "λf. C (f U) (f A)" -: "∀ α. (A → α) → C α α"
+  --
+  , "λf x. C (f x : L)" -: "∀ α. (α → L) → α → C L"
+  , "λf x. C (f x : L) (f x : L)" -: "∀ α. (α → L) → α → C L L"
+  , "λf x. C (f x : R) (f x : L)" -: "∀ α. (α → R) → α → C R L"
+  , "λf x. C (f x : A) (f x : L)" -: "∀ α. (α → A) → α → C A L"
+  , "λf x. C (f x : U) (f x : L)" -: "∀ α. (α → U) → α → C U L"
+  , "λf x. C (f x : A) (f x : A)" -: "∀ α. (α → A) → α → C A A"
+  , "λf x. C (f x : R) (f x : A)" -: "∀ α. (α → U) → α → C R A"
+  , "λf x. C (f x : U) (f x : A)" -: "∀ α. (α → U) → α → C U A"
+  , te "λf x. C (f x : U) (f x : B)"
+  --
+  , "λ(f : α → α) x. C (f x : B) (f x : B)" -: "(B → B) → B → C B B"
+  , "λ(f : α → α) x. C (f x : U) (f x : U)" -: "(U → U) → U → C U U"
+  , "λ(f : α → α) x. C (f x : R) (f x : A)" -: "(U → U) → U → C R A"
+  , "λ(f : α → α) x. C (f x : U) (f x : L)" -: "(U → U) → U → C U L"
+  , "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λL.L) U"
+      -: "C L L"
+  , "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λL.L) R"
+      -: "C L L"
+  , "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λR.R) R"
+      -: "C L L"
+  , "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λR.R) U"
+      -: "C L L"
+  , te "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λR.R) L"
+  , "let g = λ(f : α → α) x. C (f x : L) (f x : R) in g (λL.R) U"
+      -: "C L R"
+  , te "let g = λ(f : α → α) x. C (f x : L) (f x : R) in g (λL.L) U"
+  -- , "λ(f : α → α) x. C (f x : A) (f x : A)" -: "(A → A) → A → C A A"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"
-  -}
-  , te "λf. P (f A) (f B)"
-  {-
-  , "λx. single id" -: "∀ α β. α → List (β → β)"
   , "(single : (∀ α. α → α) → List (∀ α. α → α)) id"
                 -: "List (∀ α. α → α)"
   , "(single : (∀ α. α → α) → β) id"
@@ -667,7 +772,6 @@ inferFnTests = T.test
   , "single (id : ∀ α. α → α)"
                 -: "List (∀ α. α → α)"
   , te "single id : List (∀ α. α → α)"
-  , te "λf. f f"
   , te "λx. poly x"
   , te "poly (id id)"
   , "poly ((id : (∀ α. α → α) → β) id)"
@@ -779,17 +883,6 @@ inferFnTests = T.test
                 -: "Z"
   , "((λpoly. poly (λx.x)) : ((∀ α. α → α) → β) → β) (λf. f Z)"
                 -: "Z"
-  -- Patterns
-  , "λA. B"     -: "A → B"
-  , "λ(A x). x"
-                -: "∀ α. A α → α"
-  , "λ(A x) (B y z). x y z"
-                -: "∀ α β γ. A (α → β → γ) → B α β → γ"
-  -}
-  , pe "λ(A x x). B"
-  , "λ(A a (B b c) (C d (D e f g))). E"
-                -: "∀ α β γ δ e f g. A α (B β γ) (C δ (D e f g)) → E"
-  {-
   , "λ(A α (B β γ) (C δ (D e f g))). (E α g : E m m)"
                 -: "∀ α β γ δ e f. A α (B β γ) (C δ (D e f α)) → E α α"
   , "λ(A α (B β γ)). (C α (B β γ) : C m m)"
