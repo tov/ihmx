@@ -2,6 +2,7 @@
       BangPatterns,
       DeriveFunctor,
       EmptyDataDecls,
+      ExistentialQuantification,
       FlexibleInstances,
       FunctionalDependencies,
       ImplicitParams,
@@ -19,13 +20,14 @@ import Control.Arrow
 import Control.Applicative
 import Control.Monad
 import Control.Monad.Identity
-import Control.Monad.RWS   as RWS
+import Control.Monad.Reader     as CMR
+import Control.Monad.RWS        as RWS
 import Control.Monad.ST (runST)
-import qualified Data.Char as Char
-import qualified Data.List as List
-import qualified Data.Map  as Map
-import qualified Data.Set  as Set
-import qualified Data.STRef as ST
+import qualified Data.Char      as Char
+import qualified Data.List      as List
+import qualified Data.Map       as Map
+import qualified Data.Set       as Set
+import qualified Data.STRef     as ST
 import Text.Parsec hiding ((<|>), many, optional)
 import Text.Parsec.Token
 import qualified Text.PrettyPrint as Ppr
@@ -35,6 +37,102 @@ import qualified Test.HUnit as T
 import Util
 import Parsable
 import Ppr
+
+---
+--- Some algebra / order theory
+---
+
+class Eq a ⇒ Lattice a where
+  (⊔), (⊓) ∷ a → a → a
+  (⊑), (⊒) ∷ a → a → Bool
+  a ⊑ b = a ⊔ b == b
+  a ⊒ b = b ⊑ a
+
+class (Bounded a, Lattice a) ⇒ BoundedLattice a where
+  bigJoin, bigMeet ∷ [a] → a
+
+instance (Bounded a, Lattice a) ⇒ BoundedLattice a where
+  bigJoin = foldr (⊔) minBound
+  bigMeet = foldr (⊓) maxBound
+
+newtype DUAL a = DUAL { dual ∷ a } deriving (Eq, Show)
+
+instance Lattice a ⇒ Lattice (DUAL a) where
+  DUAL a ⊔ DUAL b = DUAL (a ⊓ b)
+  DUAL a ⊓ DUAL b = DUAL (a ⊔ b)
+
+instance Bounded a ⇒ Bounded (DUAL a) where
+  minBound = DUAL maxBound
+  maxBound = DUAL minBound
+
+instance Ord a ⇒  Ord (DUAL a) where
+  DUAL a `compare` DUAL b = b `compare` a
+
+---
+--- Usage qualifiers
+---
+
+infixl 6 ⊔
+infixl 7 ⊓
+infix 4 ⊑, ⊒
+
+data QLit = U | R | A | L
+  deriving (Eq, Show)
+
+instance Bounded QLit where
+  minBound = U
+  maxBound = L
+
+instance Lattice QLit where
+  U ⊔ q = q; q ⊔ U = q
+  R ⊔ A = L; R ⊔ R = R
+  A ⊔ A = A; A ⊔ R = L
+  L ⊔ _ = L; _ ⊔ L = L
+  --
+  U ⊓ _ = U; _ ⊓ U = U
+  R ⊓ A = U; R ⊓ R = R
+  A ⊓ A = A; A ⊓ R = U
+  L ⊓ q = q; q ⊓ L = q
+
+data QExp tv = QExp { qeLit ∷ QLit, qeTVs ∷ Set.Set tv }
+
+qlitexp ∷ QLit → QExp tv
+qlitexp = flip QExp Set.empty
+
+qvarexp ∷ Ord tv ⇒ tv → QExp tv
+qvarexp = QExp minBound . Set.singleton
+
+instance Ord tv ⇒ Eq (QExp tv) where
+  QExp L _   == QExp L _   = True
+  QExp q1 αs == QExp q2 βs = q1 == q2 && αs == βs
+
+instance Ord tv ⇒ Bounded (QExp tv) where
+  minBound = qlitexp U
+  maxBound = qlitexp L
+
+instance Ord tv ⇒ Lattice (QExp tv) where
+  QExp L _   ⊔ _          = maxBound
+  _          ⊔ QExp L _   = maxBound
+  QExp q1 αs ⊔ QExp q2 βs = QExp (q1 ⊔ q2) (αs `Set.union` βs)
+  --
+  QExp L _   ⊓ qe         = qe
+  qe         ⊓ QExp L _   = qe
+  QExp q1 αs ⊓ QExp q2 βs = QExp (q1 ⊓ q2) (αs `Set.intersection` βs)
+  --
+  _          ⊑ QExp L _   = True
+  QExp q1 αs ⊑ QExp q2 βs = q1 ⊑ q2 && αs `Set.isSubsetOf` βs
+
+-- | For now, we hard-code the variances of several type constructors
+--   and consider the rest to be covariant by default.
+getQualifier ∷ Ord tv ⇒ Name → [QExp tv] → QExp tv
+getQualifier "U"     _        = qlitexp U
+getQualifier "R"     _        = qlitexp R
+getQualifier "A"     _        = qlitexp A
+getQualifier "L"     _        = qlitexp L
+getQualifier "Ref"   [_]      = qlitexp U
+getQualifier "Ref"   [qe,_]   = qe
+getQualifier "Const" _        = qlitexp U
+getQualifier _       qes      = bigJoin qes
 
 ---
 --- Type constructor variance
@@ -88,9 +186,7 @@ instance Num Variance where
 -- | For now, we hard-code the variances of several type constructors
 --   and consider the rest to be covariant by default.
 getVariances ∷ Name → Int → [Variance]
-getVariances "->"    2 = [Contravariant, Covariant]
-getVariances "→"     2 = [Contravariant, Covariant]
-getVariances "Ref"   1 = [Invariant]
+getVariances "Ref"   i = replicate i Invariant
 getVariances "Const" i = replicate i Omnivariant
 getVariances "Anti"  i = replicate i Contravariant
 getVariances _       i = replicate i Covariant
@@ -106,6 +202,9 @@ elimEmpty = const undefined
 
 instance Eq Empty where
   _ == _ = True
+
+instance Ord Empty where
+  _ `compare` _ = EQ
 
 ---
 --- Representation of variables
@@ -150,10 +249,14 @@ boundVar ix jx n = BoundVar ix jx (Here n)
 data Type a
   -- | The list of names are the suggested printing names for the bound
   --   type variables
-  = QuaTy Quant [Perhaps Name] (Type a)
+  = QuaTy Quant [(Perhaps Name, QLit)] (Type a)
   | VarTy (Var a)
+  | ArrTy (Type a) (QExpV a) (Type a)
   | ConTy Name [Type a]
-  deriving (Eq, Ord, Functor)
+  deriving Eq
+
+-- | Qualifier expression with free and bound variables
+type QExpV a = QExp (Var a)
 
 -- | Quantifiers
 data Quant
@@ -161,9 +264,9 @@ data Quant
   | ExQu
   deriving (Eq, Ord)
 
-allTy, exTy ∷ Int → Type a → Type a
-allTy j = QuaTy AllQu (take j (map Here tvNames))
-exTy  j = QuaTy ExQu  (take j (map Here tvNames))
+allTy, exTy ∷ [QLit] → Type a → Type a
+allTy j = QuaTy AllQu (zip (map Here tvNames) j)
+exTy  j = QuaTy ExQu  (zip (map Here tvNames) j)
 
 bvTy ∷ Int → Int → Maybe Name → Type a
 bvTy i j n = VarTy (BoundVar i j (maybeToPerhaps n))
@@ -171,7 +274,7 @@ bvTy i j n = VarTy (BoundVar i j (maybeToPerhaps n))
 fvTy ∷ a → Type a
 fvTy  = VarTy . FreeVar
 
-t1 ↦ t2 = ConTy "→" [t1, t2]
+t1 ↦ t2 = ArrTy t1 minBound t2
 infixr 6 ↦
 
 -- | A type annotation. The list of 'Name's records the free
@@ -188,48 +291,96 @@ annot0  = Annot ["_"] (fvTy "_")
 type Deref m v = v → m (Either v (Type v))
 
 -- | Fold a type, while dereferencing type variables
-foldType ∷ (Monad m, ?deref ∷ Deref m v) ⇒
+foldType ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒
            -- | For quantifiers
-           (Quant → [Perhaps Name] → r → r) →
+           (Quant → [(Perhaps Name, QLit)] → r → r) →
            -- | For bound variables
-           (Int → Int → Maybe Name → r) →
+           (Int → Int → Maybe Name → Maybe QLit → r) →
            -- | For free variables
            (v → r) →
+           -- | For arrows
+           (r → QExpV v → r → r) →
            -- | For constructor applications
            (Name → [r] → r) →
            -- | Type to fold
            Type v →
            m r
-foldType fquant fbvar ffvar fcon = loop where
-  loop (QuaTy q n t)            = fquant q n `liftM` loop t
-  loop (VarTy (BoundVar i j n)) = return (fbvar i j (perhapsToMaybe n))
+foldType fquant fbvar ffvar farr fcon t0 =
+  let ?deref = lift . ?deref in CMR.runReaderT (loop t0) []
+  where
+  loop (QuaTy q αs t)           = do
+    r ← CMR.local (map snd αs:) (loop t)
+    return (fquant q αs r)
+  loop (VarTy (BoundVar i j n)) = do
+    env ← CMR.ask
+    return (fbvar i j (perhapsToMaybe n) (look i j env))
   loop (VarTy (FreeVar v))      = do
     mt ← ?deref v
     case mt of
       Left v' → return (ffvar v')
       Right t → loop t
+  loop (ArrTy t1 qe t2)         = do
+    env ← CMR.ask
+    let each (FreeVar v) = do
+          mt ← ?deref v
+          case mt of
+            Left v' → return (qvarexp (FreeVar v'))
+            Right t → qualifier t
+        each (BoundVar i j _)
+          | Just ql ← look i j env
+                         = return (qlitexp ql)
+        each v           = return (qvarexp v)
+    qes' ← mapM each (Set.toList (qeTVs qe))
+    let qe' = bigJoin (qlitexp (qeLit qe) : qes')
+    liftM3 farr (loop t1) (return qe') (loop t2)
   loop (ConTy n ts)             = fcon n `liftM` mapM loop ts
+  --
+  look i j = List.lookup i . zip [0..] >=> List.lookup j . zip [0..]
+
+-- | Get the qualifier of a type
+qualifier ∷ (Monad m, ?deref ∷ Deref m v, Ord v) ⇒
+            Type v → m (QExpV v)
+qualifier = foldType fquant fbvar ffvar farr fcon
+  where
+  fquant _ _            = id
+  fbvar _ _ _ (Just ql) = qlitexp ql
+  fbvar i j n Nothing   = qvarexp (BoundVar i j (maybeToPerhaps n))
+  ffvar                 = qvarexp . FreeVar
+  farr _ qe _           = qe
+  fcon n qes            = getQualifier n qes
+
+-- | Get something in the *form* of a qualifier without dereferencing
+pureQualifier ∷ Ord v ⇒ Type v → QExpV v
+pureQualifier t = runIdentity (qualifier t) where ?deref = return . Left
 
 -- | Monadic version of type folding
-foldTypeM ∷ (Monad m, ?deref ∷ Deref m v) ⇒
-            (Quant → [Perhaps Name] → r → m r) →
-            (Int → Int → Maybe Name → m r) →
+foldTypeM ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒
+            (Quant → [(Perhaps Name, QLit)] → r → m r) →
+            (Int → Int → Maybe Name → Maybe QLit → m r) →
             (v → m r) →
+            (r → QExpV v → r → m r) →
             (Name → [r] → m r) →
             Type v →
             m r
-foldTypeM fquant fbvar ffvar fcon t =
-  join (foldType fquantM fbvar ffvar fconM t) where
-    fquantM q i mr = fquant q i =<< mr
-    fconM c mrs    = fcon c =<< sequence mrs
+foldTypeM fquant fbvar ffvar farr fcon t =
+  join (foldType fquantM fbvar ffvar farrM fconM t) where
+    fquantM q αs mr  = fquant q αs =<< mr
+    fconM c mrs      = fcon c =<< sequence mrs
+    farrM mt1 qe mt2 = join (liftM3 farr mt1 (return qe) mt2)
 
+{-
 -- The type monad does substitution
 instance Monad Type where
   QuaTy u e t            >>= f = QuaTy u e (t >>= f)
   VarTy (FreeVar r)      >>= f = f r
   VarTy (BoundVar i j n) >>= _ = VarTy (BoundVar i j n)
+  -- ArrTy t1 qe t2         >>= f = do
   ConTy n ts             >>= f = ConTy n (map (>>= f) ts)
   return = VarTy . FreeVar
+
+mapType ∷ Ord b ⇒ (a → b) → Type a → Type b
+mapType = undefined
+-}
 
 -- | Apply a total substitution to a free type variable.  Total in this
 --   case simply means that the type variable must be in the domain of
@@ -242,32 +393,51 @@ totalSubst _ _ _ = error "BUG! substsAll saw unexpected free tv"
 
 -- | Use the given function to substitute for the free variables
 --   of a type; allows changing the ftv representation.
-typeMapM ∷ Monad m ⇒ (a → m (Type b)) → Type a → m (Type b)
+typeMapM ∷ (Ord a, Ord b, Monad m) ⇒ (a → m (Type b)) → Type a → m (Type b)
 typeMapM f = foldTypeM (return <$$$> QuaTy)
-                       (return <$$$> bvTy)
+                       (const <$> return <$$$> bvTy)
                        f
+                       (\t1 qe t2 → do
+                          qe' ← qexpMapM f qe
+                          return (ArrTy t1 qe' t2))
                        (return <$$> ConTy)
              where ?deref = return . Left
 
+qexpMapM ∷ (Ord b, Monad m) ⇒ (a → m (Type b)) → QExpV a → m (QExpV b)
+qexpMapM f (QExp ql tvs) = do
+  let each (FreeVar v) = do
+        t ← f v
+        qualifier t where ?deref = return . Left
+      each (BoundVar i j n) = return (qvarexp (BoundVar i j n))
+  qes' ← mapM each (Set.toList tvs)
+  return (bigJoin (qlitexp ql : qes'))
+
+qexpMap ∷ Ord b ⇒ (a → Type b) → QExpV a → QExpV b
+qexpMap f qe = runIdentity (qexpMapM (return . f) qe)
+
 -- | Is the given type ground (type-variable and quantifier free)?
-isGroundType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
-isGroundType = foldType (\_ _ _ → False) (\_ _ _ → False)
-                        (\_ → False) (\_ → and)
+isGroundType ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isGroundType = foldType (\_ _ _ → False) (\_ _ _ _ → False)
+                        (\_ → False) (const . (&&)) (\_ → and)
 
 -- | Is the given type closed? (ASSUMPTION: The type is locally closed)
-isClosedType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
-isClosedType = foldType (\_ _ → id) (\_ _ _ → True) (\_ → False) (\_ → and)
+isClosedType ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isClosedType = foldType (\_ _ → id) (\_ _ _ _ → True) (\_ → False)
+                        (const . (&&)) (\_ → and)
 
 -- | Is the given type quantifier free?
-isMonoType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
-isMonoType = foldType (\_ _ _ → False) (\_ _ _ → True) (\_ → True) (\_ → and)
+isMonoType ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isMonoType = foldType (\_ _ _ → False) (\_ _ _ _ → True) (\_ → True)
+                      (const . (&&)) (\_ → and)
 
 -- | Is the given type (universal) prenex?
 --   (Precondition: the argument is standard)
-isPrenexType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isPrenexType ∷ (Monad m, Ord v, ?deref ∷ Deref m v) ⇒ Type v → m Bool
 isPrenexType (QuaTy AllQu _ τ)   = isMonoType τ
 isPrenexType (VarTy (FreeVar r)) =
   either (\_ → return True) isPrenexType =<< ?deref r
+isPrenexType (ArrTy t1 _ t2)     =
+  liftM2 (&&) (isMonoType t1) (isMonoType t2)
 isPrenexType τ                   = isMonoType τ
 
 ---
@@ -279,7 +449,6 @@ data Patt a
   | WldPa
   | ConPa Name [Patt a]
   | AnnPa (Patt a) Annot
-  deriving Show
 
 -- | The number of variables bound by a pattern
 pattSize ∷ Patt a → Int
@@ -323,6 +492,7 @@ isAnnotated (ConTm _ _)      = False
 isAnnotated (AppTm _ _)      = False
 isAnnotated (AnnTm _ _)      = True
 
+{-
 ---
 --- Initial environment
 ---
@@ -359,6 +529,7 @@ isAnnotated (AnnTm _ _)      = True
 
 γ0 ∷ [Type Empty]
 γ0  = map (read . snd) γ0'
+-}
 
 ---
 --- Locally nameless operations
@@ -367,26 +538,40 @@ isAnnotated (AnnTm _ _)      = True
 -- | @openTy k τs τ@ substitutes @τs@ for the bound type variables at
 --   rib level @k@.  DeBruijn indices higher than @k@ are adjusted downward,
 --   since opening a type peels off a quantifier.
-openTy ∷ Int → [Type a] → Type a → Type a
+openTy ∷ Ord a ⇒ Int → [Type a] → Type a → Type a
 openTy  = openTyN 1
 
 -- | Generalization of 'openTy': the first argument specifies how much
 --   to adjust indices that exceed @k@.
-openTyN ∷ Int → Int → [Type a] → Type a → Type a
-openTyN n k vs (QuaTy u e t) = QuaTy u e (openTyN n (k + 1) vs t)
-openTyN n k vs (VarTy (BoundVar i j name))
+openTyN ∷ Ord a ⇒ Int → Int → [Type a] → Type a → Type a
+openTyN n k vs (QuaTy u e t)    = QuaTy u e (openTyN n (k + 1) vs t)
+openTyN n k vs (VarTy v)        = openTV_N n k vs v
+openTyN n k vs (ArrTy t1 qe t2) = ArrTy (openTyN n k vs t1)
+                                        (openQeN n k vs qe)
+                                        (openTyN n k vs t2)
+openTyN n k vs (ConTy name ts)  = ConTy name (map (openTyN n k vs) ts)
+
+openQeN ∷ Ord a ⇒ Int → Int → [Type a] → QExpV a → QExpV a
+openQeN n k vs = qexpMap (openTV_N n k vs)
+{-
+(QExp ql tvs) =
+  bigJoin (qlitexp ql : [ pureQualifier (openTV_N n k vs tv)
+                        | tv ← Set.toList tvs ])
+  -}
+
+openTV_N ∷ Int → Int → [Type a] → Var a → Type a
+openTV_N n k vs (BoundVar i j name)
   | i > k      = VarTy (BoundVar (i - n) j name)
   | i == k, Just t ← listNth j vs
               = t
   | otherwise = VarTy (BoundVar i j name)
-openTyN _ _ _  (VarTy (FreeVar v)) = VarTy (FreeVar v)
-openTyN n k vs (ConTy name ts) = ConTy name (map (openTyN n k vs) ts)
+openTV_N _ _ _  (FreeVar v) = VarTy (FreeVar v)
 
 -- | @closeTy k αs τ@ finds the free variables @αs@ and replaces them
 --   with bound variables at rib level @k@.  The position of each type
 --   variable in @αs@ gives the index of each bound variable into the
 --   new rib.
-closeTy ∷ Eq a ⇒ Int → [a] → Type a → Type a
+closeTy ∷ Ord a ⇒ Int → [a] → Type a → Type a
 closeTy k vs (QuaTy u e t) = QuaTy u e (closeTy (k + 1) vs t)
 closeTy k _  (VarTy (BoundVar i j n))
   | i >= k    = VarTy (BoundVar (i + 1) j n)
@@ -395,8 +580,12 @@ closeTy k vs (VarTy (FreeVar v))
   | Just j ← List.findIndex (== v) vs
               = VarTy (BoundVar k j Nope)
   | otherwise = VarTy (FreeVar v)
+closeTy k vs (ArrTy t1 qe t2) = ArrTy (closeTy k vs t1)
+                                      undefined -- (closeQe k vs qe)
+                                      (closeTy k vs t2)
 closeTy k vs (ConTy n ts) = ConTy n (map (closeTy k vs) ts)
 
+{-
 -- | Add the given quantifier while binding the given list of variables
 closeWith ∷ Eq a ⇒ Quant → [a] → Type a → Type a
 closeWith = closeWithNames []
@@ -539,6 +728,7 @@ instance Ord v ⇒ Ftv (Type v) v where
              (\_ _ tree → tree)
              (\_ _ _ → mempty)
              FTSingle
+             undefined
              (\c trees → FTBranch
                  [ FTVariance (* var) tree
                  | tree ← trees
@@ -871,6 +1061,7 @@ instance Parsable a ⇒ Read (Term a) where
 --- Pretty-printing
 ---
 
+-}
 -- | Given a base name, produces the list of names starting with the
 --   base name, then with a prime added, and then with numeric
 --   subscripts increasing from 1.
@@ -905,6 +1096,7 @@ tvNames, exNames, varNames ∷ [Name]
 tvNames = namesFrom "αβγδ"
 exNames = namesFrom "efgh"
 varNames = namesFrom ['i' .. 'z']
+{-
 
 -- | @freshName sugg avoid cands@ attempts to generate a fresh name
 --   as follows:
@@ -1176,4 +1368,5 @@ tryParsePprPatt s =
     Left e              → print e
     Right (patt, names) → print (pprPatt 0 names (patt ∷ Patt Empty))
 
+-}
 -}

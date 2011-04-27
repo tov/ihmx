@@ -62,11 +62,11 @@ module Infer (
   inferTests, tests,
 ) where
 
-import qualified Data.List  as List
+-- import qualified Data.List  as List
 import qualified Data.Map   as Map
 import qualified Test.HUnit as T
 import Control.Monad.RWS    as RWS
-import Control.Monad.State  as CMS
+-- import Control.Monad.State  as CMS
 
 import MonadU
 import Constraint
@@ -215,6 +215,7 @@ instAnnot δ (Annot names σ0) = do
     insert k       = Map.insert k
     eachName name  = maybe newTVTy return (Map.lookup name δ)
 
+{-
 -- | If the pattern is fully annotated, extract the annotation.
 extractPattAnnot ∷ Monad m ⇒ Patt Empty → m Annot
 extractPattAnnot π0 = do
@@ -227,6 +228,7 @@ extractPattAnnot π0 = do
   loop (AnnPa _ (Annot ns σ)) = do
     modify (`List.union` ns)
     return σ
+    -}
 
 ---
 --- Testing functions
@@ -239,7 +241,7 @@ check e = case showInfer (read e) of
 
 showInfer ∷ Term Empty → Either String (Type String, String)
 showInfer e = runU $ do
-  (τ, c) ← infer0 [map (fmap elimEmpty) γ0] e
+  (τ, c) ← infer0 [map (mapType elimEmpty) γ0] e
   τ'     ← stringifyType τ
   return (τ', show c)
 
@@ -1114,7 +1116,7 @@ inferFnTests = T.test
   a -: b = T.assertBool ("⊢ " ++ a ++ " : " ++ b)
              (case showInfer (read a) of
                 Left _       → False
-                Right (τ, _) → τ == fmap elimEmpty (read b))
+                Right (τ, _) → τ == mapType elimEmpty (read b))
   te a   = T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))
   pe a   = T.assertBool ("expected syntax error: " ++ a)
