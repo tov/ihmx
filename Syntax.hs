@@ -101,6 +101,8 @@ instance Lattice QLit where
   A ⊓ A = A; A ⊓ R = U
   L ⊓ q = q; q ⊓ L = q
 
+-- | The intent is that only well-formed qualifiers should be wrapped
+--   in 'QExp'.
 newtype QExp tv = QExp { unQExp ∷ Type tv }
 
 qexp      ∷ QLit → [Var tv] → QExp tv
@@ -112,6 +114,14 @@ qlitexp q = qexp q []
 qvarexp   ∷ Var tv → QExp tv
 qvarexp v = qexp U [v]
 
+instance Monoid (QExp tv) where
+  mempty = qlitexp U
+  QExp (ConTy c vs) `mappend` QExp (ConTy c' vs')
+    | Just ql  ← readQLit c
+    , Just ql' ← readQLit c'
+    = QExp (ConTy (show (ql ⊔ ql')) (vs ++ vs'))
+  _ `mappend` _
+    = qlitexp L
 
 {-
 instance Eq (QExp tv) where
@@ -137,17 +147,19 @@ instance Ord tv ⇒ Lattice (QExp tv) where
 
 -- | For now, we hard-code the variances of several type constructors
 --   and consider the rest to be covariant by default.
+--   PRECONDITION: The arguments are well-formed qualifiers.
+--   POSTCONDITION: The result is a well-formed qualifiers.
 getQualifier ∷ Name → [QExp tv] → QExp tv
 getQualifier "→"     [_,qe,_] = qe
-getQualifier "U"     qes      = QExp (ConTy "U" (map unQExp qes))
-getQualifier "R"     qes      = QExp (ConTy "R" (map unQExp qes))
-getQualifier "A"     qes      = QExp (ConTy "A" (map unQExp qes))
-getQualifier "L"     qes      = QExp (ConTy "L" (map unQExp qes))
+getQualifier "U"     qes      = mconcat (qlitexp U : qes)
+getQualifier "R"     qes      = mconcat (qlitexp R : qes)
+getQualifier "A"     qes      = mconcat (qlitexp A : qes)
+getQualifier "L"     qes      = mconcat (qlitexp L : qes)
 getQualifier "Ref"   [_]      = qlitexp U
 getQualifier "Ref"   [qe,_]   = qe
 getQualifier "Const" _        = qlitexp U
 getQualifier _       [qe]     = qe
-getQualifier _       qes      = QExp (ConTy "U" (map unQExp qes))
+getQualifier _       qes      = mconcat (qlitexp U : qes)
 
 ---
 --- Type constructor variance
@@ -310,7 +322,7 @@ foldType ∷ (Monad m, ?deref ∷ Deref m v) ⇒
            -- | For quantifiers
            (Quant → [(Perhaps Name, QLit)] → r → r) →
            -- | For bound variables
-           (Int → Int → Maybe Name → Maybe QLit → r) →
+           (Maybe QLit → Int → Int → Maybe Name → r) →
            -- | For free variables
            (v → r) →
            -- | For constructor applications
@@ -326,7 +338,7 @@ foldType fquant fbvar ffvar fcon t0 =
     return (fquant q αs r)
   loop (VarTy (BoundVar i j n)) = do
     env ← CMR.ask
-    return (fbvar i j (perhapsToMaybe n) (look i j env))
+    return (fbvar (look i j env) i j (perhapsToMaybe n))
   loop (VarTy (FreeVar v))      = do
     mt ← ?deref v
     case mt of
@@ -344,9 +356,9 @@ qualifier ∷ (Monad m, ?deref ∷ Deref m v) ⇒
             Type v → m (QExp v)
 qualifier = foldType fquant fbvar ffvar fcon
   where
-  fquant _ _            = id
-  fbvar _ _ _ (Just ql) = qlitexp ql
-  fbvar i j n Nothing   = qvarexp (BoundVar i j (maybeToPerhaps n))
+  fquant _ _ qe         = qe
+  fbvar (Just ql) _ _ _ = qlitexp ql
+  fbvar Nothing   i j n = qvarexp (BoundVar i j (maybeToPerhaps n))
   ffvar                 = qvarexp . FreeVar
   fcon n qes            = getQualifier n qes
 
@@ -357,7 +369,7 @@ pureQualifier t = runIdentity (qualifier t) where ?deref = return . Left
 -- | Monadic version of type folding
 foldTypeM ∷ (Monad m, ?deref ∷ Deref m v) ⇒
             (Quant → [(Perhaps Name, QLit)] → r → m r) →
-            (Int → Int → Maybe Name → Maybe QLit → m r) →
+            (Maybe QLit → Int → Int → Maybe Name → m r) →
             (v → m r) →
             (Name → [r] → m r) →
             Type v →
@@ -388,7 +400,7 @@ totalSubst _ _ _ = error "BUG! substsAll saw unexpected free tv"
 --   of a type; allows changing the ftv representation.
 typeMapM ∷ Monad m ⇒ (a → m (Type b)) → Type a → m (Type b)
 typeMapM f = foldTypeM (return <$$$> QuaTy)
-                       (const <$> return <$$$> bvTy)
+                       (const (return <$$$> bvTy))
                        f
                        (return <$$> ConTy)
              where ?deref = return . Left
@@ -439,8 +451,8 @@ pattSize (AnnPa π _)  = pattSize π
 
 data Term a
   = AbsTm (Patt a) (Term a)
-  | MatTm (Term a) [(Patt a, Term a)]
   | LetTm (Patt a) (Term a) (Term a)
+  | MatTm (Term a) [(Patt a, Term a)]
   | RecTm [(Perhaps Name, Term a)] (Term a)
   | VarTm (Var a)
   | ConTm Name [Term a]
@@ -610,6 +622,114 @@ openTmN n k es e0 = case e0 of
   AnnTm e annot → AnnTm (loop e) annot
   where next = openTmN n (k + 1) es
         loop = openTmN n k es
+
+---
+--- Occurrence analysis
+---
+
+-- | The number of occurrences of a variable in a term.  These
+--   are an abstraction of the natural numbers as zero, one, many, or
+--   combinations thereof.
+--   (Note: no { 0, 2+ })
+--
+data Occurrence
+  -- | Any number of times { 0, 1, 2+ }
+  = UO
+  -- | One or more times { 1, 2+ }
+  | RO
+  -- | Zero or one times { 0, 1 }
+  | AO
+  -- | Exactly one time { 1 }
+  | LO
+  -- | Zero times { 0 }
+  | ZO
+  -- | More than one time { 2+ }
+  | MO
+  -- | Dead code / error { }
+  | EO
+  deriving (Eq, Show)
+
+-- | Convert an occurrence to a representative list of numbers
+occToInts ∷ Occurrence → [Int]
+occToInts UO = [0, 1, 2]
+occToInts RO = [1, 2]
+occToInts AO = [0, 1]
+occToInts LO = [1]
+occToInts ZO = [0]
+occToInts MO = [2]
+occToInts EO = []
+
+-- | Convert an occurrence to the best qualifier literal
+occToQLit ∷ Occurrence → QLit
+occToQLit UO = U
+occToQLit RO = R
+occToQLit AO = A
+occToQLit LO = L
+occToQLit ZO = A
+occToQLit MO = R
+occToQLit EO = L
+
+instance Bounded Occurrence where
+  minBound = EO
+  maxBound = UO
+
+instance Lattice Occurrence where
+  EO ⊔ o  = o;  o  ⊔ EO = o
+  MO ⊔ LO = RO; LO ⊔ MO = RO
+  MO ⊔ RO = RO; RO ⊔ MO = RO
+  ZO ⊔ LO = AO; LO ⊔ ZO = AO
+  ZO ⊔ AO = AO; AO ⊔ ZO = AO
+  o  ⊔ o' | o == o'   = o
+          | otherwise = UO
+  --
+  UO ⊓ o  = o;  o  ⊓ UO = o
+  RO ⊓ AO = LO; AO ⊓ RO = LO
+  RO ⊓ LO = LO; LO ⊓ RO = LO
+  RO ⊓ MO = MO; MO ⊓ RO = MO
+  AO ⊓ LO = LO; LO ⊓ AO = LO
+  AO ⊓ ZO = ZO; ZO ⊓ AO = ZO
+  o  ⊓ o' | o == o'   = o
+          | otherwise = EO
+
+-- Abstract arithmetic
+instance Num Occurrence where
+  fromInteger 0             = ZO
+  fromInteger 1             = LO
+  fromInteger z | z > 1     = MO
+                | otherwise = EO
+  abs = id
+  negate = const EO
+  signum o = bigJoin (map (fromInteger . toInteger . signum) (occToInts o))
+  EO + _  = EO; _  + EO = EO
+  MO + _  = MO; _  + MO = MO
+  ZO + o  = o;  o  + ZO = o
+  LO + LO = MO;
+  LO + AO = RO; AO + LO = RO
+  LO + RO = MO; RO + LO = MO
+  LO + UO = RO; UO + LO = RO
+  AO + RO = RO; RO + AO = RO
+  RO + RO = MO;
+  RO + UO = RO; UO + RO = UO
+  _  + _  = UO
+  --
+  o  * o' = bigJoin $ do
+    z  ← occToInts o
+    z' ← occToInts o'
+    return (fromInteger (toInteger (z * z')))
+
+-- | Count the occurrences of a variable in a term.
+countOccs ∷ Eq a ⇒ a → Term a → Occurrence
+countOccs x = loop where
+  loop (AbsTm _ e)     = loop e
+  loop (LetTm _ e1 e2) = loop e1 + loop e2
+  loop (MatTm e1 bs)   = loop e1 + bigJoin (map (loop . snd) bs)
+  loop (RecTm bs e2)   = loop e2 + sum (map (loop . snd) bs)
+  loop (VarTm (FreeVar x'))
+    | x == x'          = 1
+  loop (VarTm _)       = 0
+  loop (ConTm _ es)    = sum (map loop es)
+  loop (AppTm e1 e2)   = loop e1 + loop e2
+  loop (AnnTm e _)     = loop e
 
 ---
 --- Free type variables

@@ -63,6 +63,10 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
     Contravariant → τ ≥ τ'
     Invariant     → τ ≤≥ τ'
     Omnivariant   → (⊤)
+  -- | A qualifier subsumption constraint
+  (⊏), (⊐), (⊏⊐) ∷ QExp r → QExp r → c
+  qe1 ⊐ qe2      = qe2 ⊏ qe1
+  qe1 ⊏⊐ qe2     = qe1 ⊏ qe2 ⋀ qe2 ⊏ qe1
   --
   -- | Figure out which variables to generalize in a piece of syntax
   gen'       ∷ (MonadU r m, Ftv γ r, Ftv a r, Show a) ⇒
