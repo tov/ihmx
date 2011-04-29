@@ -153,6 +153,7 @@ data Type a
   = QuaTy Quant [Perhaps Name] (Type a)
   | VarTy (Var a)
   | ConTy Name [Type a]
+  | UniTy (Type a) (Type a)
   deriving (Eq, Ord, Functor)
 
 -- | Quantifiers
@@ -197,10 +198,12 @@ foldType ∷ (Monad m, ?deref ∷ Deref m v) ⇒
            (v → r) →
            -- | For constructor applications
            (Name → [r] → r) →
+           -- | For union types
+           (r -> r → r) →
            -- | Type to fold
            Type v →
            m r
-foldType fquant fbvar ffvar fcon = loop where
+foldType fquant fbvar ffvar fcon fun = loop where
   loop (QuaTy q n t)            = fquant q n `liftM` loop t
   loop (VarTy (BoundVar i j n)) = return (fbvar i j (perhapsToMaybe n))
   loop (VarTy (FreeVar v))      = do
@@ -209,6 +212,7 @@ foldType fquant fbvar ffvar fcon = loop where
       Left v' → return (ffvar v')
       Right t → loop t
   loop (ConTy n ts)             = fcon n `liftM` mapM loop ts
+  loop (UniTy t1 t2)            = liftM2 fun (loop t1) (loop t2)
 
 -- | Monadic version of type folding
 foldTypeM ∷ (Monad m, ?deref ∷ Deref m v) ⇒
@@ -216,12 +220,17 @@ foldTypeM ∷ (Monad m, ?deref ∷ Deref m v) ⇒
             (Int → Int → Maybe Name → m r) →
             (v → m r) →
             (Name → [r] → m r) →
+            (r -> r → m r) →
             Type v →
             m r
-foldTypeM fquant fbvar ffvar fcon t =
-  join (foldType fquantM fbvar ffvar fconM t) where
+foldTypeM fquant fbvar ffvar fcon fun t =
+  join (foldType fquantM fbvar ffvar fconM funM t) where
     fquantM q i mr = fquant q i =<< mr
     fconM c mrs    = fcon c =<< sequence mrs
+    funM mt1 mt2   = do
+      t1 <- mt1
+      t2 <- mt2
+      fun t1 t2
 
 -- The type monad does substitution
 instance Monad Type where
@@ -229,6 +238,7 @@ instance Monad Type where
   VarTy (FreeVar r)      >>= f = f r
   VarTy (BoundVar i j n) >>= _ = VarTy (BoundVar i j n)
   ConTy n ts             >>= f = ConTy n (map (>>= f) ts)
+  UniTy t1 t2            >>= f = UniTy (t1 >>= f) (t2 >>= f)
   return = VarTy . FreeVar
 
 -- | Apply a total substitution to a free type variable.  Total in this
@@ -247,20 +257,21 @@ typeMapM f = foldTypeM (return <$$$> QuaTy)
                        (return <$$$> bvTy)
                        f
                        (return <$$> ConTy)
+                       (return <$$> UniTy)
              where ?deref = return . Left
 
 -- | Is the given type ground (type-variable and quantifier free)?
 isGroundType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
 isGroundType = foldType (\_ _ _ → False) (\_ _ _ → False)
-                        (\_ → False) (\_ → and)
+                        (\_ → False) (\_ → and) (&&) 
 
 -- | Is the given type closed? (ASSUMPTION: The type is locally closed)
 isClosedType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
-isClosedType = foldType (\_ _ → id) (\_ _ _ → True) (\_ → False) (\_ → and)
+isClosedType = foldType (\_ _ → id) (\_ _ _ → True) (\_ → False) (\_ → and) (&&)
 
 -- | Is the given type quantifier free?
 isMonoType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
-isMonoType = foldType (\_ _ _ → False) (\_ _ _ → True) (\_ → True) (\_ → and)
+isMonoType = foldType (\_ _ _ → False) (\_ _ _ → True) (\_ → True) (\_ → and) (&&)
 
 -- | Is the given type (universal) prenex?
 --   (Precondition: the argument is standard)
@@ -381,6 +392,7 @@ openTyN n k vs (VarTy (BoundVar i j name))
   | otherwise = VarTy (BoundVar i j name)
 openTyN _ _ _  (VarTy (FreeVar v)) = VarTy (FreeVar v)
 openTyN n k vs (ConTy name ts) = ConTy name (map (openTyN n k vs) ts)
+openTyN n k vs (UniTy t1 t2) = UniTy (openTyN n k vs t1) (openTyN n k vs t2)
 
 -- | @closeTy k αs τ@ finds the free variables @αs@ and replaces them
 --   with bound variables at rib level @k@.  The position of each type
@@ -396,6 +408,7 @@ closeTy k vs (VarTy (FreeVar v))
               = VarTy (BoundVar k j Nope)
   | otherwise = VarTy (FreeVar v)
 closeTy k vs (ConTy n ts) = ConTy n (map (closeTy k vs) ts)
+closeTy k vs (UniTy t1 t2) = UniTy (closeTy k vs t1) (closeTy k vs t2)
 
 -- | Add the given quantifier while binding the given list of variables
 closeWith ∷ Eq a ⇒ Quant → [a] → Type a → Type a
@@ -427,6 +440,7 @@ lcTy  = loop 0 where
   loop k (VarTy (BoundVar i _ _)) = k > i
   loop _ (VarTy (FreeVar _))      = True
   loop k (ConTy _ ts)             = all (loop k) ts
+  loop k (UniTy t1 t2)            = loop k t1 && loop k t2
 
 -- | Are there no bound vars of level k?
 lcTyK ∷ Int → Type a → Bool
@@ -435,6 +449,7 @@ lcTyK  = loop where
   loop k (VarTy (BoundVar i _ _)) = k /= i
   loop _ (VarTy (FreeVar _))      = True
   loop k (ConTy _ ts)             = all (loop k) ts
+  loop k (UniTy t1 t2)            = loop k t1 && loop k t2
 
 -- | Like 'openTyN', but for terms.
 openTmN ∷ Int → Int → [Term a] → Term a → Term a
@@ -543,6 +558,7 @@ instance Ord v ⇒ Ftv (Type v) v where
                  [ FTVariance (* var) tree
                  | tree ← trees
                  | var  ← getVariances c (length trees) ])
+             (\t1 t2 -> (FTBranch [t1, t2]))
 
 instance Ftv a v ⇒ Ftv [a] v where
   ftvTree a = FTBranch `liftM` mapM ftvTree a
@@ -633,6 +649,8 @@ standardizeType t00 = runST (loop 0 [] t00) where
 standardizeAnnot :: Annot → Annot
 standardizeAnnot (Annot ns t) = Annot ns (standardizeType t)
 
+-- The Lexer
+
 -- | A Parsec tokenizer
 tok ∷ TokenParser st
 tok  = makeTokenParser LanguageDef {
@@ -644,7 +662,7 @@ tok  = makeTokenParser LanguageDef {
   identLetter  = noλ $ alphaNum <|> oneOf "_'′₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹",
   opStart      = empty,
   opLetter     = empty,
-  reservedNames   = ["all", "ex", "let", "in", "rec", "and", "match", "with"],
+  reservedNames   = ["all", "ex", "let", "in", "rec", "and", "match", "with", "U"],
   reservedOpNames = ["->", "→", ".", "\\", "λ", "=", ":", "∀", "∃", "|"],
   caseSensitive   = True
 }
@@ -732,6 +750,11 @@ parseType  = level0 []
                  t2 ← level0 g
                  return (t1 ↦ t2)
   level2 g = ConTy <$> upperIdentifier <*> many (level3 g)
+         <|> do
+               reserved tok "U"
+               t1 <- level3 g
+               t2 <- level3 g
+               return (UniTy t1 t2)
          <|> level3 g
   level3 g = do
                tv ← lowerIdentifier
@@ -965,6 +988,7 @@ pprType  = loop 0 where
     ConTy c ts          →
       parensIf (p > 2) $
         Ppr.fsep (Ppr.text c : map (loop 3 g) ts)
+    UniTy t1 t2 -> parensIf (p > 2) $ Ppr.text "U" Ppr.<+> loop 3 g t1 Ppr.<+> loop 3 g t2
 
 -- | To pretty-print a pattern and return the list of names of
 --   the bound variables.  (Avoiding the given list of names.)
@@ -1116,6 +1140,8 @@ parseTypeTests = T.test
   , "∀ α. C α → ∀ α. C α"       <==> "∀ δ. C δ → ∀ e. C e"
   , "∃ α β. α → β"              <==> "∃ β α. β → α"
   , "∃ α. C α → ∃ α. C α"       <==> "∃ δ. C δ → ∃ e. C e"
+  , "U A B" ==> UniTy a b
+  , "U A B -> C A" ==> ((UniTy a b) ↦ c a)
   ]
   where
     a = ConTy "A" []
