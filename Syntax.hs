@@ -104,6 +104,7 @@ instance Lattice QLit where
 -- | The intent is that only well-formed qualifiers should be wrapped
 --   in 'QExp'.
 newtype QExp tv = QExp { unQExp ∷ Type tv }
+  deriving Show
 
 qexp      ∷ QLit → [Var tv] → QExp tv
 qexp q vs = QExp (ConTy (show q) (map VarTy vs))
@@ -344,6 +345,9 @@ foldType fquant fbvar ffvar fcon t0 =
     case mt of
       Left v' → return (ffvar v')
       Right t → loop t
+  loop (ConTy "→" [t1, qe, t2]) = do
+    QExp qe' ← qualifier qe
+    fcon "→" `liftM` mapM loop [t1, qe', t2]
   loop (ConTy n ts)             = fcon n `liftM` mapM loop ts
   --
   look i j env

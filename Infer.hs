@@ -241,12 +241,12 @@ check e = case showInfer (read e) of
 
 showInfer ∷ Term Empty → Either String (Type String, String)
 showInfer e = runU $ do
-  (τ, c) ← infer0 [map (mapType elimEmpty) γ0] e
+  (τ, c) ← infer0 [elimEmpty <$$> γ0] e
   τ'     ← stringifyType τ
   return (τ', show c)
 
 stringifyType ∷ (MonadU s m, Show s) ⇒ Type s → m (Type String)
-stringifyType = foldType QuaTy bvTy (fvTy . show) ConTy where ?deref = readTV
+stringifyType = foldType QuaTy (const bvTy) (fvTy . show) ConTy where ?deref = readTV
 
 {-
 -- | Given a type, strip off the outermost quantifier and make the bound
@@ -667,7 +667,7 @@ showSubsumeAnnot t1 t2 = runU $ do
 
 showInfer ∷ Term Empty → Either String (Type String)
 showInfer e = runU $ do
-  τ ← infer Map.empty [map (fmap elimEmpty) γ0] e Nothing
+  τ ← infer Map.empty [elimEmpty <$$> γ0] e Nothing
   stringifyType τ
 
 u ∷ String → String → IO ()
@@ -1116,7 +1116,7 @@ inferFnTests = T.test
   a -: b = T.assertBool ("⊢ " ++ a ++ " : " ++ b)
              (case showInfer (read a) of
                 Left _       → False
-                Right (τ, _) → τ == mapType elimEmpty (read b))
+                Right (τ, _) → τ == fmap elimEmpty (read b))
   te a   = T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))
   pe a   = T.assertBool ("expected syntax error: " ++ a)

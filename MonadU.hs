@@ -143,12 +143,7 @@ deref τ                   = return τ
 
 -- | Fully dereference a type
 derefAll ∷ MonadU tv m ⇒ Type tv → m (Type tv)
-derefAll =
-  let ?deref = readTV
-   in foldType QuaTy (const bvTy) fvTy fconTy
-  where
-  fconTy "→" [τ1, qe, τ2] = ConTy "→" [τ1, unQExp (pureQualifier qe), τ2]
-  fconTy c τs             = ConTy c τs
+derefAll = foldType QuaTy (const bvTy) fvTy ConTy where ?deref = readTV
 
 -- | Assert that a type variable is ununified
 isUnifiableTV ∷ MonadU tv m ⇒ tv → m Bool
