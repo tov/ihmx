@@ -1142,10 +1142,12 @@ parseTypeTests = T.test
   , "∃ α. C α → ∃ α. C α"       <==> "∃ δ. C δ → ∃ e. C e"
   , "U A B" ==> UniTy a b
   , "U A B -> C A" ==> ((UniTy a b) ↦ c a)
+  , "U A (U D B)" ==> (UniTy a (UniTy d b))
   ]
   where
     a = ConTy "A" []
     b = ConTy "B" []
+    d = ConTy "D" []
     c t = ConTy "C" [t]
     bv m n = VarTy (BoundVar m n Nope)
 
