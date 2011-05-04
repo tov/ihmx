@@ -94,13 +94,13 @@ infer δ γ e0 = case e0 of
   AbsTm π e                     → do
     (δ', c1, τ1, τs) ← inferPatt δ π Nothing
     (τ2, c2)         ← infer δ' (τs:γ) e
-    return (τ1 ↦ τ2, c1 ⋀ c2)
+    return (τ1 ↦ τ2, c1 ⋀ c2 ⋀ τs ⊏* e) -- TODO qualifier
   LetTm π e1 e2                 → do
     (τ1, c1)         ← infer δ γ e1
     (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1)
     (τs', c')        ← genList (syntacticValue e1) (c1 ⋀ cπ) γ τs
     (τ2, c2)         ← infer δ' (τs':γ) e2
-    return (τ2, c' ⋀ c2)
+    return (τ2, c' ⋀ c2 ⋀ τs ⊏* e2)
   MatTm e1 bs                   → do
     α                ← newTVTy
     (τ1, c1)         ← infer δ γ e1
@@ -108,7 +108,7 @@ infer δ γ e0 = case e0 of
       [ do
           (δ', ci, _, τs) ← inferPatt δ πi (Just τ1)
           (τi, ci') ← infer δ' (τs:γ) ei
-          return (ci ⋀ ci' ⋀ τi ≤ α)
+          return (ci ⋀ ci' ⋀ τi ≤ α ⋀ τs ⊏* ei)
       | (πi, ei) ← bs ]
     return (α, c1 ⋀ mconcat cs)
   RecTm bs e2                   → do
@@ -118,7 +118,7 @@ infer δ γ e0 = case e0 of
           unless (syntacticValue ei) $
             fail "In let rec, binding not a syntactic value"
           (τi, ci) ← infer δ (αs:γ) ei
-          return (ci ⋀ αi ≤≥ τi)
+          return (ci ⋀ αi ≤≥ τi ⋀ αi ⊏ U)
       | (_, ei) ← bs
       | αi      ← αs ]
     (τs', c')        ← genList True (mconcat cs) γ αs
@@ -135,7 +135,7 @@ infer δ γ e0 = case e0 of
     (τ1, c1)         ← infer δ γ e1
     (τ2, c2)         ← infer δ γ e2
     α                ← newTVTy
-    return (α, c1 ⋀ c2 ⋀ τ1 ≤ τ2 ↦ α)
+    return (α, c1 ⋀ c2 ⋀ τ1 ≤ arrTy τ2 (qlitexp A) α)
   AnnTm e annot                 → do
     (δ', τ', _)      ← instAnnot δ annot
     (τ, c)           ← infer δ' γ e
@@ -699,50 +699,50 @@ inferFnTests ∷ T.Test
 inferFnTests = T.test
   [ "A"         -: "A"
   , "A B C"     -: "A B C"
-  , "λx.x"      -: "∀ α. α → α"
-  , "λa.id id"  -: "∀ α β. α → β → β"
+  , "λx.x"      -: "∀ α : U. α → α"
+  , "λa.id id"  -: "∀ α β : U. α → β → β"
   , "λx.choose id"
-                -: "∀ β α. β → (α → α) → α → α"
+                -: "∀ β α : U. β → (α → α) → α → α"
   , "λx.choose (id : α → α)"
-                -: "∀ α β. α → (β → β) → (β → β)"
+                -: "∀ α β : U. α → (β → β) → (β → β)"
   , te "λf. P (f A) (f B)"
-  , "λx. single id" -: "∀ α β. α → List (β → β)"
-  , "λf x. f (f x)"     -: "∀ α. (α → α) → α → α"
+  , "λx. single id" -: "∀ α β : U. α → List (β → β)"
+  , "λf x. f (f x)"     -: "∀ α : U. (α → α) → α → α"
   -- Patterns
   , "λC. B"     -: "C → B"
   , "λA. B"     -: "A → B"
   , "λ(L:U). B" -: "U → B"
   , te "λ(R:A). B"
   , "λ(A x). x"
-                -: "∀ α. A α → α"
+                -: "∀ α : U. A α → α"
   , "λ(A x) (B y z). x y z"
-                -: "∀ α β γ. A (α → β → γ) → B α β → γ"
+                -: "∀ α β γ : U. A (α → β → γ) → B α β → γ"
   , pe "λ(A x x). B"
   , "λ(A a (B b c) (C d (D e f g))). E"
-                -: "∀ α β γ δ e f g. A α (B β γ) (C δ (D e f g)) → E"
+                -: "∀ α β γ δ e f g : U. A α (B β γ) (C δ (D e f g)) → E"
   -- Occurs check
   , te "λf. f f"
   , te "let rec f = λ(C x).f (C (f x)) in f"
   -- Subtyping
-  , "λf. C (f L)" -: "∀ α. (L → α) → C α"
-  , "λf. C (f L) (f L)" -: "∀ α. (L → α) → C α α"
-  , "λf. C (f R) (f L)" -: "∀ α. (L → α) → C α α"
-  , "λf. C (f A) (f L)" -: "∀ α. (L → α) → C α α"
-  , "λf. C (f L) (f R)" -: "∀ α. (L → α) → C α α"
-  , "λf. C (f L) (f A)" -: "∀ α. (L → α) → C α α"
-  , "λf. C (f U) (f L)" -: "∀ α. (L → α) → C α α"
-  , "λf. C (f A) (f A)" -: "∀ α. (A → α) → C α α"
-  , "λf. C (f R) (f A)" -: "∀ α. (L → α) → C α α"
-  , "λf. C (f U) (f A)" -: "∀ α. (A → α) → C α α"
+  , "λf. C (f L)" -: "∀ α : U. (L → α) → C α"
+  , "λf. C (f L) (f L)" -: "∀ α : U. (L → α) → C α α"
+  , "λf. C (f R) (f L)" -: "∀ α : U. (L → α) → C α α"
+  , "λf. C (f A) (f L)" -: "∀ α : U. (L → α) → C α α"
+  , "λf. C (f L) (f R)" -: "∀ α : U. (L → α) → C α α"
+  , "λf. C (f L) (f A)" -: "∀ α : U. (L → α) → C α α"
+  , "λf. C (f U) (f L)" -: "∀ α : U. (L → α) → C α α"
+  , "λf. C (f A) (f A)" -: "∀ α : U. (A → α) → C α α"
+  , "λf. C (f R) (f A)" -: "∀ α : U. (L → α) → C α α"
+  , "λf. C (f U) (f A)" -: "∀ α : U. (A → α) → C α α"
   --
-  , "λf x. C (f x : L)" -: "∀ α. (α → L) → α → C L"
-  , "λf x. C (f x : L) (f x : L)" -: "∀ α. (α → L) → α → C L L"
-  , "λf x. C (f x : R) (f x : L)" -: "∀ α. (α → R) → α → C R L"
-  , "λf x. C (f x : A) (f x : L)" -: "∀ α. (α → A) → α → C A L"
-  , "λf x. C (f x : U) (f x : L)" -: "∀ α. (α → U) → α → C U L"
-  , "λf x. C (f x : A) (f x : A)" -: "∀ α. (α → A) → α → C A A"
-  , "λf x. C (f x : R) (f x : A)" -: "∀ α. (α → U) → α → C R A"
-  , "λf x. C (f x : U) (f x : A)" -: "∀ α. (α → U) → α → C U A"
+  , "λf x. C (f x : L)" -: "∀ α : U. (α → L) → α → C L"
+  , "λf x. C (f x : L) (f x : L)" -: "∀ α : U. (α → L) → α → C L L"
+  , "λf x. C (f x : R) (f x : L)" -: "∀ α : U. (α → R) → α → C R L"
+  , "λf x. C (f x : A) (f x : L)" -: "∀ α : U. (α → A) → α → C A L"
+  , "λf x. C (f x : U) (f x : L)" -: "∀ α : U. (α → U) → α → C U L"
+  , "λf x. C (f x : A) (f x : A)" -: "∀ α : U. (α → A) → α → C A A"
+  , "λf x. C (f x : R) (f x : A)" -: "∀ α : U. (α → U) → α → C R A"
+  , "λf x. C (f x : U) (f x : A)" -: "∀ α : U. (α → U) → α → C U A"
   , te "λf x. C (f x : U) (f x : B)"
   --
   , "λ(f : α → α) x. C (f x : B) (f x : B)" -: "(B → B) → B → C B B"

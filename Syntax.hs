@@ -31,12 +31,14 @@ import qualified Data.STRef     as ST
 import Text.Parsec hiding ((<|>), many, optional)
 import Text.Parsec.Token
 import qualified Text.PrettyPrint as Ppr
+import qualified Unsafe.Coerce
 
 import qualified Test.HUnit as T
 
 import Util
 import Parsable
 import Ppr
+import qualified Stream
 
 ---
 --- Some algebra / order theory
@@ -60,6 +62,10 @@ newtype DUAL a = DUAL { dual ∷ a } deriving (Eq, Show)
 instance Lattice a ⇒ Lattice (DUAL a) where
   DUAL a ⊔ DUAL b = DUAL (a ⊓ b)
   DUAL a ⊓ DUAL b = DUAL (a ⊔ b)
+
+instance Lattice a ⇒ Lattice (Stream.Stream a) where
+  (⊔) = liftM2 (⊔)
+  (⊓) = liftM2 (⊓)
 
 instance Bounded a ⇒ Bounded (DUAL a) where
   minBound = DUAL maxBound
@@ -146,8 +152,8 @@ instance Ord tv ⇒ Lattice (QExp tv) where
   QExp q1 αs ⊑ QExp q2 βs = q1 ⊑ q2 && αs `Set.isSubsetOf` βs
 -}
 
--- | For now, we hard-code the variances of several type constructors
---   and consider the rest to be covariant by default.
+-- | For now, we hard-code the qualifiers of several type constructors
+--   and consider the rest to be like tuples by default.
 --   PRECONDITION: The arguments are well-formed qualifiers.
 --   POSTCONDITION: The result is a well-formed qualifiers.
 getQualifier ∷ Name → [QExp tv] → QExp tv
@@ -166,8 +172,49 @@ getQualifier _       qes      = mconcat (qlitexp U : qes)
 --- Type constructor variance
 ---
 
-data Variance = Omnivariant | Covariant | Contravariant | Invariant
+{-
+Type constructor variance forms a seven point lattice, which keeps track
+of both polarity and parameters that should be treated as qualifiers.
+In particular, given a unary type constructor T with variance +, T S <:
+T U when S <: U; but if T has variance Q+, then T S <: T U when
+|S| ≤ |U|, where |⋅| gives the qualifier of a type.
+
+       =
+      /|\
+     / | \
+    /  |  \
+   +  Q=   -
+   | /  \  |
+   |/    \ |
+  Q+      Q-
+    \     /
+     \   /
+      \ /
+       0
+-}
+
+data Variance
+  -- | 0
+  = Omnivariant
+  -- | Q+
+  | QCovariant
+  -- | Q-
+  | QContravariant
+  -- | Q=
+  | QInvariant
+  -- | +
+  | Covariant
+  -- | -
+  | Contravariant
+  -- | =
+  | Invariant
   deriving (Eq, Show)
+
+isQVariance ∷ Variance → Bool
+isQVariance QInvariant     = True
+isQVariance QCovariant     = True
+isQVariance QContravariant = True
+isQVariance _              = False
 
 -- | Variances are a four point lattice with Invariant on top and
 --   Omnivariant on the bottom
@@ -175,47 +222,98 @@ instance Bounded Variance where
   minBound = Omnivariant
   maxBound = Invariant
 
+instance Lattice Variance where
+  Omnivariant    ⊔ v2             = v2
+  v1             ⊔ Omnivariant    = v1
+  QCovariant     ⊔ Covariant      = Covariant
+  Covariant      ⊔ QCovariant     = Covariant
+  QContravariant ⊔ Contravariant  = Contravariant
+  Contravariant  ⊔ QContravariant = Contravariant
+  v1             ⊔ v2
+    | v1 == v2                    = v1
+    | isQVariance v1 && isQVariance v2
+                                  = QInvariant
+    | otherwise                   = Invariant
+  --
+  Invariant      ⊓ v2             = v2
+  v1             ⊓ Invariant      = v1
+  QCovariant     ⊓ Covariant      = QCovariant
+  Covariant      ⊓ QCovariant     = QCovariant
+  QInvariant     ⊓ Covariant      = QCovariant
+  Covariant      ⊓ QInvariant     = QCovariant
+  QContravariant ⊓ Contravariant  = QContravariant
+  Contravariant  ⊓ QContravariant = QContravariant
+  QInvariant     ⊓ Contravariant  = QContravariant
+  Contravariant  ⊓ QInvariant     = QContravariant
+  QInvariant     ⊓ QCovariant     = QCovariant
+  QCovariant     ⊓ QInvariant     = QCovariant
+  QInvariant     ⊓ QContravariant = QContravariant
+  QContravariant ⊓ QInvariant     = QContravariant
+  v1             ⊓ v2
+    | v1 == v2                    = v1
+    | otherwise                   = Omnivariant
+  --
+  Omnivariant    ⊑ _              = True
+  QCovariant     ⊑ Covariant      = True
+  QContravariant ⊑ Contravariant  = True
+  QCovariant     ⊑ QInvariant     = True
+  QContravariant ⊑ QInvariant     = True
+  _              ⊑ Invariant      = True
+  v1             ⊑ v2             = v1 == v2
+
 -- | Variances work like abstract sign arithmetic, where:
---    Omnivariant   = { 0 }
---    Covariant     = ℤ₊ = { 0, 1, 2, ... }
---    Contravariant = ℤ₋ = { 0, -1, -2, ... }
---    Invariant     = ℤ
+--    Omnivariant    = { 0 }
+--    Covariant      = ℤ₊  = { 0, 1, 2, ... }
+--    Contravariant  = ℤ₋  = { ..., -2, -1, 0 }
+--    Invariant      = ℤ
+--    QCovariant     = 2ℤ₊ = { 0, 2, 4, ... }
+--    QContravariant = 2ℤ₋ = { ..., -4, -2, 0 }
+--    QInvariant     = 2ℤ  = { ..., -4, -2, 0, 2, 4, ... }
 --- In this view, addition gives the join for the variance lattice,
 --  and multiplication gives the variance of composing type constructors
---  of the given variances.
+--  of the given variances (more or less).
 instance Num Variance where
-  Omnivariant   + v2            = v2
-  v1            + Omnivariant   = v1
-  Covariant     + Covariant     = Covariant
-  Contravariant + Contravariant = Contravariant
-  _             + _             = Invariant
+  (+) = (⊔)
   --
-  Contravariant * Contravariant = Covariant
-  Covariant     * v2            = v2
-  v1            * Covariant     = v1
-  Omnivariant   * _             = Omnivariant
-  _             * Omnivariant   = Omnivariant
-  _             * _             = Invariant
+  Omnivariant    * _              = Omnivariant
+  Covariant      * v2             = v2
+  v1             * Covariant      = v1
+  Contravariant  * v2             = negate v2
+  v1             * Contravariant  = negate v1
+  QCovariant     * v2             = v2 ⊓ QInvariant
+  v1             * QCovariant     = v1 ⊓ QInvariant
+  QContravariant * v2             = negate v2 ⊓ QInvariant
+  v1             * QContravariant = negate v1 ⊓ QInvariant
+  QInvariant     * _              = QInvariant
+  _              * QInvariant     = QInvariant
+  _              * _              = Invariant
   --
   abs Omnivariant               = Omnivariant
-  abs _                         = Covariant
+  abs v | isQVariance v         = QCovariant
+        | otherwise             = Covariant
   --
-  signum                        = id
+  signum QCovariant             = Covariant
+  signum QContravariant         = Contravariant
+  signum QInvariant             = Invariant
+  signum v                      = v
   --
   negate Covariant              = Contravariant
   negate Contravariant          = Covariant
+  negate QCovariant             = QContravariant
+  negate QContravariant         = QCovariant
   negate v                      = v
   --
   fromInteger i
-    | i < 0     = Contravariant
-    | i > 0     = Covariant
+    | i > 0     = if even i then QCovariant else Covariant
+    | i < 0     = if even i then QContravariant else Contravariant
     | otherwise = Omnivariant
 
 -- | For now, we hard-code the variances of several type constructors
 --   and consider the rest to be covariant by default.
 getVariances ∷ Name → Int → [Variance]
-getVariances "→"     3 = [-1, 1, 1]
-getVariances "Ref"   i = replicate i Invariant
+getVariances "→"     3 = [Contravariant, QCovariant, Covariant]
+getVariances "Ref"   1 = [Invariant]
+getVariances "Ref"   2 = [QInvariant, Invariant]
 getVariances "Const" i = replicate i Omnivariant
 getVariances "Anti"  i = replicate i Contravariant
 getVariances _       i = replicate i Covariant
@@ -226,8 +324,11 @@ getVariances _       i = replicate i Covariant
 
 data Empty
 
-elimEmpty ∷ Empty → a
-elimEmpty = const undefined
+elimEmpty  ∷ Empty → a
+elimEmpty  = const undefined
+
+elimEmptyF ∷ Functor f ⇒ f Empty → f a
+elimEmptyF = Unsafe.Coerce.unsafeCoerce
 
 instance Eq Empty where
   _ == _ = True
@@ -266,6 +367,10 @@ data Var a
 boundVar ∷ Int → Int → Name → Var a
 boundVar ix jx n = BoundVar ix jx (Here n)
 
+bumpVar ∷ Int → Var a → Var a
+bumpVar k (BoundVar i j n) = BoundVar (i + k) j n
+bumpVar _ v                = v
+
 ---
 --- Representation of types and type annotations
 ---
@@ -293,8 +398,8 @@ allTy, exTy ∷ [QLit] → Type a → Type a
 allTy j = QuaTy AllQu (zip (map Here tvNames) j)
 exTy  j = QuaTy ExQu  (zip (map Here tvNames) j)
 
-bvTy ∷ Int → Int → Maybe Name → Type a
-bvTy i j n = VarTy (BoundVar i j (maybeToPerhaps n))
+bvTy ∷ Optional f => Int → Int → f Name → Type a
+bvTy i j n = VarTy (BoundVar i j (coerceOptional n))
 
 fvTy ∷ a → Type a
 fvTy  = VarTy . FreeVar
@@ -323,7 +428,7 @@ foldType ∷ (Monad m, ?deref ∷ Deref m v) ⇒
            -- | For quantifiers
            (Quant → [(Perhaps Name, QLit)] → r → r) →
            -- | For bound variables
-           (Maybe QLit → Int → Int → Maybe Name → r) →
+           (Maybe QLit → Int → Int → Perhaps Name → r) →
            -- | For free variables
            (v → r) →
            -- | For constructor applications
@@ -339,16 +444,19 @@ foldType fquant fbvar ffvar fcon t0 =
     return (fquant q αs r)
   loop (VarTy (BoundVar i j n)) = do
     env ← CMR.ask
-    return (fbvar (look i j env) i j (perhapsToMaybe n))
+    return (fbvar (look i j env) i j n)
   loop (VarTy (FreeVar v))      = do
     mt ← ?deref v
     case mt of
       Left v' → return (ffvar v')
       Right t → loop t
-  loop (ConTy "→" [t1, qe, t2]) = do
-    QExp qe' ← qualifier qe
-    fcon "→" `liftM` mapM loop [t1, qe', t2]
-  loop (ConTy n ts)             = fcon n `liftM` mapM loop ts
+  loop (ConTy n ts)             =
+    fcon n `liftM` sequence
+      [ if isQVariance v
+          then loop . unQExp =<< qualifier t
+          else loop t
+      | t ← ts
+      | v ← getVariances n (length ts) ]
   --
   look i j env
     | rib:_ ← drop i env
@@ -362,7 +470,7 @@ qualifier = foldType fquant fbvar ffvar fcon
   where
   fquant _ _ qe         = qe
   fbvar (Just ql) _ _ _ = qlitexp ql
-  fbvar Nothing   i j n = qvarexp (BoundVar i j (maybeToPerhaps n))
+  fbvar Nothing   i j n = qvarexp (BoundVar i j n)
   ffvar                 = qvarexp . FreeVar
   fcon n qes            = getQualifier n qes
 
@@ -373,7 +481,7 @@ pureQualifier t = runIdentity (qualifier t) where ?deref = return . Left
 -- | Monadic version of type folding
 foldTypeM ∷ (Monad m, ?deref ∷ Deref m v) ⇒
             (Quant → [(Perhaps Name, QLit)] → r → m r) →
-            (Maybe QLit → Int → Int → Maybe Name → m r) →
+            (Maybe QLit → Int → Int → Perhaps Name → m r) →
             (v → m r) →
             (Name → [r] → m r) →
             Type v →
@@ -441,6 +549,7 @@ data Patt a
   | WldPa
   | ConPa Name [Patt a]
   | AnnPa (Patt a) Annot
+  deriving Functor
 
 -- | The number of variables bound by a pattern
 pattSize ∷ Patt a → Int
@@ -462,6 +571,13 @@ data Term a
   | ConTm Name [Term a]
   | AppTm (Term a) (Term a)
   | AnnTm (Term a) Annot
+  deriving Functor
+
+bvTm ∷ Optional f => Int → Int → f Name → Term a
+bvTm i j n = VarTm (BoundVar i j (coerceOptional n))
+
+fvTm ∷ a → Term a
+fvTm  = VarTm . FreeVar
 
 syntacticValue ∷ Term a → Bool
 syntacticValue (AbsTm _ _)       = True
@@ -605,27 +721,44 @@ lcTyK  = loop where
   loop _ (VarTy (FreeVar _))      = True
   loop k (ConTy _ ts)             = all (loop k) ts
 
+-- | Rename the variables at rib level k, where we adjust the rib levels
+--   in the new names as we traverse under binders.
+renameTm ∷ Int → [Var a] → Term a → Term a
+renameTm k vs e0 = case e0 of
+  AbsTm π e     → AbsTm π (next e)
+  LetTm π e1 e2 → LetTm π (loop e1) (next e2)
+  MatTm e1 bs   → MatTm (loop e1) [ (π, next e) | (π,e) ← bs ]
+  RecTm bs e2   → RecTm [ (pn, next e) | (pn,e) ← bs ] (next e2)
+  VarTm var     → VarTm $ case var of
+    BoundVar i j name
+      | i > k         → BoundVar i j name
+      | i == k, Just v ← listNth j vs
+                      → bumpVar k v
+    _                 → var
+  ConTm n vs    → ConTm n (map loop vs)
+  AppTm e1 e2   → AppTm (loop e1) (loop e2)
+  AnnTm e annot → AnnTm (loop e) annot
+  where next = renameTm (k + 1) vs
+        loop = renameTm k vs
+
 -- | Like 'openTyN', but for terms.
-openTmN ∷ Int → Int → [Term a] → Term a → Term a
-openTmN n k es e0 = case e0 of
+openTm ∷ Int → [Term a] → Term a → Term a
+openTm k es e0 = case e0 of
   AbsTm π e     → AbsTm π (next e)
   LetTm π e1 e2 → LetTm π (loop e1) (next e2)
   MatTm e1 bs   → MatTm (loop e1) [ (π, next e) | (π,e) ← bs ]
   RecTm bs e2   → RecTm [ (pn, next e) | (pn,e) ← bs ] (next e2)
   VarTm var     → case var of
     BoundVar i j name
-      | i > k         → VarTm (BoundVar (i - n) j name)
+      | i > k         → VarTm (BoundVar i j name)
       | i == k, Just e ← listNth j es
-                      → case e of
-        VarTm (BoundVar i' j' name')
-          → VarTm (BoundVar (i' + k) j' name')
-        _ → e
+                      → e
     _                 → VarTm var
   ConTm n es    → ConTm n (map loop es)
   AppTm e1 e2   → AppTm (loop e1) (loop e2)
   AnnTm e annot → AnnTm (loop e) annot
-  where next = openTmN n (k + 1) es
-        loop = openTmN n k es
+  where next = openTm (k + 1) es
+        loop = openTm k es
 
 ---
 --- Occurrence analysis
@@ -721,7 +854,7 @@ instance Num Occurrence where
     z' ← occToInts o'
     return (fromInteger (toInteger (z * z')))
 
--- | Count the occurrences of a variable in a term.
+{-
 countOccs ∷ Eq a ⇒ a → Term a → Occurrence
 countOccs x = loop where
   loop (AbsTm _ e)     = loop e
@@ -734,6 +867,23 @@ countOccs x = loop where
   loop (ConTm _ es)    = sum (map loop es)
   loop (AppTm e1 e2)   = loop e1 + loop e2
   loop (AnnTm e _)     = loop e
+-}
+
+-- | Count the occurrences of the variables of rib 0
+countOccs ∷ Term Empty → [Occurrence]
+countOccs = Stream.toList . loop . openTm 0 (map fvTm [0..]) . elimEmptyF
+  where
+  loop (AbsTm _ e)         = loop e
+  loop (LetTm _ e1 e2)     = loop e1 + loop e2
+  loop (MatTm e1 bs)       = loop e1 + bigJoin (map (loop . snd) bs)
+  loop (RecTm bs e2)       = loop e2 + sum (map (loop . snd) bs)
+  loop (VarTm (FreeVar j)) = δ j
+  loop (VarTm _)           = 0
+  loop (ConTm _ es)        = sum (map loop es)
+  loop (AppTm e1 e2)       = loop e1 + loop e2
+  loop (AnnTm e _)         = loop e
+  --
+  δ j = fmap (\j' → if j == j' then 1 else 0) (Stream.iterate succ 0)
 
 ---
 --- Free type variables
@@ -1159,7 +1309,7 @@ parseLetRec term γ = do
     fail "Repeated bound variable name in let rec"
   let γ'     = names : γ
   vars' ← mapM (flip findVar γ') recVars
-  let adjust = openTmN 0 0 (map VarTm vars')
+  let adjust = renameTm 0 vars'
   return (RecTm (map (Here *** adjust) bs) (adjust e2))
 
 instance Read Annot where
@@ -1267,7 +1417,7 @@ pprType  = loop 0 where
                Ppr.<> Ppr.char '.')
               2
               (loop 0 (tvs : g) t)
-    VarTy (BoundVar ix jx (perhapsToMaybe → n)) →
+    VarTy (BoundVar ix jx (coerceOptional → n)) →
       Ppr.text $ maybe "?" id $ (listNth jx <=< listNth ix $ g) `mplus` n
     VarTy (FreeVar a)        → ppr a
     ConTy "→" [t1, qe, t2] →
@@ -1381,7 +1531,7 @@ pprTerm  = loop 0 where
               | (_,ei)  ← bs
               | kw      ← "rec" : repeat "and" ]
             Ppr.$$ Ppr.text " in" Ppr.<+> loop 0 (names : g) e2
-    VarTm (BoundVar ix jx (perhapsToMaybe → n)) →
+    VarTm (BoundVar ix jx (coerceOptional → n)) →
       Ppr.text $ maybe "?" id $ (listNth jx <=< listNth ix $ g) `mplus` n
     VarTm (FreeVar name)   → ppr name
     ConTm name es       → parensIf (p > 2 && not (null es)) $

@@ -63,8 +63,13 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
     Contravariant → τ ≥ τ'
     Invariant     → τ ≤≥ τ'
     Omnivariant   → (⊤)
+    _             → (⊤) -- XXX TODO
   -- | A qualifier subsumption constraint
-  (⊏)        ∷ QExp r → QExp r → c
+  (⊏)        ∷ Type r → QLit → c
+  -- | Constrain a list of types against the occurrences of the rib-0
+  --   variables of a term
+  (⊏*)       ∷ [Type r] → Term Empty → c
+  τs ⊏* e    = mconcat (zipWith (⊏) τs (map occToQLit (countOccs e)))
   --
   -- | Figure out which variables to generalize in a piece of syntax
   gen'       ∷ (MonadU r m, Ftv γ r, Ftv a r, Show a) ⇒
@@ -86,7 +91,7 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
     return (σs, c)
 
 infixr 4 ⋀
-infix  5 ≤
+infix  5 ≤, ≥, ≤≥, ⊏, ⊏*
 
 -- | We reduce constraints to inequalities on atoms, which are either
 --   type variables or nullary type constructors.
@@ -177,7 +182,7 @@ tyConCombine next countNext goalName c1 c2
 data SubtypeConstraint r
   = SC {
       scTypes ∷ [(Type r, Type r)],
-      scQuals ∷ [(QExp r, QExp r)]
+      scQuals ∷ [(Type r, QLit)]
     }
   deriving (Show)
 
@@ -187,7 +192,11 @@ instance Monoid (SubtypeConstraint r) where
   mappend c d = mconcat [c, d]
 
 instance Ord r ⇒ Ftv (SubtypeConstraint r) r where
-  ftvTree = ftvTree . scTypes
+  ftvTree sc = do
+    let (lowers, uppers) = unzip (scTypes sc)
+    ftvLowers ← ftvTree lowers
+    ftvUppers ← ftvTree uppers
+    return (FTBranch [ftvLowers, FTVariance negate ftvUppers])
 
 {-
 type CState r = (Gr (Atom r) (), Set.Set r, Map.Map r [Variance])
@@ -196,7 +205,7 @@ type LN r = Gr.LNode (Atom r)
 
 instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
   τ  ≤ τ'  = SC [(τ, τ')] []
-  qe ⊏ qe' = SC [] [(qe, qe')]
+  τ  ⊏ ql' = SC [] [(τ, ql')]
   --
   -- Generalization proceeds in several steps:
   --
@@ -305,7 +314,8 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
     -- Guessing ends here
     cftv         ← ftvSet (map snd (Gr.labNodes g))
     let αs       = Set.toList (genCandidates value τftv (γftv `Set.union` cftv))
-    (m, qls)     ← solveQualifiers αs d
+    -- (m, qls)     ← solveQualifiers αs d
+    let (m, qls) = (Map.empty, map (const U) αs) -- XXX TODO
     let c        = reconstruct g m
     trace ("gen (finished)", αs, τ, c)
     return (αs, qls, c)
@@ -340,6 +350,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                       Invariant     → decompLe (τ1', τ2') >>
                                       decompLe (τ2', τ1')
                       Omnivariant   → return ()
+                      _             → return () -- XXX TODO
                   | τ1' ← τs1
                   | τ2' ← τs2
                   | var ← getVariances c1 (length τs1) ]
@@ -578,9 +589,11 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
             let Just α1 = Gr.lab g n1
                 Just α2 = Gr.lab g n2
             return (atomTy α1, atomTy α2),
-          scQuals = [ (qvarexp (FreeVar α),
+          scQuals = []
+              {-[ (qvarexp (FreeVar α),
                        qexp q (map FreeVar (Set.toList βs)))
                     | (α, (q, βs)) ← Map.toList m ]
+                    -}
         }
 
 -- | A representation of equivalence classes of same-sized type
@@ -771,6 +784,9 @@ expand skm0 αs0 = do
               Just (c, βs) → do
                 βs' ← replicateM (length βs) newTV
                 writeTV α' (ConTy c (map fvTy βs'))
+                -- XXX TODO:
+                when (c == "→") $
+                  writeTV (βs' !! 1) (ConTy "U" [])
                 sequence_
                   [ do
                       Just proxy   ← Map.lookup β <$> readRef rskels

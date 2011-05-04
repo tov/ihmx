@@ -9,6 +9,40 @@ import Control.Monad
 import Control.Monad.Fix
 import Data.Monoid
 
+class Functor f => Optional f where
+  foldOptional :: b -> (a -> b) -> f a -> b
+  optionalSome :: a -> f a
+  optionalNone :: f a
+
+instance Optional Maybe where
+  foldOptional = maybe
+  optionalSome = Just
+  optionalNone = Nothing
+
+instance Optional [] where
+  foldOptional z f = foldr (const . f) z
+  optionalSome     = return
+  optionalNone     = []
+
+coerceOptional :: (Optional f, Optional g) => f a -> g a
+coerceOptional  = foldOptional optionalNone optionalSome
+
+catOptional :: Optional f => [f a] -> [a]
+catOptional = foldr (foldOptional id (:)) []
+
+fromOptionalSome :: Optional f => f a -> a
+fromOptionalSome = foldOptional (error "fromOptionalSome: got optionalNone") id
+
+fromOptional :: Optional f => a -> f a -> a
+fromOptional = flip foldOptional id
+
+isOptionalSome, isOptionalNone :: Optional f => f a -> Bool
+isOptionalSome = foldOptional False (const True)
+isOptionalNone = not . isOptionalSome
+
+mapOptional :: Optional f => (a -> f b) -> [a] -> [b]
+mapOptional f = foldr (foldOptional id (:) . f) []
+
 -- | This is like @Maybe@, except all values of the type compare as
 --   equal, which is useful for “suggestions” in the syntax that have
 --   no semantic significance.
@@ -16,6 +50,11 @@ data Perhaps a
   = Nope
   | Here a
   deriving Functor
+
+instance Optional Perhaps where
+  foldOptional = perhaps
+  optionalSome = Here
+  optionalNone = Nope
 
 perhaps :: b -> (a -> b) -> Perhaps a -> b
 perhaps nope _    Nope     = nope
@@ -37,8 +76,8 @@ isNope = not . isHere
 listToPerhaps :: [a] -> Perhaps a
 listToPerhaps = foldr (const . Here) Nope
 
-mapPerhaps :: (a -> Maybe b) -> [a] -> [b]
-mapPerhaps f = foldr (maybe id (:) . f) []
+mapPerhaps :: (a -> Perhaps b) -> [a] -> [b]
+mapPerhaps f = foldr (perhaps id (:) . f) []
 
 perhapsToList :: Perhaps a -> [a]
 perhapsToList = perhaps [] (:[])
