@@ -11,6 +11,8 @@ module Util (
   module Control.Monad,
   module Data.Monoid,
   module Data.Maybe,
+  -- module Data.Foldable,
+  -- module Data.Traversable,
   findLastIndex, listNth,
   allM, whenM, unlessM, foldr2, ordNub, concatMapM, foldM1,
   before,
@@ -18,14 +20,26 @@ module Util (
   (<$.>), (<$$.>), (<$$$.>), (<$$$$.>),
 ) where
 
+{-
+import Prelude hiding ( (=<<), Functor(..), Maybe(..), Monad(..), all,
+                        and, any, concat, concatMap, elem, foldl, foldl1,
+                        foldr, foldr1, mapM, mapM_, maximum, maybe,
+                        minimum, notElem, or, product, sequence, sequence_,
+                        sum )
+-}
+
 import Perhaps
 import TupleClass
 
 import Control.Arrow
 import Control.Applicative
-import Control.Monad
+import Control.Monad 
+  {- hiding ( forM, forM_, mapM, mapM_, msum,
+              sequence, sequence_ ) -}
 import Data.Monoid
 import Data.Maybe
+-- import Data.Foldable
+-- import Data.Traversable
 
 import qualified Data.Set as Set
 

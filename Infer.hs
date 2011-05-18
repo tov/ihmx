@@ -94,7 +94,8 @@ infer δ γ e0 = case e0 of
   AbsTm π e                     → do
     (δ', c1, τ1, τs) ← inferPatt δ π Nothing
     (τ2, c2)         ← infer δ' (τs:γ) e
-    return (τ1 ↦ τ2, c1 ⋀ c2 ⋀ τs ⊏* e) -- TODO qualifier
+    qe               ← arrowQualifier γ (AbsTm π e)
+    return (arrTy τ1 qe τ2, c1 ⋀ c2 ⋀ τs ⊏* e)
   LetTm π e1 e2                 → do
     (τ1, c1)         ← infer δ γ e1
     (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1)
@@ -135,11 +136,19 @@ infer δ γ e0 = case e0 of
     (τ1, c1)         ← infer δ γ e1
     (τ2, c2)         ← infer δ γ e2
     α                ← newTVTy
-    return (α, c1 ⋀ c2 ⋀ τ1 ≤ arrTy τ2 (qlitexp A) α)
+    return (α, c1 ⋀ c2 ⋀ τ1 ≤ arrTy τ2 (qlitexp L) α)
   AnnTm e annot                 → do
     (δ', τ', _)      ← instAnnot δ annot
     (τ, c)           ← infer δ' γ e
     return (τ', c ⋀ τ ≤ τ')
+
+arrowQualifier ∷ (MonadU tv m) ⇒ Γ tv → Term a → m (QExp tv)
+arrowQualifier γ e =
+  qualifier (ConTy "U" [ σ
+                       | (i, j) ← lfvTm e
+                       , rib:_ ← [drop i γ]
+                       , σ:_   ← [drop j rib] ])
+  where ?deref = readTV
 
 -- | Instantiate a prenex quantifier
 inst ∷ MonadU tv m ⇒ Type tv → m (Type tv)
@@ -167,8 +176,13 @@ inferPatt δ0 π0 mτ0 = do
   where
   bind τ      = do tell ((⊤), [τ]); return τ
   constrain c = tell (c, [])
-  loop (VarPa _)       v mτ = bind =<< loop WldPa v mτ
-  loop WldPa           _ mτ = maybe newTVTy return mτ
+  loop (VarPa _)       _ mτ = do
+    α ← maybe newTVTy return mτ
+    bind α
+  loop WldPa           _ mτ = do
+    α ← maybe newTVTy return mτ
+    constrain (α ⊏ A)
+    return α
   loop (ConPa name πs) v mτ = do
     case mτ of
       Nothing → ConTy name <$> sequence [ loop πi 1 Nothing | πi ← πs ]
@@ -699,69 +713,81 @@ inferFnTests ∷ T.Test
 inferFnTests = T.test
   [ "A"         -: "A"
   , "A B C"     -: "A B C"
-  , "λx.x"      -: "∀ α : U. α → α"
-  , "λa.id id"  -: "∀ α β : U. α → β → β"
-  , "λx.choose id"
-                -: "∀ β α : U. β → (α → α) → α → α"
-  , "λx.choose (id : α → α)"
-                -: "∀ α β : U. α → (β → β) → (β → β)"
+  , "λx.x"      -: "∀ α:L. α → α"
+  , "λa.id id"  -: "∀ α:A, β:L. α → β → β"
+  , "λ_.choose id"
+                -: "∀ α:A, β γ. α → (β -γ> β) -γ> β -γ> β"
+  , "λ_.choose (id : α → α)"
+                -: "∀ α:A, β γ. α → (β -γ> β) -γ> β -γ> β"
   , te "λf. P (f A) (f B)"
-  , "λx. single id" -: "∀ α β : U. α → List (β → β)"
-  , "λf x. f (f x)"     -: "∀ α : U. (α → α) → α → α"
+  , "λ_. single id" -: "∀ α:A, β. α → List (β → β)"
+  , "λf x. f (f x)"     -: "∀α, β:R. (α -β> α) → α -β> α"
   -- Patterns
   , "λC. B"     -: "C → B"
   , "λA. B"     -: "A → B"
   , "λ(L:U). B" -: "U → B"
   , te "λ(R:A). B"
-  , "λ(A x). x"
-                -: "∀ α : U. A α → α"
-  , "λ(A x) (B y z). x y z"
-                -: "∀ α β γ : U. A (α → β → γ) → B α β → γ"
+  , "λ(B x). x"
+                -: "∀α. B α → α"
+  , "λ(B x) (C y z). x y z"
+                -: "∀ α β γ δ. B (α -δ> β -L> γ) → C α β -δ> γ"
   , pe "λ(A x x). B"
-  , "λ(A a (B b c) (C d (D e f g))). E"
-                -: "∀ α β γ δ e f g : U. A α (B β γ) (C δ (D e f g)) → E"
+  , "λ(B a (C b c) (D d (E e f g))). F"
+                -: "∀ α β γ δ e f g: A. B α (C β γ) (D δ (E e f g)) → F"
   -- Occurs check
   , te "λf. f f"
   , te "let rec f = λ(C x).f (C (f x)) in f"
   -- Subtyping
-  , "λf. C (f L)" -: "∀ α : U. (L → α) → C α"
-  , "λf. C (f L) (f L)" -: "∀ α : U. (L → α) → C α α"
-  , "λf. C (f R) (f L)" -: "∀ α : U. (L → α) → C α α"
-  , "λf. C (f A) (f L)" -: "∀ α : U. (L → α) → C α α"
-  , "λf. C (f L) (f R)" -: "∀ α : U. (L → α) → C α α"
-  , "λf. C (f L) (f A)" -: "∀ α : U. (L → α) → C α α"
-  , "λf. C (f U) (f L)" -: "∀ α : U. (L → α) → C α α"
-  , "λf. C (f A) (f A)" -: "∀ α : U. (A → α) → C α α"
-  , "λf. C (f R) (f A)" -: "∀ α : U. (L → α) → C α α"
-  , "λf. C (f U) (f A)" -: "∀ α : U. (A → α) → C α α"
+  , "λf. C (f L)" -: "∀ α. (L -L> α) → C α"
+  , "λf. C (f L) (f L)" -: "∀ α. (L -R> α) → C α α"
+  , "λf. C (f R) (f L)" -: "∀ α. (L -R> α) → C α α"
+  , "λf. C (f A) (f L)" -: "∀ α. (L -R> α) → C α α"
+  , "λf. C (f L) (f R)" -: "∀ α. (L -R> α) → C α α"
+  , "λf. C (f L) (f A)" -: "∀ α. (L -R> α) → C α α"
+  , "λf. C (f U) (f L)" -: "∀ α. (L -R> α) → C α α"
+  , "λf. C (f A) (f A)" -: "∀ α. (A -R> α) → C α α"
+  , "λf. C (f R) (f A)" -: "∀ α. (L -R> α) → C α α"
+  , "λf. C (f U) (f A)" -: "∀ α. (A -R> α) → C α α"
   --
-  , "λf x. C (f x : L)" -: "∀ α : U. (α → L) → α → C L"
-  , "λf x. C (f x : L) (f x : L)" -: "∀ α : U. (α → L) → α → C L L"
-  , "λf x. C (f x : R) (f x : L)" -: "∀ α : U. (α → R) → α → C R L"
-  , "λf x. C (f x : A) (f x : L)" -: "∀ α : U. (α → A) → α → C A L"
-  , "λf x. C (f x : U) (f x : L)" -: "∀ α : U. (α → U) → α → C U L"
-  , "λf x. C (f x : A) (f x : A)" -: "∀ α : U. (α → A) → α → C A A"
-  , "λf x. C (f x : R) (f x : A)" -: "∀ α : U. (α → U) → α → C R A"
-  , "λf x. C (f x : U) (f x : A)" -: "∀ α : U. (α → U) → α → C U A"
+  , "λf x. C (f x : L)" -: "∀ α β. (α -β> L) → α -β> C L"
+  , "λf x. C (f x : L) (f x : L)" -: "∀ α β:R. (α -β> L) → α -β> C L L"
+  , "λf x. C (f x : R) (f x : L)" -: "∀ α β:R. (α -β> R) → α -β> C R L"
+  , "λf x. C (f x : A) (f x : L)" -: "∀ α β:R. (α -β> A) → α -β> C A L"
+  , "λf x. C (f x : U) (f x : L)" -: "∀ α β:R. (α -β> U) → α -β> C U L"
+  , "λf x. C (f x : A) (f x : A)" -: "∀ α β:R. (α -β> A) → α -β> C A A"
+  , "λf x. C (f x : R) (f x : A)" -: "∀ α β:R. (α -β> U) → α -β> C R A"
+  , "λf x. C (f x : U) (f x : A)" -: "∀ α β:R. (α -β> U) → α -β> C U A"
   , te "λf x. C (f x : U) (f x : B)"
   --
+  , "λ(f : α -β> α) x. C (f x : B) (f x : B)"
+                                  -: "∀α:R. (B -α> B) → B -α> C B B"
   , "λ(f : α → α) x. C (f x : B) (f x : B)" -: "(B → B) → B → C B B"
   , "λ(f : α → α) x. C (f x : U) (f x : U)" -: "(U → U) → U → C U U"
   , "λ(f : α → α) x. C (f x : R) (f x : A)" -: "(U → U) → U → C R A"
   , "λ(f : α → α) x. C (f x : U) (f x : L)" -: "(U → U) → U → C U L"
-  , "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λL.L) U"
-      -: "C L L"
-  , "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λL.L) R"
-      -: "C L L"
-  , "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λR.R) R"
-      -: "C L L"
-  , "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λR.R) U"
-      -: "C L L"
-  , te "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λR.R) L"
+  --
+  , "let g = λ(f : α → α) x. C (f x : R) (f x : R) in g (λR.R) U"
+      -: "C R R"
+  , te "let g = λ(f : α → α) x. C (f x : L) (f x : L) in g (λL.L) U"
+  , "let g = λ(f : α → α) x. C (f x : R) (f x : R) in g (λR.R) R"
+      -: "C R R"
+  , te "let g = λ(f : α → α) x. C (f x : R) (f x : R) in g (λU.U) R"
+  , "let g = λ(f : α → α) x. C (f x : R) (f x : R) in g (λU.U) U"
+      -: "C R R"
   , "let g = λ(f : α → α) x. C (f x : L) (f x : R) in g (λL.R) U"
       -: "C L R"
   , te "let g = λ(f : α → α) x. C (f x : L) (f x : R) in g (λL.L) U"
-  -- , "λ(f : α → α) x. C (f x : A) (f x : A)" -: "(A → A) → A → C A A"
+  --
+  -- qualifiers
+  --
+  , "λf g x. f (g x)"
+      -: "∀ α β γ δ1 δ2. (β -δ2> γ) → (α -δ1> β) -δ2> α -δ1 δ2> γ"
+  , "λf g x. f (f (g x))"
+      -: "∀ α β δ1, δ2 : R. (β -δ2> β) → (α -δ1> β) -δ2> α -δ1 δ2> β"
+  , "λf g x. f (f (g x x))"
+      -: "∀ α:R, β δ1, δ2:R. (β -δ2> β) → (α -δ1> α -L> β) -δ2> α -δ1 δ2> β"
+  , "λf g x. f (f (g x) (g x)) (g x)"
+      -: "∀ α:R, β, δ1 δ2:R. (β -δ2> β -L> β) → (α -δ1> β) -δ2> α -δ1 δ2> β"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"
@@ -1116,7 +1142,7 @@ inferFnTests = T.test
   a -: b = T.assertBool ("⊢ " ++ a ++ " : " ++ b)
              (case showInfer (read a) of
                 Left _       → False
-                Right (τ, _) → τ == fmap elimEmpty (read b))
+                Right (τ, _) → τ == elimEmptyF (standardizeType (read b)))
   te a   = T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))
   pe a   = T.assertBool ("expected syntax error: " ++ a)

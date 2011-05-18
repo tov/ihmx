@@ -214,15 +214,14 @@ instance Ord (TV s) where
   TV { tvId = i1 } `compare` TV { tvId = i2 } = i1 `compare` i2
 
 instance Ppr (TV s) where
-  ppr = Ppr.text . show
+  pprPrec p tv = Ppr.text (showsPrec p tv "")
 
 instance Show (TV s) where
-  showsPrec _ tv = showChar '#' . shows (tvId tv)
-      . if debug -- && tvFlavor tv == Universal
-          then case unsafeReadTV tv of
-                 Nothing → id
-                 Just t  → showChar '[' . shows t . showChar ']'
-          else id
+  showsPrec p tv = case (debug, unsafeReadTV tv) of
+    (True, Just t) → showsPrec p t
+                     -- showChar '#' . shows (tvId tv) . showChar '[' .
+                     -- shows t . showChar ']'
+    _              → showChar '#' . shows (tvId tv)
 
 instance Ftv (TV s) (TV s) where
   ftvTree = ftvTree . fvTy

@@ -89,7 +89,7 @@ readQLit ∷ String → Maybe QLit
 readQLit "U" = Just U
 readQLit "R" = Just R
 readQLit "A" = Just A
-readQLit "L" = Just U
+readQLit "L" = Just L
 readQLit _   = Nothing
 
 instance Bounded QLit where
@@ -109,54 +109,31 @@ instance Lattice QLit where
 
 -- | The intent is that only well-formed qualifiers should be wrapped
 --   in 'QExp'.
-newtype QExp tv = QExp { unQExp ∷ Type tv }
+data QExp v = QExp QLit [Var v]
   deriving Show
 
-qexp      ∷ QLit → [Var tv] → QExp tv
-qexp q vs = QExp (ConTy (show q) (map VarTy vs))
+unQExp ∷ QExp tv → Type tv
+unQExp (QExp ql vs) = ConTy (show ql) (map VarTy vs)
 
 qlitexp   ∷ QLit → QExp tv
-qlitexp q = qexp q []
+qlitexp q = QExp q []
 
-qvarexp   ∷ Var tv → QExp tv
-qvarexp v = qexp U [v]
+qvarexp   ∷ Var v → QExp v
+qvarexp v = QExp U [v]
 
-instance Monoid (QExp tv) where
+instance Monoid (QExp v) where
   mempty = qlitexp U
-  QExp (ConTy c vs) `mappend` QExp (ConTy c' vs')
-    | Just ql  ← readQLit c
-    , Just ql' ← readQLit c'
-    = QExp (ConTy (show (ql ⊔ ql')) (vs ++ vs'))
-  _ `mappend` _
-    = qlitexp L
-
-{-
-instance Eq (QExp tv) where
-  QExp (ConTy "L" _) == QExp (ConTy "L" _) = True
-  QExp (ConTy q1 αs) == QExp (ConTy q2 βs) = q1 == q2 && αs == βs
-
-instance Bounded (QExp tv) where
-  minBound = qlitexp U
-  maxBound = qlitexp L
-
-instance Ord tv ⇒ Lattice (QExp tv) where
-  QExp L _   ⊔ _          = maxBound
-  _          ⊔ QExp L _   = maxBound
-  QExp q1 αs ⊔ QExp q2 βs = QExp (q1 ⊔ q2) (αs `Set.union` βs)
-  --
-  QExp L _   ⊓ qe         = qe
-  qe         ⊓ QExp L _   = qe
-  QExp q1 αs ⊓ QExp q2 βs = QExp (q1 ⊓ q2) (αs `Set.intersection` βs)
-  --
-  _          ⊑ QExp L _   = True
-  QExp q1 αs ⊑ QExp q2 βs = q1 ⊑ q2 && αs `Set.isSubsetOf` βs
--}
+  QExp L  _  `mappend` _            = qlitexp L
+  _          `mappend` QExp L   _   = qlitexp L
+  QExp R  _  `mappend` QExp A   _   = qlitexp L
+  QExp A  _  `mappend` QExp R   _   = qlitexp L
+  QExp ql vs `mappend` QExp ql' vs' = QExp (ql ⊔ ql') (vs ++ vs')
 
 -- | For now, we hard-code the qualifiers of several type constructors
 --   and consider the rest to be like tuples by default.
 --   PRECONDITION: The arguments are well-formed qualifiers.
 --   POSTCONDITION: The result is a well-formed qualifiers.
-getQualifier ∷ Name → [QExp tv] → QExp tv
+getQualifier ∷ Name → [QExp v] → QExp v
 getQualifier "→"     [_,qe,_] = qe
 getQualifier "U"     qes      = mconcat (qlitexp U : qes)
 getQualifier "R"     qes      = mconcat (qlitexp R : qes)
@@ -167,6 +144,25 @@ getQualifier "Ref"   [qe,_]   = qe
 getQualifier "Const" _        = qlitexp U
 getQualifier _       [qe]     = qe
 getQualifier _       qes      = mconcat (qlitexp U : qes)
+
+class Qualifier q r | q → r where
+  toQualifierType ∷ q → Type r
+
+instance Qualifier (Type r) r where
+  toQualifierType = id
+
+instance Qualifier (QExp r) r where
+  toQualifierType = toQualifierType . unQExp
+
+instance Qualifier QLit r where
+  toQualifierType = unQExp . qlitexp
+
+instance Qualifier Occurrence r where
+  toQualifierType = toQualifierType . occToQLit
+
+instance Ord r ⇒ Qualifier (QLit, Set.Set r) r where
+  toQualifierType (q, rset) =
+    toQualifierType (QExp q (FreeVar <$> Set.toList rset))
 
 ---
 --- Type constructor variance
@@ -362,7 +358,7 @@ type Name = String
 data Var a
   = BoundVar !Int !Int (Perhaps Name)
   | FreeVar a
-  deriving (Eq, Ord, Functor)
+  deriving (Eq, Ord, Functor, Show)
 
 boundVar ∷ Int → Int → Name → Var a
 boundVar ix jx n = BoundVar ix jx (Here n)
@@ -606,30 +602,30 @@ isAnnotated (AnnTm _ _)      = True
 
 γ0' ∷ [(Name, String)]
 γ0' = [ ("id",          "∀ α. α → α")
-      , ("choose",      "∀ α. α → α → α")
-      , ("apply",       "∀ α β. (α → β) → α → β")
-      , ("revapp",      "∀ α β. α → (α → β) → β")
+      , ("choose",      "∀ α : A. α → α -α> α")
+      , ("apply",       "∀ α β γ. (α -γ> β) → α -γ> β")
+      , ("revapp",      "∀ α β γ. α → (α -γ> β) -α γ> β")
       -- Lists
       , ("single",      "∀ α. α → List α")
       , ("nil",         "∀ α. List α")
-      , ("cons",        "∀ α. α → List α → List α")
+      , ("cons",        "∀ α. α → List α -α> List α")
       , ("map",         "∀ α β. (α → β) → List α → List β")
-      , ("foldr",       "∀ α β. (α → β → β) → β → List α → β")
-      , ("head",        "∀ α. List α → α")
-      , ("tail",        "∀ α. List α → List α")
+      , ("foldr",       "∀ α β. (α → β -L> β) → β → List α -β> β")
+      , ("head",        "∀ α : A. List α → α")
+      , ("tail",        "∀ α : A. List α → List α")
       , ("app",         "∀ α. List α → List α → List α")
       -- Ref cells
       , ("ref",         "∀ α. α → Ref α")
-      , ("readRef",     "∀ α. Ref α → α")
-      , ("writeRef",    "∀ α. Ref α → α → T")
+      , ("readRef",     "∀ α : R. Ref α → α")
+      , ("writeRef",    "∀ α : A. Ref α → α → T")
       -- Products
-      , ("pair",        "∀ α β. α → β → Pair α β")
-      , ("fst",         "∀ α β. Pair α β → α")
-      , ("snd",         "∀ α β. Pair α β → β")
+      , ("pair",        "∀ α β. α → β -α> Pair α β")
+      , ("fst",         "∀ α : L, β : A. Pair α β → α")
+      , ("snd",         "∀ α : A, β : L. Pair α β → β")
       -- Sums
-      , ("inl",         "∀ α. α → all β. Either α β")
-      , ("inr",         "∀ β. β → all α. Either α β")
-      , ("either",      "∀ α β γ. (α → γ) → (β → γ) → Either α β → γ")
+      , ("inl",         "∀ α β. α → Either α β")
+      , ("inr",         "∀ α β. β → Either α β")
+      , ("either",      "∀ α β γ. (α -A> γ) → (β -A> γ) -A> Either α β -A> γ")
       -- Any
       , ("bot",         "∀ α. α")
       ]
@@ -759,6 +755,25 @@ openTm k es e0 = case e0 of
   AnnTm e annot → AnnTm (loop e) annot
   where next = openTm (k + 1) es
         loop = openTm k es
+
+-- | Find the "locally-free" variables in a term -- that is, the bound
+--   variables that point beyond the term.
+lfvTm ∷ Term a → [(Int, Int)]
+lfvTm = Set.toList . lfvTmK 0 where
+  lfvTmK k e0 = case e0 of
+    AbsTm _ e     → next e
+    LetTm _ e1 e2 → loop e1 `Set.union` next e2
+    MatTm e1 bs   → loop e1 `Set.union` Set.unions (map (next . snd) bs)
+    RecTm bs e2   → Set.unions (map (next . snd) bs) `Set.union` next e2
+    VarTm var     → case var of
+      BoundVar i j _
+        | i >= k  → Set.singleton (i - k, j)
+      _           → Set.empty
+    ConTm _ es    → Set.unions (map loop es)
+    AppTm e1 e2   → loop e1 `Set.union` loop e2
+    AnnTm e _     → loop e
+    where next = lfvTmK (k + 1)
+          loop = lfvTmK k
 
 ---
 --- Occurrence analysis
@@ -1204,9 +1219,9 @@ parseTypeArrow tyvarp typep = flip arrTy <$> choice
   , qlitexp L <$ reservedOp tok "⊸"
   , qlitexp L <$ try (symbol tok "-o")
   , between (try (symbol tok "-{")) (try (symbol tok "}>")) $
-      QExp <$> typep
+      pureQualifier <$> typep
   , between (symbol tok "-") (symbol tok ">") $ do
-      qexp <$> option U parseQLit <*> many tyvarp
+      QExp <$> option U parseQLit <*> many tyvarp
   ]
 
 -- To parse a pattern. Produces the pattern (which is nameless) and
@@ -1329,7 +1344,7 @@ instance Parsable a ⇒ Read (Term a) where
 --   base name, then with a prime added, and then with numeric
 --   subscripts increasing from 1.
 namesFrom ∷ String → [Name]
-namesFrom s = [ c:n | n ← "" : "′" : map numberSubscript [0 ..], c ← s ]
+namesFrom s = [ c:n | n ← "" : "'" : map numberSubscript [0 ..], c ← s ]
 
 -- | Given a natural number, represent it as a string of number
 --   subscripts.
@@ -1390,19 +1405,19 @@ instance Ppr Empty where
   ppr = elimEmpty
 
 instance Ppr Annot where
-  ppr (Annot _ t) = pprType [] t
+  pprPrec p (Annot _ t) = pprType p [] t
 
 instance Ppr a ⇒ Ppr (Type a) where
-  ppr = pprType []
+  pprPrec p = pprType p []
 
 -- | To pretty-print a type
-pprType ∷ Ppr a ⇒ [[Name]] → Type a → Ppr.Doc
-pprType  = loop 0 where
+pprType ∷ Ppr a ⇒ Int → [[Name]] → Type a → Ppr.Doc
+pprType  = loop where
   loop p g t0 = case t0 of
     QuaTy u e t           →
       let quant = case u of AllQu → "∀"; ExQu → "∃"
           (tvs0, qls) = unzip e
-          tvs         = freshNames tvs0 (concat g) tvNames -- XXX TODO
+          tvs         = freshNames tvs0 (concat g) tvNames
           btvs        = groupByQLits tvs qls
        in parensIf (p > 0) $
             Ppr.hang
@@ -1419,19 +1434,19 @@ pprType  = loop 0 where
               (loop 0 (tvs : g) t)
     VarTy (BoundVar ix jx (coerceOptional → n)) →
       Ppr.text $ maybe "?" id $ (listNth jx <=< listNth ix $ g) `mplus` n
-    VarTy (FreeVar a)        → ppr a
+    VarTy (FreeVar a)        → pprPrec p a
     ConTy "→" [t1, qe, t2] →
       let qedoc = case qe of
             ConTy "U" [] → Ppr.char '→'
-            ConTy "L" _  → Ppr.char '⊸'
+            ConTy "L" _  → Ppr.text "-L>"
             ConTy c   ts
               | Just _ ← readQLit c
               , all isVarTy ts
                          → Ppr.char '-' Ppr.<>
                            (if c == "U" then id else (Ppr.text c Ppr.<+>))
-                              (Ppr.fsep (pprType g <$> ts))
+                              (Ppr.fsep (pprType 0 g <$> ts))
                            Ppr.<> Ppr.char '>'
-            _ → Ppr.text "-{" Ppr.<> pprType g qe Ppr.<> Ppr.text "}>"
+            _ → Ppr.text "-{" Ppr.<> pprType 0 g qe Ppr.<> Ppr.text "}>"
           isVarTy (VarTy _) = True
           isVarTy _         = False
        in parensIf (p > 1) $
@@ -1543,7 +1558,7 @@ instance Show Annot where
   show = Ppr.render . ppr
 
 instance Ppr a ⇒ Show (Type a) where
-  show = Ppr.render . ppr
+  showsPrec p t = showString (Ppr.render (pprPrec p t))
 
 instance Ppr a ⇒ Show (Term a) where
   show = Ppr.render . ppr

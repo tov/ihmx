@@ -9,7 +9,8 @@
     ParallelListComp,
     ScopedTypeVariables,
     TupleSections,
-    UnicodeSyntax
+    UnicodeSyntax,
+    ViewPatterns
   #-}
 module Constraint {-(
   -- * Generic constraints
@@ -17,6 +18,8 @@ module Constraint {-(
   -- * An implementation
   SubtypeConstraint,
 ) -} where
+
+import Prelude
 
 import Control.Monad.State
 import Control.Monad.Writer
@@ -33,6 +36,9 @@ import qualified Data.Graph.Inductive.Graph             as Gr
 import qualified NodeMap                                as NM
 import qualified Data.Graph.Inductive.Query.DFS         as DFS
 import qualified Data.Graph.Inductive.Query.TransClos   as TransClos
+
+-- From incremental-sat-solver
+import qualified Data.Boolean.SatSolver as SAT
 
 import Syntax
 import MonadU
@@ -59,17 +65,19 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
   -- | A subtype constraint in the given variance
   relate     ∷ Variance → Type r → Type r → c
   relate v τ τ' = case v of
-    Covariant     → τ ≤ τ'
-    Contravariant → τ ≥ τ'
-    Invariant     → τ ≤≥ τ'
-    Omnivariant   → (⊤)
-    _             → (⊤) -- XXX TODO
+    Covariant      → τ ≤ τ'
+    Contravariant  → τ ≥ τ'
+    Invariant      → τ ≤≥ τ'
+    QCovariant     → τ ⊏ τ'
+    QContravariant → τ' ⊏ τ
+    QInvariant     → τ ⊏ τ' ⋀ τ' ⊏ τ
+    Omnivariant    → (⊤)
   -- | A qualifier subsumption constraint
-  (⊏)        ∷ Type r → QLit → c
+  (⊏)        ∷ (Qualifier q1 r, Qualifier q2 r) ⇒ q1 → q2 → c
   -- | Constrain a list of types against the occurrences of the rib-0
   --   variables of a term
-  (⊏*)       ∷ [Type r] → Term Empty → c
-  τs ⊏* e    = mconcat (zipWith (⊏) τs (map occToQLit (countOccs e)))
+  (⊏*)       ∷ Qualifier q r ⇒ [q] → Term Empty → c
+  τs ⊏* e    = mconcat (zipWith (⊏) τs (countOccs e))
   --
   -- | Figure out which variables to generalize in a piece of syntax
   gen'       ∷ (MonadU r m, Ftv γ r, Ftv a r, Show a) ⇒
@@ -138,7 +146,7 @@ tyConLe c1 c2
 
 infix 4 `tyConLe`
 
--- | Are there any type constuctors greater or lesser than
+-- | Are there any type constructors greater or lesser than
 --   this one?
 tyConHasSuccs, tyConHasPreds ∷ Name → Bool
 tyConHasSuccs c = Gr.gelem n tyConOrder && Gr.outdeg tyConOrder n > 0
@@ -182,7 +190,7 @@ tyConCombine next countNext goalName c1 c2
 data SubtypeConstraint r
   = SC {
       scTypes ∷ [(Type r, Type r)],
-      scQuals ∷ [(Type r, QLit)]
+      scQuals ∷ [(Type r, Type r)]
     }
   deriving (Show)
 
@@ -205,7 +213,7 @@ type LN r = Gr.LNode (Atom r)
 
 instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
   τ  ≤ τ'  = SC [(τ, τ')] []
-  τ  ⊏ ql' = SC [] [(τ, ql')]
+  q  ⊏ q' = SC [] [(toQualifierType q, toQualifierType q')]
   --
   -- Generalization proceeds in several steps:
   --
@@ -275,19 +283,19 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
   -- 12. reconstruct: turn the graph back into a constraint
   --
   -- 13. generalize: candidates that are not free in the constraint
-  gen' value (SC c d) γ τ = do
+  gen' value (SC c qc) γ τ = do
     let ?deref = readTV
-    trace ("gen (begin)", c, τ)
-    skm1         ← skeletonize (SC c d)
+    trace ("gen (begin)", (c, qc), τ)
+    skm1         ← skeletonize c
     trace ("gen (skeletonized)", skm1, c, τ)
     αs           ← occursCheck skm1
     trace ("gen (occursCheck)", αs)
     skm2         ← expand skm1 αs
     trace ("gen (expand)", skm2, c, τ)
-    c            ← decompose c
+    (c, qc)      ← decompose (c, qc)
     γftv         ← ftvSet γ
     τftv         ← ftvV τ
-    trace ("gen (decompose)", c, γftv, τftv, τ)
+    trace ("gen (decompose)", (c, qc), γftv, τftv, τ)
     let (nm, g) = buildGraph (Set.toList c) τftv
     trace ("gen (buildGraph)", ShowGraph g, γftv, τftv, τ)
     (g, γftv, τftv)
@@ -312,19 +320,27 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                  ← coalesceComponents value (g, γftv, τftv)
     trace ("gen (components)", ShowGraph g, γftv, τftv, τ)
     -- Guessing ends here
-    cftv         ← ftvSet (map snd (Gr.labNodes g))
-    let αs       = Set.toList (genCandidates value τftv (γftv `Set.union` cftv))
-    -- (m, qls)     ← solveQualifiers αs d
-    let (m, qls) = (Map.empty, map (const U) αs) -- XXX TODO
-    let c        = reconstruct g m
-    trace ("gen (finished)", αs, τ, c)
-    return (αs, qls, c)
+    cγftv        ← ftvV (map snd (Gr.labNodes g), γ)
+    qcftv        ← Map.map (const QInvariant) <$> ftvV qc
+    let αs       = Map.keysSet $
+                     (τftv `Map.union` qcftv) `Map.difference` cγftv
+        βs       = Map.keysSet $
+                     Map.filter isQVariance $
+                       Map.unionsWith (⊔) [cγftv, qcftv, τftv]
+    (qc, αqs)    ← solveQualifiers value αs βs τftv qc
+    let c        = reconstruct g qc
+    trace ("gen (finished)", αqs, τ, c)
+    return (map fst αqs, map snd αqs, c)
     where
       -- decompose takes a list of subtype constraint pairs and a list
       -- of type variables, and returns when all of the constraint is
       -- reduced to pairs of atoms.
-      decompose = execWriterT . mapM_ decompLe where
-        a1 ≤! a2 = tell (Set.singleton (a1, a2))
+      decompose (c, qc) = execWriterT $ do
+        tell (Set.empty, qc)
+        mapM_ decompLe c
+        where
+        a1 ≤! a2 = tell (Set.singleton (a1, a2), [])
+        τ1 ⊏! τ2 = tell (Set.empty, [(τ1, τ2)])
         decompLe (τ10, τ20) = do
           τ1 ← deref τ10
           τ2 ← deref τ20
@@ -345,12 +361,15 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
               | c1 == c2
               → sequence_
                   [ case var of
-                      Covariant     → decompLe (τ1', τ2')
-                      Contravariant → decompLe (τ2', τ1')
-                      Invariant     → decompLe (τ1', τ2') >>
-                                      decompLe (τ2', τ1')
-                      Omnivariant   → return ()
-                      _             → return () -- XXX TODO
+                      Covariant      → decompLe (τ1', τ2')
+                      Contravariant  → decompLe (τ2', τ1')
+                      Invariant      → decompLe (τ1', τ2') >>
+                                       decompLe (τ2', τ1')
+                      QCovariant     → τ1' ⊏! τ2'
+                      QContravariant → τ2' ⊏! τ1'
+                      QInvariant     → τ1' ⊏! τ2' >>
+                                       τ2' ⊏! τ1'
+                      Omnivariant    → return ()
                   | τ1' ← τs1
                   | τ2' ← τs2
                   | var ← getVariances c1 (length τs1) ]
@@ -479,6 +498,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
             case (mτ, Gr.gelem n g) of
               (Left _, True) →
                 case (var, Gr.pre g n, Gr.suc g n) of
+                  -- Should we consider QCo(ntra)variance here too?
                   (Covariant,     [pre], _)
                     → snd <$> coalesce ln (labelNode g pre) state
                   (Contravariant, _,     [suc])
@@ -582,18 +602,14 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                        then id
                        else Map.filter (`elem` [-1, 1])
       -- Reconstruct a constraint from the remaining graph
-      reconstruct g m =
+      reconstruct g qc =
         SC {
           scTypes = do
             (n1, n2) ← Gr.edges g
             let Just α1 = Gr.lab g n1
                 Just α2 = Gr.lab g n2
             return (atomTy α1, atomTy α2),
-          scQuals = []
-              {-[ (qvarexp (FreeVar α),
-                       qexp q (map FreeVar (Set.toList βs)))
-                    | (α, (q, βs)) ← Map.toList m ]
-                    -}
+          scQuals = qc
         }
 
 -- | A representation of equivalence classes of same-sized type
@@ -654,7 +670,7 @@ instance Defaultable (Gr a b) where
 -- | Build an internal subtype constraint from an external subtype
 --   constraint.
 skeletonize ∷ MonadU tv m ⇒
-              SubtypeConstraint tv → m (SkelMap tv m)
+              [(Type tv, Type tv)] → m (SkelMap tv m)
 skeletonize sc0 = do
   rskels ← newRef Map.empty
   let -- | Record that @τ1@ is a subtype of @τ2@, and do some
@@ -704,7 +720,7 @@ skeletonize sc0 = do
             | c1 == c2 && length βs1 == length βs2
                                          → do
             sequence_ [ do
-                          when (var /= Omnivariant) $ relateTVs β1 β2
+                          unless (var ⊑ QInvariant) $ relateTVs β1 β2
                           when (var == Invariant) $ unifyTVs β1 β2
                       | var ← getVariances c1 (length βs1)
                       | β1  ← βs1
@@ -732,7 +748,7 @@ skeletonize sc0 = do
                 fail $ "Could not unify " ++ show τ1' ++ " and " ++ show τ2'
           _ → fail "BUG! skeletonize (unifyTVs): not yet supported"
       --
-  mapM_ addSubtype (scTypes sc0)
+  mapM_ addSubtype sc0
   SkelMap <$> readRef rskels
 
 -- | Make sure an internal subtype constraint is consistent with a
@@ -784,9 +800,6 @@ expand skm0 αs0 = do
               Just (c, βs) → do
                 βs' ← replicateM (length βs) newTV
                 writeTV α' (ConTy c (map fvTy βs'))
-                -- XXX TODO:
-                when (c == "→") $
-                  writeTV (βs' !! 1) (ConTy "U" [])
                 sequence_
                   [ do
                       Just proxy   ← Map.lookup β <$> readRef rskels
@@ -795,39 +808,276 @@ expand skm0 αs0 = do
                       modifyRef (Map.insert β' proxy) rskels
                   | β  ← βs
                   | β' ← βs' ]
-                return βs'
+                return .
+                   map fst .
+                     filter (not . isQVariance . snd) $
+                       zip βs' (getVariances c (length βs'))
   expandTVs αs0
   skels' ← readRef rskels
   return skm0 { unSkelMap = skels' }
 
+{-
+
+Rewrite as follows:
+
+  not (q ⊑ q')
+  no β in vs'
+  ---------------------------
+  q vs ⊑ q' vs'   --->   fail
+
+  not (q ⊑ q')
+  vs \ vs' = v1 ... vk
+  βs' in vs'
+  not (null βs')
+  ---------------------------------------------------------------
+  q vs ⊑ q' vs'   --->  q ⊑ βs' ⋀ v1 ⊑ q' βs' ⋀ ... ⋀ vk ⊑ q' βs'
+
+  q ⊑ q'
+  vs \ vs' = v1 ... vk
+  βs' in vs'
+  -----------------------------------------------------
+  q vs ⊑ q' vs'   --->  v1 ⊑ q' βs' ⋀ ... ⋀ vk ⊑ q' βs'
+
+Then we have a constraint of the form:
+
+  v1 ⊑ (q11 βs11) ⊓ ... ⊓ (q1k1 βs1k1)
+  ...
+  vj ⊑ (qj1 βsj1) ⊓ ... ⊓ (qjkj βsjkj)
+  q1 ⊑ βs1
+  ...
+  qm ⊑ βsm
+
+We can convert it to SAT as follows:
+
+  Define:
+
+    πr(Q)       = R ⊑ Q
+    πr(β)       = 2 * tvId β
+    πr(q1 ⊔ q2) = πr(q1) ⋁ πr(q2)
+    πr(q1 ⊓ q2) = πr(q1) ⋀ πr(q2)
+
+    πa(Q) = A ⊑ Q
+    πa(β) = 2 * tvId β + 1
+    πa(q1 ⊔ q2) = πa(q1) ⋁ πa(q2)
+    πa(q1 ⊓ q2) = πa(q1) ⋀ πa(q2)
+
+    Then given the constraint
+
+      q1 ⊑ q1' ⋀ ... ⋀ qk ⊑ qk'
+
+    generate the formula:
+
+      (πr(q1) ⇒ πr(q1')) ⋀ (πa(q1) ⇒ πa(q1'))
+        ⋀ ... ⋀
+      (πr(qk) ⇒ πr(qk')) ⋀ (πa(qk) ⇒ πa(qk'))
+
+-}
+
 -- | Given a list of type variables that need qlit bounds and a set
---   of qualifier inequalities, solve and produce bounds.
+--   of qualifier inequalities, solve and produce bounds.  Also return
+--   any remaining inequalities (which must be satisfiable, but we
+--   haven't guessed how to satisfy them yet.)
 solveQualifiers      ∷ MonadU tv m ⇒
-                       [tv] → [(QExp tv, QExp tv)] →
-                       m (Map.Map tv (QLit, Set.Set tv), [QLit])
-solveQualifiers αs0 d0 = do
+                       Bool → Set.Set tv → Set.Set tv →
+                       Map.Map tv Variance →
+                       [(Type tv, Type tv)] →
+                       m ([(Type tv, Type tv)], [(tv, QLit)])
+solveQualifiers value αs βs τftv qc = do
   let ?deref = readTV
-  m1 ← Map.unionsWith (++) <$> sequence
-    [ do
-        QExp (ConTy c1 vs1) ← qualifier τ1
-        QExp (ConTy c2 vs2) ← qualifier τ2
-        let Just ql1 = readQLit c1
-            Just ql2 = readQLit c2
-            βs1      = [ β | VarTy (FreeVar β) ← vs1 ]
-            βs2      = Set.fromList [ β | VarTy (FreeVar β) ← vs2 ]
-        unless (ql1 ⊑ ql2) $
-          fail $ "Qualifier " ++ show ql1 ++ " is not less than " ++ show ql2
-        return (foldr (flip Map.insert [(ql2, βs2)]) Map.empty βs1)
-    | (QExp τ1, QExp τ2) ← d0 ]
-  let m2 = flip execState Map.empty $ sequence_
-        [ do
-            mv ← gets (Map.lookup α)
-            case mv of
-              Just _  → return ()
-              Nothing → return () -- XXX TODO
-        | α ← Map.keys m1
-        ]
-  undefined
+  trace ("solveQ (init)", αs, βs, qc)
+  qc             ← stdize qc
+  trace ("solveQ (stdize)", qc)
+  (αs, τftv, qc) ← substUppers (αs, τftv, qc)
+  trace ("solveQ (uppers)", αs, τftv, qc)
+  (αs, τftv, qc) ← unifyBounds (αs, τftv, qc)
+  trace ("solveQ (unify)", αs, τftv, qc)
+  (vmap, βlst)   ← optimize qc
+  trace ("solveQ (optimize)", vmap, βlst)
+  doSat vmap βlst
+  αs             ← genVars αs τftv
+  return (reconstruct αs vmap βlst, getBounds αs vmap)
+  where
+  stdize qc = foldM each [] qc where
+    each qc' (τl, τh) = do
+      QExp q1 vs1 ← qualifier τl
+      QExp q2 vs2 ← qualifier τh
+      let vs1' = Set.fromList (fromVar <$> vs1)
+          vs2' = Set.fromList (fromVar <$> vs2)
+      if q2 == L || q1 ⊑ q2 && vs1' `Set.isSubsetOf` vs2'
+        then return qc'
+        else return (((q1, vs1'), (q2, vs2')) : qc')
+  --
+  unstdize qc = (toQualifierType *** toQualifierType) <$> qc
+  --
+  substUppers (αs, τftv, qc) =
+    foldr (>=>) return
+      [ subst α (L, Set.empty)
+      | α ← Set.toList (αs `Set.difference` Set.unions (map (snd . fst) qc))
+      , Map.findWithDefault 0 α τftv ⊑ QContravariant ]
+      (αs, τftv, qc)
+  --
+  unifyBounds state0 = flip iterChanging state0 $ \(αs, τftv, qc) → do
+    trace ("unifyBounds", αs, τftv, qc)
+    let lbs = Map.fromListWith joinQ
+                [ (β, (q, vs))
+                | ((q, vs), (U, Set.toList → [β])) ← qc ]
+        ubs = Map.fromListWith meetQ
+                [ (β, (q, vs))
+                | ((U, Set.toList → [β]), (q, vs)) ← qc ]
+        varIs v α = Map.lookup α τftv == Just v
+        find v    = filter (varIs v) (Set.toList αs)
+        look q    = Map.findWithDefault (q, Set.empty)
+        action    = case find QCovariant of
+          β:_ → subst β (look U β lbs)
+          _   → case find QContravariant of
+            β:_ → subst β (look L β ubs)
+            _   → case find QInvariant of
+              β:_ | value, Just lb ← Map.lookup β lbs
+                  → subst β lb
+              _   → return
+    action (αs, τftv, qc)
+  --
+  subst α bound@(_,βs) (αs0, τftv0, qc0) = do
+    let τ    = toQualifierType bound
+        αs   = Set.delete α αs0
+        τftv = case Map.lookup α τftv0 of
+          Just v  → Set.fold (\βi → Map.insertWith (+) βi v)
+                             (Map.delete α τftv0)
+                             βs
+          Nothing → τftv0
+    writeTV α τ
+    qc ← stdize (unstdize qc0)
+    return (αs, τftv, qc)
+  --
+  --
+  joinQ (q1,βs1) (q2,βs2) = case q1 ⊔ q2 of
+    L → (L, Set.empty)
+    q → (q, βs1 `Set.union` βs2)
+  meetQ (q1,βs1) (q2,βs2) = case q1 ⊓ q2 of
+    L → (L, Set.empty)
+    q → (q, βs1 `Set.intersection` βs2)
+  --
+  optimize qc = foldM each (Map.empty, []) qc where
+    each (vmap, βlst) ((q1,βs1), (q2,βs2)) = do
+      let βs' = Set.filter (`Set.member` βs) βs2
+      when (not (q1 ⊑ q2) && Set.null βs') $
+        fail $ "Qualifier inequality unsatisfiable: " ++
+               show (toQualifierType (q1,βs1)) ++
+               " ⊑ " ++ show (toQualifierType (q2,βs2))
+      let βdiff = Set.toList (βs1 `Set.difference` βs2)
+          βbnds = [ (β, [(q2, βs')]) | β ← βdiff, q2 /= L ]
+          vmap' = foldr (uncurry (Map.insertWith (++))) vmap βbnds
+          βlst' = if q1 ⊑ q2
+                    then βlst
+                    else (q1, βs') : βlst
+      return (vmap', βlst')
+  --
+  doSat vmap βlst = do
+    let formula = toSat vmap βlst
+        sat     = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
+    case sat of
+      [] → fail "Qualifier constraints unsatisfiable"
+      _  → trace ("solveQ (sat)", formula, sat)
+    return ()
+  --
+  toSat vmap βlst = foldr (SAT.:&&:) SAT.Yes $
+      [ (πr q ==> πr (U,βs)) SAT.:&&: (πa q ==> πa (U,βs))
+      | (q, βs) ← βlst ]
+    ++
+      [ (πr (FreeVar α) ==> πr (q,αs)) SAT.:&&: (πa (FreeVar α) ==> πa (q,αs))
+      | (α, qes) ← Map.toList vmap
+      , (q, αs)  ← qes
+      , α `Set.member` βs ]
+    where
+      p ==> q = SAT.Not p SAT.:||: q
+  --
+  genVars αs τftv = return $ Set.filter keep αs where
+    keep α = case Map.lookup α τftv of
+      Just v  → value || v `elem` [-2,-1,1,2]
+      Nothing → False
+  --
+  reconstruct αs vmap βlst =
+    map (second clean) $
+      [ (fvTy v, (q, βs))
+      | (v, qes) ← Map.toList vmap
+      , v `Set.notMember` αs
+      , (q, βs) ← qes ]
+    ++
+      [ (toQualifierType q, (U, βs))
+      | (q, βs) ← βlst ]
+    where
+    clean (q, βs) = toQualifierType (q, Set.filter (`Set.notMember` αs) βs)
+  getBounds αs vmap = map (id &&& getBound) (Set.toList αs) where
+    getBound α = case Map.lookup α vmap of
+      Nothing  → L
+      Just qes → bigMeet (fst <$> qes)
+  --
+  fromVar (FreeVar α) = α
+  fromVar _           = error "BUG! solveQualifiers got bound tyvar"
+
+{-
+  #0 → #3
+
+  expand:
+
+  #1 → #1 -#1> #1 ≤ (#2 → #2) -L> #3
+
+  1 ← #12 -#13> #14
+
+  (#12 -#13> #14) → (#12 -#13> #14) -#13> (#12 -#13> #14)
+    ≤ (#2 → #2) -L> #3
+
+  3 ← #15 -#16> #17
+  (#0 → #15 -#16> #17)
+
+  (#12 -#13> #14) →   (#12 -#13> #14) -#13> (#12 -#13> #14)
+  ≤
+  (#2  →      #2) -L> #15             -#16> #17
+
+  15 ← #18 -#19> #20
+  (#0 → (#18 -#19> #20) -#16> #17)
+
+  (#12 -#13> #14) →  (#12 -#13> #14) -#13> (#12 -#13> #14)
+  ≤
+  (#2  →     #2) -L> (#18 -#19> #20) -#16> #17
+
+  17 ← #21 -#22> #23
+  (#0 → (#18 -#19> #20) -#16> (#21 -#22> #23))
+
+  (#12 -#13> #14) →  (#12 -#13> #14) -#13> #12 -#13> #14
+  ≤
+  (#2  →     #2) -L> (#18 -#19> #20) -#16> #21 -#22> #23
+
+  decompose:
+
+  2≤14, 12≤2, 20≤14, 12≤18, 21≤12, 14≤23
+  U⊑13, U⊑L, 19⊑13, 13⊑16, 13⊑22
+  (#0 → (#18 -#19> #20) -#16> (#21 -#22> #23))
+-}
+
+class SATable a where
+  πa ∷ a → SAT.Boolean
+  πr ∷ a → SAT.Boolean
+
+instance SATable QLit where
+  πr ql | R ⊑ ql    = SAT.Yes
+        | otherwise = SAT.No
+  πa ql | A ⊑ ql    = SAT.Yes
+        | otherwise = SAT.No
+
+instance Tv v ⇒ SATable (Var v) where
+  πr (FreeVar β) = SAT.Var (2 * tvUniqueID β)
+  πr _           = SAT.No
+  πa (FreeVar β) = SAT.Var (2 * tvUniqueID β + 1)
+  πa _           = SAT.No
+
+instance (Tv v, SATable (Var v)) ⇒ SATable (QLit, Set.Set v) where
+  πr (q, vs) = πr (QExp q (FreeVar <$> Set.toList vs))
+  πa (q, vs) = πa (QExp q (FreeVar <$> Set.toList vs))
+
+instance Tv v ⇒ SATable (QExp v) where
+  πr (QExp ql vs) = foldr (SAT.:||:) (πr ql) (map πr vs)
+  πa (QExp ql vs) = foldr (SAT.:||:) (πa ql) (map πa vs)
 
 {-
 g ∷ Gr Int ()
@@ -1000,27 +1250,3 @@ OPTIMIZATIONS FROM SIMONET 2003
     A × B → 1
 -}
 
-{-
-("gen (begin)",
- [(8 → 9 → 8, 7 → 10),
-  (11 → List 11 → List 11, 7 → 12),
-  (13 → List 13 → List 13, A → 14),
-  (14,List 15 → 16), (12,16 → 17),
-  (10, 17 → 18)],
- 7 → 18)
-
-("gen (decompose)",[(VarAt 20,VarAt 18),(VarAt 31,VarAt 32),(VarAt
-30,VarAt 31),(VarAt 24,VarAt 30),(VarAt 29,VarAt 23),(VarAt
-28,VarAt 29),(VarAt 15,VarAt 27),(VarAt 13,VarAt 28),(VarAt
-27,VarAt 13),(ConAt "A",VarAt 13),(VarAt 11,VarAt 24),(VarAt
-23,VarAt 11),(VarAt 7,VarAt 11),(VarAt 8,VarAt 20),(VarAt 7,VarAt
-8)],fromList [],fromList [(7,[Contravariant]),(18,[Covariant])],7 →
-18)
-
-("existentials are:",fromList [8,11,13,15,20,23,24,27,28,29,30,31,32])
-
-("gen (existentials)",SC {scTypes = [(7,18)]},fromList [],fromList
-[(7,[Contravariant]),(18,[Covariant])],7 → 18)
-
-
--}
