@@ -27,15 +27,11 @@ import Control.Monad.List
 import qualified Data.List  as List
 import qualified Data.Map   as Map
 import qualified Data.Set   as Set
-import qualified Data.Tree  as Tree
 
 -- From fgs:
 import Data.Graph.Inductive.PatriciaTree (Gr)
-import Data.Graph.Inductive.Basic        (preorder)
-import qualified Data.Graph.Inductive.Graph             as Gr
-import qualified NodeMap                                as NM
-import qualified Data.Graph.Inductive.Query.DFS         as DFS
-import qualified Data.Graph.Inductive.Query.TransClos   as TransClos
+import qualified Graph   as Gr
+import qualified NodeMap as NM
 
 -- From incremental-sat-solver
 import qualified Data.Boolean.SatSolver as SAT
@@ -129,7 +125,7 @@ atomTy (ConAt n) = ConTy n []
 -- | To compare two nullary type constructors
 tyConNode  ∷ String → Gr.Node
 tyConOrder ∷ Gr String ()
-(tyConNode, tyConOrder) = (nmLab nm, trcnr g)
+(tyConNode, tyConOrder) = (Gr.nmLab nm, Gr.trcnr g)
   where
     (_, (nm, g)) = NM.run Gr.empty $ do
       NM.insMapNodesM ["U", "R", "A", "L"]
@@ -297,28 +293,28 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
     τftv         ← ftvV τ
     trace ("gen (decompose)", (c, qc), γftv, τftv, τ)
     let (nm, g) = buildGraph (Set.toList c) τftv
-    trace ("gen (buildGraph)", ShowGraph g, γftv, τftv, τ)
+    trace ("gen (buildGraph)", Gr.ShowGraph g, γftv, τftv, τ)
     (g, γftv, τftv)
                  ← coalesceSCCs (g, γftv, τftv)
-    trace ("gen (scc)", ShowGraph g, γftv, τftv, τ)
+    trace ("gen (scc)", Gr.ShowGraph g, γftv, τftv, τ)
     (g, γftv, τftv)
                  ← satisfyTycons nm (g, γftv, τftv)
-    trace ("gen (tycons)", ShowGraph g, γftv, τftv, τ)
+    trace ("gen (tycons)", Gr.ShowGraph g, γftv, τftv, τ)
     g            ← eliminateExistentials True nm (g, γftv, τftv)
-    trace ("gen (existentials 1)", ShowGraph g, γftv, τftv, τ)
+    trace ("gen (existentials 1)", Gr.ShowGraph g, γftv, τftv, τ)
     g            ← return (removeRedundant nm g)
-    trace ("gen (redundant)", ShowGraph g, γftv, τftv, τ)
+    trace ("gen (redundant)", Gr.ShowGraph g, γftv, τftv, τ)
     g            ← eliminateExistentials False nm (g, γftv, τftv)
-    trace ("gen (existentials 2)", ShowGraph g, γftv, τftv, τ)
+    trace ("gen (existentials 2)", Gr.ShowGraph g, γftv, τftv, τ)
     (g, γftv, τftv)
                  ← polarizedReduce nm (g, γftv, τftv)
-    trace ("gen (polarized)", ShowGraph g, γftv, τftv, τ)
+    trace ("gen (polarized)", Gr.ShowGraph g, γftv, τftv, τ)
     g            ← eliminateExistentials False nm (g, γftv, τftv)
-    trace ("gen (existentials 3)", ShowGraph g, γftv, τftv, τ)
+    trace ("gen (existentials 3)", Gr.ShowGraph g, γftv, τftv, τ)
     -- Guessing starts here
     (g, γftv, τftv)
                  ← coalesceComponents value (g, γftv, τftv)
-    trace ("gen (components)", ShowGraph g, γftv, τftv, τ)
+    trace ("gen (components)", Gr.ShowGraph g, γftv, τftv, τ)
     -- Guessing ends here
     cγftv        ← ftvV (map snd (Gr.labNodes g), γ)
     qcftv        ← Map.map (const QInvariant) <$> ftvV qc
@@ -401,20 +397,20 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                           , varianceOf α' /= Just Contravariant
                           ]
           NM.insMapEdgesM [ (ConAt c1, ConAt c2, ())
-                          | (c1, c2) ← labEdges tyConOrder]
+                          | (c1, c2) ← Gr.labNodeEdges tyConOrder]
           return ()
       --
       -- Make sure the graph is satisfiable and figure out anything that
       -- is implied by the transitive closure of type constructors
       satisfyTycons nm (g0, γftv0, τftv0) =
-        satisfyTycons' (trcnr g0, γftv0, τftv0)
+        satisfyTycons' (Gr.trcnr g0, γftv0, τftv0)
         where
         satisfyTycons' = iterChanging $ \(g, γftv, τftv) →
           foldM each (g, γftv, τftv) (Gr.labNodes g)
         each (g, γftv, τftv) (n, VarAt α) = do
           let assign c = do
                 (γftv, τftv) ← assignTV α (ConAt c) (γftv, τftv)
-                let n' = nmLab nm (ConAt c)
+                let n' = Gr.nmLab nm (ConAt c)
                 return (assignNode n n' g, γftv, τftv)
               lbs = [ c | Just (ConAt c) ← map (Gr.lab g) (Gr.pre g n)]
               ubs = [ c | Just (ConAt c) ← map (Gr.lab g) (Gr.suc g n)]
@@ -473,15 +469,15 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                      [ Gr.insEdge (n1, n2, ())
                      | n1 ← pre
                      , n2 ← suc ]
-        where node = nmLab nm (VarAt α)
+        where node = Gr.nmLab nm (VarAt α)
       --
       -- Remove redundant edges:
       --  • Edges implied by transitivity
       --  • Edges relating type constructors to type constructors
       removeRedundant nm g = NM.delMapEdges nm conEdges g'
-        where g'       = untransitive g
+        where g'       = Gr.untransitive g
               conEdges = [ (ConAt c1, ConAt c2)
-                         | (ConAt c1, ConAt c2) ← labEdges g' ]
+                         | (ConAt c1, ConAt c2) ← Gr.labNodeEdges g' ]
       --
       -- Remove type variables based on polarity-related rules:
       --  • Coalesce positive type variables with a single predecessor
@@ -500,16 +496,16 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                 case (var, Gr.pre g n, Gr.suc g n) of
                   -- Should we consider QCo(ntra)variance here too?
                   (Covariant,     [pre], _)
-                    → snd <$> coalesce ln (labelNode g pre) state
+                    → snd <$> coalesce ln (Gr.labelNode g pre) state
                   (Contravariant, _,     [suc])
-                    → snd <$> coalesce ln (labelNode g suc) state
+                    → snd <$> coalesce ln (Gr.labelNode g suc) state
                   (Covariant,     pres,  _)
                     → siblings state (ln,  1) pres (Gr.pre,Gr.suc)
                   (Contravariant, _,     sucs)
                     → siblings state (ln, -1) sucs (Gr.suc,Gr.pre)
                   _ → return state
               _ → return state
-          findPolar τftv = [ (nmLab nm (VarAt α), α, var)
+          findPolar τftv = [ (Gr.nmLab nm (VarAt α), α, var)
                            | (α, var) ← Map.toList τftv
                            , var == 1 || var == -1 ]
           siblings state@(g,_,τftv) (lnode@(n,_), var)
@@ -530,7 +526,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
       --
       -- Coalesce the strongly-connected components to single atoms
       coalesceSCCs state =
-        foldM (liftM snd <$$> coalesceList) state (labScc (prj1 state))
+        foldM (liftM snd <$$> coalesceList) state (Gr.labScc (prj1 state))
       -- Given a list of atoms, coalesce them to one atom
       coalesceList state0 (ln:lns) =
         foldM (\(ln1, state) ln2 → coalesce ln1 ln2 state) (ln, state0) lns
@@ -592,7 +588,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                   return (Gr.delNode node g', γftv', τftv')
             each state _
               = return state
-        foldM each (g, γftv, τftv) (labComponents g)
+        foldM each (g, γftv, τftv) (Gr.labComponents g)
       -- Find the generalization candidates, which are free in τ but
       -- not in γ (restricted further if not a value)
       genCandidates value τftv γftv =
@@ -649,23 +645,6 @@ extSkelsM = mapM each . Map.toList . unSkelMap
     each (α, proxy) = do
       (set, mshape) ← UF.desc proxy
       return (α, Set.toList set, mshape)
-
-newtype ShowGraph gr v = ShowGraph { unShowGraph ∷ gr v () }
-
-instance (Gr.Graph gr, Show v) ⇒ Show (ShowGraph gr v) where
-  showsPrec _ (ShowGraph gr) =
-    showChar '{' .
-    foldr (.) id
-      (List.intersperse (showString " ⋀ ")
-         [ shows n1 . showChar '≤' . shows n2
-         | (n1, n2) ← labEdges gr ])
-    . showChar '}'
-
-instance Ord a ⇒ Defaultable (NM.NodeMap a) where
-  getDefault = NM.new
-
-instance Defaultable (Gr a b) where
-  getDefault = Gr.empty
 
 -- | Build an internal subtype constraint from an external subtype
 --   constraint.
@@ -760,7 +739,7 @@ occursCheck skm = do
   let skels = Map.toList (unSkelMap skm)
       gr0   = Gr.insNodes [ (tvUniqueID α, α) | (α, _) ← skels ] Gr.empty
   gr  ← foldM addSkel gr0 skels
-  let scc = labScc (gr ∷ Gr tv ())
+  let scc = Gr.labScc (gr ∷ Gr tv ())
   trace ("occursCheck", Gr.edges gr, scc)
   mapM checkSCC scc
   where
@@ -1135,74 +1114,6 @@ satVarLB β solver = case (mbr, mba) of
         mba = SAT.lookupVar βa solver
         βr  = 2 * tvUniqueID β
         βa  = 2 * tvUniqueID β + 1
-
--- | Transitive, non-reflexive closure
-trcnr ∷ Gr.DynGraph gr ⇒ gr a b → gr a ()
-trcnr g = Gr.insEdges newEdges (Gr.insNodes lns Gr.empty) where
-  lns      = Gr.labNodes g
-  newEdges = [ (n, n', ())
-             | (n, _) ← lns
-             , n'     ← DFS.reachable n g
-             , n /= n' ]
-
--- | Compute the transitive reduction of a transitive graph.
-untransitive ∷ Gr.DynGraph gr ⇒ gr a b → gr a b
-untransitive g =
-  let redundant = [ (n1, n2)
-                  | (n1, n2) ← Gr.edges g
-                  , n'       ← Gr.suc g n1
-                  , n' /= n2
-                  , n' /= n1
-                  , n2 `elem` Gr.suc g n' ]
-   in Gr.delEdges redundant g
-
--- | Compute the transitive reduction of a graph.
-transitiveReduce ∷ Gr.DynGraph gr ⇒ gr a b → gr a b
-transitiveReduce g =
-  let gPlus     = TransClos.trc g
-      redundant = [ (n1, n2)
-                  | (n1, n2) ← Gr.edges g
-                  , n'       ← Gr.suc g n1
-                  , n' /= n2
-                  , n2 `elem` Gr.suc gPlus n' ]
-   in Gr.delEdges redundant g
-
--- | Look up the node index of a node label
-nmLab ∷ Ord a ⇒ NM.NodeMap a → a → Gr.Node
-nmLab = fst <$$> NM.mkNode_
-
-labelNode ∷ Gr.Graph gr ⇒ gr a b → Gr.Node → Gr.LNode a
-labelNode g n = case Gr.lab g n of
-  Just ln → (n, ln)
-  Nothing → error "labelNode: node not found"
-
-labScc ∷ Gr.Graph gr ⇒ gr a b → [[Gr.LNode a]]
-labScc g = map preorder (rdffWith Gr.labNode' (DFS.topsort g) g)
-  where
-  rdffWith :: Gr.Graph gr ⇒ DFS.CFun a b c → [Gr.Node] → gr a b → [Tree.Tree c]
-  rdffWith = DFS.xdffWith Gr.pre'
-
--- | Partition a graph into components of /labeled/ nodes
-labComponents ∷ Gr.Graph gr ⇒ gr a b → [[Gr.LNode a]]
-labComponents = componentsWith Gr.labNode'
-  where
-  udffWith ∷ Gr.Graph gr ⇒ DFS.CFun a b c → [Gr.Node] → gr a b → [Tree.Tree c]
-  udffWith = DFS.xdffWith Gr.neighbors'
-  --
-  udffWith' ∷ Gr.Graph gr ⇒ DFS.CFun a b c → gr a b → [Tree.Tree c]
-  udffWith' f g = udffWith f (Gr.nodes g) g
-  --
-  componentsWith ∷ Gr.Graph gr ⇒ DFS.CFun a b c → gr a b → [[c]]
-  componentsWith = map preorder <$$> udffWith'
-
--- | Get the edges of a graph as pairs of node labels
-labEdges ∷ Gr.Graph gr ⇒ gr n e → [(n, n)]
-labEdges g =
-  [ (α, β)
-  | (n1, n2) ← Gr.edges g
-  , let Just α = Gr.lab g n1
-  , let Just β = Gr.lab g n2
-  ]
 
 {-
 

@@ -281,15 +281,6 @@ instance (Functor m, MonadRef s m) ⇒ MonadU (TV s) (UT s m) where
 instance Defaultable UTState where
   getDefault = error "BUG! getDefault[UTState]: can't gensym here"
 
-instance (Defaultable a, Defaultable b) ⇒ Defaultable (a, b) where
-  getDefault = (getDefault, getDefault)
-
-instance (Defaultable ()) where
-  getDefault = ()
-
-instance Defaultable (Data.Map.Map k a) where
-  getDefault = Data.Map.empty
-
 runUT ∷ (Functor m, Monad m) ⇒ UT s m a → m a
 runUT m = evalStateT (unUT m) (UTState 0 False)
 

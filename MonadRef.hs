@@ -9,11 +9,12 @@
     UnicodeSyntax
   #-}
 module MonadRef (
-  MonadRef(..), Defaultable(..),
+  MonadRef(..),
   RefT, RefRef, runRefT,
   withUnsafePerformRef, withUnsafeRefToIO,
   unsafePerformRef, unsafeRefToIO,
   UnsafeReadRef(..),
+  module Defaultable,
 ) where
 
 import Control.Applicative
@@ -36,6 +37,7 @@ import Control.Monad.Writer
 import System.IO.Unsafe
 import GHC.Conc (unsafeIOToSTM)
 
+import Defaultable
 import Eq1
 
 -- | A class for monads with mutable references. Provides generic
@@ -77,9 +79,6 @@ unsafeRefToIO m = join (withUnsafeRefToIO (\it → it m))
 
 unsafePerformRef ∷ MonadRef p m ⇒ m a → a
 unsafePerformRef m = either error id (withUnsafePerformRef (\it → it m))
-
-class Defaultable a where
-  getDefault ∷ a
 
 ---
 --- A transformer version of ST
