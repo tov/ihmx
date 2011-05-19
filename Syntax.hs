@@ -628,6 +628,7 @@ isAnnotated (AnnTm _ _)      = True
       , ("either",      "∀ α β γ. (α -A> γ) → (β -A> γ) -A> Either α β -A> γ")
       -- Any
       , ("bot",         "∀ α. α")
+      , ("cast",        "∀ α β. α → β")
       ]
 
 γ0 ∷ [Type Empty]

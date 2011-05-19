@@ -18,6 +18,7 @@ module Util (
   before,
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
   (<$.>), (<$$.>), (<$$$.>), (<$$$$.>),
+  (<->), (<-->), (<--->), (<---->), (<----->),
 ) where
 
 {-
@@ -134,3 +135,25 @@ f <$$$.> g = (g >>>) <$$$> f
 f <$$$$.> g = (g >>>) <$$$$> f
 
 infixl 4 <$.>, <$$.>, <$$$.>, <$$$$.>
+
+(<->)   ∷ Functor f ⇒ 
+          f (a → b) → a → f b
+f <-> x = ($ x) <$> f
+
+(<-->)   ∷ (Functor f, Functor g) ⇒
+           f (g (a → b)) → a → f (g b)
+f <--> x = (<-> x) <$> f
+
+(<--->)   ∷ (Functor f, Functor g, Functor h) ⇒
+            f (g (h (a → b))) → a → f (g (h b))
+f <---> x = (<--> x) <$> f
+
+(<---->)   ∷ (Functor f, Functor g, Functor h, Functor i) ⇒
+             f (g (h (i (a → b)))) → a → f (g (h (i b)))
+f <----> x = (<---> x) <$> f
+
+(<----->)   ∷ (Functor f, Functor g, Functor h, Functor i, Functor j) ⇒
+              f (g (h (i (j (a → b))))) → a → f (g (h (i (j b))))
+f <-----> x = (<----> x) <$> f
+
+infixl 4 <->, <-->, <--->, <---->, <----->

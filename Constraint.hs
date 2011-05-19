@@ -323,7 +323,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
     cγftv        ← ftvV (map snd (Gr.labNodes g), γ)
     qcftv        ← Map.map (const QInvariant) <$> ftvV qc
     let αs       = Map.keysSet $
-                     (τftv `Map.union` qcftv) `Map.difference` cγftv
+                     (τftv `Map.union` qcftv) Map.\\ cγftv
         βs       = Map.keysSet $
                      Map.filter isQVariance $
                        Map.unionsWith (⊔) [cγftv, qcftv, τftv]
@@ -891,9 +891,15 @@ solveQualifiers value αs βs τftv qc = do
   trace ("solveQ (uppers)", αs, τftv, qc)
   (αs, τftv, qc) ← unifyBounds (αs, τftv, qc)
   trace ("solveQ (unify)", αs, τftv, qc)
-  (vmap, βlst)   ← optimize qc
-  trace ("solveQ (optimize)", vmap, βlst)
-  doSat vmap βlst
+  (vmap, βlst)   ← decompose qc
+  trace ("solveQ (decompose)", vmap, βlst)
+  (αs, τftv, vmap, βlst)
+                 ← findBottoms (αs, τftv, vmap, βlst)
+  trace ("solveQ (bottoms)", αs, τftv, vmap, βlst)
+  (αs, τftv, vmap, βlst)
+                 ← runSat (αs, τftv, vmap, βlst) True
+  trace ("solveQ (sat)", αs, τftv, vmap, βlst)
+  runSat (αs, τftv, vmap, βlst) False
   αs             ← genVars αs τftv
   return (reconstruct αs vmap βlst, getBounds αs vmap)
   where
@@ -910,45 +916,49 @@ solveQualifiers value αs βs τftv qc = do
   unstdize qc = (toQualifierType *** toQualifierType) <$> qc
   --
   substUppers (αs, τftv, qc) =
-    foldr (>=>) return
-      [ subst α (L, Set.empty)
-      | α ← Set.toList (αs `Set.difference` Set.unions (map (snd . fst) qc))
-      , Map.findWithDefault 0 α τftv ⊑ QContravariant ]
+    subst
+        [ α
+        | α ← Set.toList (αs Set.\\ Set.unions (snd . fst <$> qc))
+        , Map.findWithDefault 0 α τftv ⊑ QContravariant ]
+      (repeat (L, Set.empty))
       (αs, τftv, qc)
   --
-  unifyBounds state0 = flip iterChanging state0 $ \(αs, τftv, qc) → do
-    trace ("unifyBounds", αs, τftv, qc)
-    let lbs = Map.fromListWith joinQ
-                [ (β, (q, vs))
-                | ((q, vs), (U, Set.toList → [β])) ← qc ]
-        ubs = Map.fromListWith meetQ
-                [ (β, (q, vs))
-                | ((U, Set.toList → [β]), (q, vs)) ← qc ]
-        varIs v α = Map.lookup α τftv == Just v
-        find v    = filter (varIs v) (Set.toList αs)
-        look q    = Map.findWithDefault (q, Set.empty)
-        action    = case find QCovariant of
-          β:_ → subst β (look U β lbs)
-          _   → case find QContravariant of
-            β:_ → subst β (look L β ubs)
-            _   → case find QInvariant of
-              β:_ | value, Just lb ← Map.lookup β lbs
-                  → subst β lb
-              _   → return
-    action (αs, τftv, qc)
+  unifyBounds state0 = flip iterChanging state0 $ \state@(αs,τftv,qc) → do
+    trace ("unifyBounds", state)
+    let lbs    = Map.fromListWith joinQ
+                   [ (β, (q, vs))
+                   | ((q, vs), (U, Set.toList → [β])) ← qc ]
+        ubs    = Map.fromListWith meetQ
+                   [ (β, (q, vs))
+                   | ((U, Set.toList → [β]), (q, vs)) ← qc ]
+        look q = Map.findWithDefault (q, Set.empty)
+        (pos, neg, inv) = foldr each mempty (Set.toList αs) where
+          each α (pos, neg, inv) = case Map.lookup α τftv of
+            Just QCovariant     → (α:pos, neg,   inv)
+            Just QContravariant → (pos,   α:neg, inv)
+            Just QInvariant
+              | value
+              , Just lb@(q, βs) ← Map.lookup α lbs
+              , not (q == U && Set.null βs)
+                                → (pos,   neg,   (α,lb):inv)
+            _                   → (pos,   neg,   inv)
+    case (pos, neg, inv) of
+      (_:_, _  , _       ) → subst pos (map (look U <-> lbs) pos) state
+      (_  , _  , (β,lb):_) → subst [β] [lb] state
+      (_  , β:_, _       ) → subst [β] [look L β ubs] state
+      _                    → return state
   --
-  subst α bound@(_,βs) (αs0, τftv0, qc0) = do
-    let τ    = toQualifierType bound
-        αs   = Set.delete α αs0
-        τftv = case Map.lookup α τftv0 of
-          Just v  → Set.fold (\βi → Map.insertWith (+) βi v)
-                             (Map.delete α τftv0)
-                             βs
-          Nothing → τftv0
-    writeTV α τ
+  subst βs bounds (αs0, τftv0, qc0) = do
+    let αs   = foldr Set.delete αs0 βs
+        τftv = foldr2 each τftv0 βs bounds where
+          each β (_,γs) τftv = case Map.lookup β τftv of
+            Just v  → Map.unionWith (+)
+                        (Map.delete β τftv)
+                        (setToMap (const v) γs)
+            Nothing → τftv
+    zipWithM_ writeTV βs (map toQualifierType bounds)
     qc ← stdize (unstdize qc0)
     return (αs, τftv, qc)
-  --
   --
   joinQ (q1,βs1) (q2,βs2) = case q1 ⊔ q2 of
     L → (L, Set.empty)
@@ -957,14 +967,14 @@ solveQualifiers value αs βs τftv qc = do
     L → (L, Set.empty)
     q → (q, βs1 `Set.intersection` βs2)
   --
-  optimize qc = foldM each (Map.empty, []) qc where
+  decompose qc = foldM each (Map.empty, []) qc where
     each (vmap, βlst) ((q1,βs1), (q2,βs2)) = do
       let βs' = Set.filter (`Set.member` βs) βs2
       when (not (q1 ⊑ q2) && Set.null βs') $
         fail $ "Qualifier inequality unsatisfiable: " ++
                show (toQualifierType (q1,βs1)) ++
                " ⊑ " ++ show (toQualifierType (q2,βs2))
-      let βdiff = Set.toList (βs1 `Set.difference` βs2)
+      let βdiff = Set.toList (βs1 Set.\\ βs2)
           βbnds = [ (β, [(q2, βs')]) | β ← βdiff, q2 /= L ]
           vmap' = foldr (uncurry (Map.insertWith (++))) vmap βbnds
           βlst' = if q1 ⊑ q2
@@ -972,13 +982,30 @@ solveQualifiers value αs βs τftv qc = do
                     else (q1, βs') : βlst
       return (vmap', βlst')
   --
-  doSat vmap βlst = do
+  findBottoms = iterChanging $ \(αs, τftv, vmap, βlst) →
+    doSubst
+        [ (α, U)
+        | (α, ubs) ← Map.toList vmap
+        , Set.member α αs
+        , Set.member α βs
+        , maybe True (== QCovariant) (Map.lookup α τftv)
+        , bigMeet [ ql | (ql, γs) ← ubs, Set.null γs ] == U ]
+      (αs, τftv, vmap, βlst)
+  --
+  runSat (αs, τftv, vmap, βlst) doIt = do
     let formula = toSat vmap βlst
-        sat     = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
-    case sat of
-      [] → fail "Qualifier constraints unsatisfiable"
-      _  → trace ("solveQ (sat)", formula, sat)
-    return ()
+        sats    = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
+        αs'     = Set.toList (αs `Set.intersection` βs)
+        finish  = if doIt then doSubst else const return
+    trace ("runSat", formula, sats)
+    γqs ← case sats of
+      []    → fail "Qualifier constraints unsatisfiable"
+      sat:_ → return
+        [ (α, lb)
+        | α  ← αs'
+        , let lb = satVarLB α sat
+        , lb /= U || Map.lookup α τftv == Just Covariant ]
+    finish γqs (αs, τftv, vmap, βlst)
   --
   toSat vmap βlst = foldr (SAT.:&&:) SAT.Yes $
       [ (πr q ==> πr (U,βs)) SAT.:&&: (πa q ==> πa (U,βs))
@@ -991,6 +1018,19 @@ solveQualifiers value αs βs τftv qc = do
     where
       p ==> q = SAT.Not p SAT.:||: q
   --
+  doSubst γqs (αs0, τftv0, vmap0, βlst0) = do
+    mapM_ (uncurry writeTV . second toQualifierType) γqs
+    let γmap = Map.fromList γqs
+        γset = Map.keysSet γmap
+        αs   = αs0 Set.\\ γset
+        τftv = τftv0 Map.\\ γmap
+        vmap = vmap0 Map.\\ γmap
+        βlst = [ (q, βs')
+               | (q, βs) ← βlst0
+               , let βs' = βs Set.\\ γset
+               , not (Set.null βs') ]
+    return (αs, τftv, vmap, βlst)
+  --
   genVars αs τftv = return $ Set.filter keep αs where
     keep α = case Map.lookup α τftv of
       Just v  → value || v `elem` [-2,-1,1,2]
@@ -998,22 +1038,26 @@ solveQualifiers value αs βs τftv qc = do
   --
   reconstruct αs vmap βlst =
     map (second clean) $
-      [ (fvTy v, (q, βs))
-      | (v, qes) ← Map.toList vmap
-      , v `Set.notMember` αs
-      , (q, βs) ← qes ]
-    ++
-      [ (toQualifierType q, (U, βs))
-      | (q, βs) ← βlst ]
+        [ (fvTy v, (q, βs))
+        | (v, qes) ← Map.toList vmap
+        , v `Set.notMember` αs
+        , (q, βs) ← qes ]
+      ++
+        [ (toQualifierType q, (U, βs))
+        | (q, βs) ← βlst ]
     where
-    clean (q, βs) = toQualifierType (q, Set.filter (`Set.notMember` αs) βs)
+    clean (q, βs) = toQualifierType (q, (Set.\\ αs) βs)
+  --
   getBounds αs vmap = map (id &&& getBound) (Set.toList αs) where
     getBound α = case Map.lookup α vmap of
       Nothing  → L
-      Just qes → bigMeet (fst <$> qes)
+      Just qes → bigMeet (map fst qes)
   --
   fromVar (FreeVar α) = α
   fromVar _           = error "BUG! solveQualifiers got bound tyvar"
+
+setToMap   ∷ (k → a) → Set.Set k → Map.Map k a
+setToMap f = Map.fromDistinctAscList . map (id &&& f) . Set.toAscList
 
 {-
   #0 → #3
@@ -1066,9 +1110,9 @@ instance SATable QLit where
         | otherwise = SAT.No
 
 instance Tv v ⇒ SATable (Var v) where
-  πr (FreeVar β) = SAT.Var (2 * tvUniqueID β)
+  πr (FreeVar β) = SAT.Not (SAT.Var (2 * tvUniqueID β))
   πr _           = SAT.No
-  πa (FreeVar β) = SAT.Var (2 * tvUniqueID β + 1)
+  πa (FreeVar β) = SAT.Not (SAT.Var (2 * tvUniqueID β + 1))
   πa _           = SAT.No
 
 instance (Tv v, SATable (Var v)) ⇒ SATable (QLit, Set.Set v) where
@@ -1079,12 +1123,18 @@ instance Tv v ⇒ SATable (QExp v) where
   πr (QExp ql vs) = foldr (SAT.:||:) (πr ql) (map πr vs)
   πa (QExp ql vs) = foldr (SAT.:||:) (πa ql) (map πa vs)
 
-{-
-g ∷ Gr Int ()
-g = Gr.insEdges [ (n,n+1,()) | n ← [1..9] ] $
-    Gr.insNodes [ (n,n) | n ← [1..10] ] $
-    Gr.empty
--}
+-- | Given a type variable and a SAT solution, return a lower bound
+--   for that type variable as implied by the solution.
+satVarLB ∷ Tv v ⇒ v → SAT.SatSolver → QLit
+satVarLB β solver = case (mbr, mba) of
+  (Just False, Just False) → L
+  (Just False, _         ) → R
+  (_         , Just False) → A
+  _                        → U
+  where mbr = SAT.lookupVar βr solver
+        mba = SAT.lookupVar βa solver
+        βr  = 2 * tvUniqueID β
+        βa  = 2 * tvUniqueID β + 1
 
 -- | Transitive, non-reflexive closure
 trcnr ∷ Gr.DynGraph gr ⇒ gr a b → gr a ()
@@ -1155,47 +1205,6 @@ labEdges g =
   ]
 
 {-
-check "let rec f = \\(C x).f (C (f x)) in f"
-
-diverges like this:
-
-[(1,C 2),(0,2 → 3),(0,C 3 → 4),(1 → 4,0),(0,1 → 4)],0)
-[(C 5,C 2),(0,2 → 3),(0,C 3 → 4),(C 5 → 4,0),(0,C 5 → 4)],0)
-[(5,2),(0,2 → 3),(0,C 3 → 4),(C 5 → 4,0),(0,C 5 → 4)],0)
-[(5,2),(6 → 7,2 → 3),(6 → 7,C 3 → 4),(C 5 → 4,6 → 7),(6 → 7,C 5 → 4)],6 → 7)
-[(5,2),(2,6),(7,3),(6 → 7,C 3 → 4),(C 5 → 4,6 → 7),(6 → 7,C 5 → 4)],6 → 7)
-[(5,2),(2,6),(7,3),(C 3,6),(7,4),(C 5 → 4,6 → 7),(6 → 7,C 5 → 4)],6 → 7)
-[(5,2),(2,C 8),(7,3),(C 3,C 8),(7,4),(C 5 → 4,C 8 → 7),(C 8 → 7,C 5 → 4)],C 8 → 7)
-[(5,2),(2,C 8),(7,3),(3,8),(7,4),(C 8,C 5),(4,7),(C 8 → 7,C 5 → 4)],C 8 → 7)
-[(5,C 9),(C 9,C 8),(7,3),(3,8),(7,4),(8,5),(4,7),(C 8 → 7,C 5 → 4)],C 8 → 7)
-[(5,C 9),(9,8),(7,3),(3,8),(7,4),(8,5),(4,7),(C 8 → 7,C 5 → 4)],C 8 → 7)
-[(5,C 9),(9,8),(7,3),(3,8),(7,4),(8,5),(4,7),(C5,C 8),(7,4)],C 8 → 7)
-[(5,C 9),(9,8),(7,3),(3,8),(7,4),(8,5),(4,7),(5,8),(7,4)],C 8 → 7)
-
-NEED BETTER OCCURS CHECK
-
-[(1, C 2), (C 1, 2)]
-[(C 3, C 2), (C C 3, 2)]
-[(3, 2), (C C 3, 2)]
-[(3, C 4), (C C 3, C 4)]
-[(3, C 4), (C 3, 4)]
-
-[(1, C 2), (2, C 1)]
-[(C 3, C 2), (2, C C 3)]
-[(3, 2), (2, C C 3)]
-[(3, C 4), (C 4, C C 3)]
-[(3, C 4), (4, C 3)]
-
-
-α = C × α
-α = C × (C × (C × ...))
-
-α ≤ C × α
-α = C × (C × (C × ...))
-α = C × (B × (B × ...))
-α = C × (B × (A × ...))
-α = τ₁ × (τ₂ × (τ₃ × ... (τᵢ × ...) ...))
-    where i ≥ j ⇒ τⱼ ≤ τⱼ
 
 OPTIMIZATIONS FROM SIMONET 2003
 
