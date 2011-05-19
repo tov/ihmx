@@ -40,7 +40,6 @@ import Control.Monad.Reader as CMR
 import Control.Monad.RWS    as RWS
 import Data.STRef
 import Data.IORef
-import qualified Data.Map
 import qualified Text.PrettyPrint as Ppr
 
 import Syntax

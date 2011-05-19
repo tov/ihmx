@@ -107,6 +107,15 @@ instance Lattice QLit where
   A ⊓ A = A; A ⊓ R = U
   L ⊓ q = q; q ⊓ L = q
 
+-- | @residual a b@ is the least @c@ such that
+--   @a ⊑ b ⊔ c@.  (This is sort of dual to a pseudocomplement.)
+residual ∷ QLit → QLit → QLit
+residual L R = A
+residual L A = R
+residual a b
+ | a ⊑ b     = U
+ | otherwise = a
+
 -- | The intent is that only well-formed qualifiers should be wrapped
 --   in 'QExp'.
 data QExp v = QExp QLit [Var v]
@@ -628,6 +637,10 @@ isAnnotated (AnnTm _ _)      = True
       , ("either",      "∀ α β γ. (α -A> γ) → (β -A> γ) -A> Either α β -A> γ")
       -- Any
       , ("bot",         "∀ α. α")
+      , ("botU",        "∀ α:U. α")
+      , ("botR",        "∀ α:R. α")
+      , ("botA",        "∀ α:A. α")
+      , ("botL",        "∀ α:L. α")
       , ("cast",        "∀ α β. α → β")
       ]
 

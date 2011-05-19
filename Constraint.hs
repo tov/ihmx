@@ -873,8 +873,8 @@ solveQualifiers value αs βs τftv qc = do
   (vmap, βlst)   ← decompose qc
   trace ("solveQ (decompose)", vmap, βlst)
   (αs, τftv, vmap, βlst)
-                 ← findBottoms (αs, τftv, vmap, βlst)
-  trace ("solveQ (bottoms)", αs, τftv, vmap, βlst)
+                 ← findExtremes (αs, τftv, vmap, βlst)
+  trace ("solveQ (extremes)", αs, τftv, vmap, βlst)
   (αs, τftv, vmap, βlst)
                  ← runSat (αs, τftv, vmap, βlst) True
   trace ("solveQ (sat)", αs, τftv, vmap, βlst)
@@ -961,30 +961,33 @@ solveQualifiers value αs βs τftv qc = do
                     else (q1, βs') : βlst
       return (vmap', βlst')
   --
-  findBottoms = iterChanging $ \(αs, τftv, vmap, βlst) →
-    doSubst
-        [ (α, U)
-        | (α, ubs) ← Map.toList vmap
-        , Set.member α αs
-        , Set.member α βs
-        , maybe True (== QCovariant) (Map.lookup α τftv)
-        , bigMeet [ ql | (ql, γs) ← ubs, Set.null γs ] == U ]
-      (αs, τftv, vmap, βlst)
+  findExtremes = iterChanging $ \(αs, τftv, vmap, βlst) → do
+    (αs, τftv, vmap, βlst) ← doSubst (αs, τftv, vmap, βlst)
+      [ (α, U)
+      | (α, ubs) ← Map.toList vmap
+      , Set.member α αs
+      , Set.member α βs
+      , bigMeet [ ql | (ql, γs) ← ubs, Set.null γs ] == U ]
+    doSubst (αs, τftv, vmap, βlst)
+      [ (α, L)
+      | α ← Set.toList αs
+      , maybe True (== QContravariant) (Map.lookup α τftv)
+      , Map.notMember α vmap ]
   --
   runSat (αs, τftv, vmap, βlst) doIt = do
     let formula = toSat vmap βlst
         sats    = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
         αs'     = Set.toList (αs `Set.intersection` βs)
-        finish  = if doIt then doSubst else const return
     trace ("runSat", formula, sats)
-    γqs ← case sats of
-      []    → fail "Qualifier constraints unsatisfiable"
-      sat:_ → return
-        [ (α, lb)
-        | α  ← αs'
-        , let lb = satVarLB α sat
-        , lb /= U || Map.lookup α τftv == Just Covariant ]
-    finish γqs (αs, τftv, vmap, βlst)
+    case sats of
+      [] → fail "Qualifier constraints unsatisfiable"
+      sat:_ | doIt
+         → doSubst (αs, τftv, vmap, βlst)
+             [ (α, lb)
+             | α  ← αs'
+             , let lb = satVarLB α sat
+             , lb /= U || Map.lookup α τftv == Just Covariant ]
+      _  → return (αs, τftv, vmap, βlst)
   --
   toSat vmap βlst = foldr (SAT.:&&:) SAT.Yes $
       [ (πr q ==> πr (U,βs)) SAT.:&&: (πa q ==> πa (U,βs))
@@ -997,16 +1000,18 @@ solveQualifiers value αs βs τftv qc = do
     where
       p ==> q = SAT.Not p SAT.:||: q
   --
-  doSubst γqs (αs0, τftv0, vmap0, βlst0) = do
-    mapM_ (uncurry writeTV . second toQualifierType) γqs
-    let γmap = Map.fromList γqs
-        γset = Map.keysSet γmap
-        αs   = αs0 Set.\\ γset
-        τftv = τftv0 Map.\\ γmap
-        vmap = vmap0 Map.\\ γmap
-        βlst = [ (q, βs')
-               | (q, βs) ← βlst0
-               , let βs' = βs Set.\\ γset
+  doSubst = foldM $ \(αs0, τftv0, vmap0, βlst0) (γ, q) → do
+    writeTV γ (toQualifierType q)
+    let αs   = Set.delete γ αs0
+        τftv = Map.delete γ τftv0
+        vmap = Map.map (map eachUB) (Map.delete γ vmap0) where
+          eachUB (qu, βs) =
+            if γ `Set.member` βs
+              then (qu ⊔ q, Set.delete γ βs)
+              else (qu, βs)
+        βlst = [ (residual ql q, βs')
+               | (ql, βs) ← βlst0
+               , let βs' = Set.delete γ βs
                , not (Set.null βs') ]
     return (αs, τftv, vmap, βlst)
   --

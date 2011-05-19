@@ -823,12 +823,12 @@ inferFnTests = T.test
       -: "B -L> B"
   , te "(bot: (B -α> B) → B -α> B) (bot: B -L> B) : B -R> B"
   --
-  , "(bot: (B -α> B) → B) (bot: B -α> B)"
-      -: "B"
-  , "(bot: (B -α β> B) → B) (bot: B -α> B)"
-      -: "B"
-  , "(bot: (B -α> B) → B) (bot: B -α β> B)"
-      -: "B"
+  , "λ(_:α). (cast B: (B -α> B) → B) (cast B: B -α> B)"
+      -: "∀α:A. α → B"
+  , "λ(_:α) (_:β). (cast B: (B -α β> B) → B) (cast B: B -α> B)"
+      -: "∀α β:A. α → β → B"
+  , "λ(_:α) (_:β). (cast B: (B -α> B) → B) (cast B: B -α β> B)"
+      -: "∀α:A, β:U. α → β → B"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"
