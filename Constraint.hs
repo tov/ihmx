@@ -393,8 +393,8 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
           NM.insMapEdgesM [ (α, α', ())
                           | (α, α') ← pairs
                           , α /= α'
-                          , varianceOf α  /= Just Covariant
-                          , varianceOf α' /= Just Contravariant
+                          , not (varianceOf α == Just Covariant &&
+                                 varianceOf α' == Just Contravariant)
                           ]
           NM.insMapEdgesM [ (ConAt c1, ConAt c2, ())
                           | (c1, c2) ← Gr.labNodeEdges tyConOrder]
@@ -747,7 +747,10 @@ occursCheck skm = do
     (_, mshape) ← UF.desc proxy
     case mshape of
       Nothing      → return gr
-      Just (_, βs) → foldM (assertGt α) gr βs
+      Just (c, βs) → foldM (assertGt α) gr
+                       [ β
+                       | (β, v) ← zip βs (getVariances c (length βs))
+                       , not (v ⊑ QInvariant) ]
   assertGt α gr β = case Map.lookup β (unSkelMap skm) of
     Nothing        → fail "BUG! occursCheck (1)"
     Just proxy     → do
@@ -797,34 +800,101 @@ expand skm0 αs0 = do
 
 {-
 
-Rewrite as follows:
+Syntactic metavariables:
 
-  not (q ⊑ q')
-  no β in vs'
-  ---------------------------
-  q vs ⊑ q' vs'   --->   fail
+ γ:  any type variable
+ α:  generalization candidates
+ β:  type variables with Q-variance
+ δ:  generalization candidates with Q-variance
+ q:  qualifier literals
+ _s: a collection of _
 
-  not (q ⊑ q')
-  vs \ vs' = v1 ... vk
-  βs' in vs'
-  not (null βs')
-  ---------------------------------------------------------------
-  q vs ⊑ q' vs'   --->  q ⊑ βs' ⋀ v1 ⊑ q' βs' ⋀ ... ⋀ vk ⊑ q' βs'
+ qe  ::=  q  |  γs  |  q γs     (qualifier expressions)
 
-  q ⊑ q'
-  vs \ vs' = v1 ... vk
-  βs' in vs'
-  -----------------------------------------------------
-  q vs ⊑ q' vs'   --->  v1 ⊑ q' βs' ⋀ ... ⋀ vk ⊑ q' βs'
+First rewrite as follows:
 
-Then we have a constraint of the form:
+  γs₁ \ γs₂ = γ₁ ... γⱼ
+  βs = { γ ∈ γs₂ | γ is Q-variant }
+  ---------------------------------------------------------------------
+  q₁ γs₁ ⊑ q₂ γs₂  --->  q₁ \-\ q₂ ⊑ βs ⋀ γ₁ ⊑ q₁ βs ⋀ ... ⋀ γⱼ ⊑ q₁ βs
 
-  v1 ⊑ (q11 βs11) ⊓ ... ⊓ (q1k1 βs1k1)
-  ...
-  vj ⊑ (qj1 βsj1) ⊓ ... ⊓ (qjkj βsjkj)
-  q1 ⊑ βs1
-  ...
-  qm ⊑ βsm
+  ---------------
+  U ⊑ βs  --->  ⊤
+
+  -----------------
+  γ ⊑ L βs  --->  ⊤
+
+  q ≠ U
+  -----------------
+  q ⊑ U  --->  fail
+
+Then we have a constraint where each inequality is in one of two forms:
+
+  γ ⊑ q βs
+  q ⊑ βs
+
+Now we continue to rewrite and perform substitutions as well.  Continue
+to apply the above rules when they apply.  These new rewrites apply to a
+whole constraint and type together, not to single atomic constraints.
+
+For a type variable γ and type τ, let V(γ,τ) be γ's variance in τ.  We
+also refer to the free type variables in only the lower or upper bounds
+of a constraint C as lftv(C) and uftv(C), respectively.
+
+These are non-lossy rewrites. Repeat them as much as possible,
+continuing to apply the rewrites above when applicable:
+
+  V(δ,τ) ∈ { Q-, Q= }
+  -------------------------------
+  δ ⊑ U ⋀ C; τ  --->  [U/δ](C; τ)
+
+  V(δ,τ) ∈ { Q-, Q= }
+  ---------------------------------------
+  δ ⊑ R ⋀ δ ⊑ A ⋀ C; τ  --->  [U/δ](C; τ)
+
+  q ⊑ q'   βs ⊆ βs'
+  ---------------------------------------------------
+  γ ⊑ q βs ⋀ γ ⊑ q' βs' ⋀ C; τ  --->  γ ⊑ q βs ⋀ C; τ
+
+  δ ∉ lftv(C)   V(δ,τ) ⊑ Q-
+  ---------------------------------
+  δ ⊑ qe ⋀ C; τ  --->  [qe/δ](C; τ)
+
+  δ ∉ uftv(C)   V(δ,τ) ⊑ Q+
+  -----------------------------------------------------------
+  qe₁ ⊑ δ ⋀ ... ⋀ qeⱼ ⊑ δ ⋀ C; τ  --->  [qe₁⊔...⊔qeⱼ/δ](C; τ)
+
+  δ ∉ uftv(C)   V(δ,τ) = Q=   δ' fresh
+  --------------------------------------------------------------
+  qe₀ ⊑ δ ⋀ ... ⋀ qeⱼ ⊑ δ ⋀ C; τ  --->  [δ'⊔qe₀⊔...⊔qeⱼ/δ](C; τ)
+
+  δ ∉ lftv(C)   V(δ,τ) ⊑ Q-
+  -------------------------
+  C; τ  --->  [L/δ](C; τ)
+
+  δ₁, δ₂ ∉ uftv(C)   V(δ₁,τ) ⊑ Q+   V(δ₂,τ) ⊑ Q+
+  --------------------------------------------------------
+  qe₁ ⊑ qe₁' δ₁ δ₂ ⋀ ... ⋀ qeⱼ ⊑ qeⱼ' δ1 δ2 ⋀ C; τ
+     --->  [δ₁/δ₂](qe₁ ⊑ qe₁' δ₁ ⋀ ... ⋀ qeⱼ ⊑ qeⱼ' δ₁ ⋀ C; τ)
+
+-- These are locally non-lossy rewrites, in the sense that they won't raise
+-- the current type scheme, but may do so for some later generalization.
+
+  -- V(β,τ) ∈ { Q+, Q= }   βs ≠ ∅
+  -- ------------------------------------
+  -- qe ⊑ q β βs ⋀ C  --->  qe ⊑ q βs ⋀ C
+
+Finish by adding these lossy rewrites:
+
+  ----------------------------------------------------------------
+  α ⊑ q βs ⋀ α ⊑ q' βs' ⋀ C; τ  --->  α ⊑ (q⊓q') (βs ∩ βs') ⋀ C; τ
+
+Finally, add bounds:
+
+  α ≠ lftv(C)   V(β,τ) ∈ { -, +, =, Q= }
+  --------------------------------------
+  α ⊑ q βs ⋀ C; τ  --->  C; ∀α:q. τ
+
 
 We can convert it to SAT as follows:
 
@@ -864,8 +934,12 @@ solveQualifiers      ∷ MonadU tv m ⇒
 solveQualifiers value αs βs τftv qc = do
   let ?deref = readTV
   trace ("solveQ (init)", αs, βs, qc)
+  -- Clean up the constraint, standardize types to qualifier form, and
+  -- deal with trivial stuff right away:
   qc             ← stdize qc
   trace ("solveQ (stdize)", qc)
+  -- Replace contravariant variables that never appear on the left side
+  -- of a comparison with top (L).
   (αs, τftv, qc) ← substUppers (αs, τftv, qc)
   trace ("solveQ (uppers)", αs, τftv, qc)
   (αs, τftv, qc) ← unifyBounds (αs, τftv, qc)
@@ -884,13 +958,13 @@ solveQualifiers value αs βs τftv qc = do
   where
   stdize qc = foldM each [] qc where
     each qc' (τl, τh) = do
-      QExp q1 vs1 ← qualifier τl
-      QExp q2 vs2 ← qualifier τh
-      let vs1' = Set.fromList (fromVar <$> vs1)
-          vs2' = Set.fromList (fromVar <$> vs2)
-      if q2 == L || q1 ⊑ q2 && vs1' `Set.isSubsetOf` vs2'
+      QExp q1 γs1 ← qualifier τl
+      QExp q2 γs2 ← qualifier τh
+      let γs1' = Set.fromList (fromVar <$> γs1)
+          γs2' = Set.fromList (fromVar <$> γs2)
+      if q2 == L || q1 ⊑ q2 && γs1' `Set.isSubsetOf` γs2'
         then return qc'
-        else return (((q1, vs1'), (q2, vs2')) : qc')
+        else return (((q1, γs1'), (q2, γs2')) : qc')
   --
   unstdize qc = (toQualifierType *** toQualifierType) <$> qc
   --
@@ -905,20 +979,20 @@ solveQualifiers value αs βs τftv qc = do
   unifyBounds state0 = flip iterChanging state0 $ \state@(αs,τftv,qc) → do
     trace ("unifyBounds", state)
     let lbs    = Map.fromListWith joinQ
-                   [ (β, (q, vs))
-                   | ((q, vs), (U, Set.toList → [β])) ← qc ]
+                   [ (γ, (q, γs))
+                   | ((q, γs), (U, Set.toList → [γ])) ← qc ]
         ubs    = Map.fromListWith meetQ
-                   [ (β, (q, vs))
-                   | ((U, Set.toList → [β]), (q, vs)) ← qc ]
+                   [ (γ, (q, γs))
+                   | ((U, Set.toList → [γ]), (q, γs)) ← qc ]
         look q = Map.findWithDefault (q, Set.empty)
-        (pos, neg, inv) = foldr each mempty (Set.toList αs) where
+        (pos, neg, inv) = Set.fold each mempty αs where
           each α (pos, neg, inv) = case Map.lookup α τftv of
             Just QCovariant     → (α:pos, neg,   inv)
             Just QContravariant → (pos,   α:neg, inv)
             Just QInvariant
               | value
-              , Just lb@(q, βs) ← Map.lookup α lbs
-              , not (q == U && Set.null βs)
+              , Just lb@(q, γs) ← Map.lookup α lbs
+              , not (q == U && Set.null γs)
                                 → (pos,   neg,   (α,lb):inv)
             _                   → (pos,   neg,   inv)
     case (pos, neg, inv) of
@@ -947,19 +1021,22 @@ solveQualifiers value αs βs τftv qc = do
     q → (q, βs1 `Set.intersection` βs2)
   --
   decompose qc = foldM each (Map.empty, []) qc where
-    each (vmap, βlst) ((q1,βs1), (q2,βs2)) = do
-      let βs' = Set.filter (`Set.member` βs) βs2
-      when (not (q1 ⊑ q2) && Set.null βs') $
-        fail $ "Qualifier inequality unsatisfiable: " ++
-               show (toQualifierType (q1,βs1)) ++
-               " ⊑ " ++ show (toQualifierType (q2,βs2))
-      let βdiff = Set.toList (βs1 Set.\\ βs2)
-          βbnds = [ (β, [(q2, βs')]) | β ← βdiff, q2 /= L ]
-          vmap' = foldr (uncurry (Map.insertWith (++))) vmap βbnds
-          βlst' = if q1 ⊑ q2
-                    then βlst
-                    else (q1, βs') : βlst
-      return (vmap', βlst')
+    each (vmap, βlst) ((q1,αs1), (q2,αs2)) = do
+      let αs' = αs1 Set.\\ αs2
+          βs' = βs `Set.intersection` αs2
+      fβlst ← case q1 \-\ q2 of
+        U  →   return id
+        q' | Set.null βs →
+               fail $ "Qualifier inequality unsatisfiable: " ++
+                      show (toQualifierType (q1,αs1)) ++
+                      " ⊑ " ++ show (toQualifierType (q2,αs2))
+           | otherwise →
+               return ((q', βs') :)
+      let fvmap = if q2 == L then
+                    id
+                  else
+                    Map.unionWith (++) (setToMap (\_ → [(q2, βs')]) αs')
+      return (fvmap vmap, fβlst βlst)
   --
   findExtremes = iterChanging $ \(αs, τftv, vmap, βlst) → do
     (αs, τftv, vmap, βlst) ← doSubst (αs, τftv, vmap, βlst)
@@ -971,7 +1048,7 @@ solveQualifiers value αs βs τftv qc = do
     doSubst (αs, τftv, vmap, βlst)
       [ (α, L)
       | α ← Set.toList αs
-      , maybe True (== QContravariant) (Map.lookup α τftv)
+      , Map.findWithDefault QContravariant α τftv == QContravariant
       , Map.notMember α vmap ]
   --
   runSat (αs, τftv, vmap, βlst) doIt = do
@@ -1009,7 +1086,7 @@ solveQualifiers value αs βs τftv qc = do
             if γ `Set.member` βs
               then (qu ⊔ q, Set.delete γ βs)
               else (qu, βs)
-        βlst = [ (residual ql q, βs')
+        βlst = [ (ql \-\ q, βs')
                | (ql, βs) ← βlst0
                , let βs' = Set.delete γ βs
                , not (Set.null βs') ]

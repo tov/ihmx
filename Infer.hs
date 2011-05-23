@@ -68,6 +68,9 @@ import qualified Test.HUnit as T
 import Control.Monad.RWS    as RWS
 -- import Control.Monad.State  as CMS
 
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
+import System.IO (stderr, hPutStrLn)
+
 import MonadU
 import Constraint
 import Syntax hiding (tests)
@@ -127,8 +130,7 @@ infer δ γ e0 = case e0 of
     return (τ2, c' ⋀ c2)
   VarTm (FreeVar ff)            → elimEmpty ff
   VarTm (BoundVar i j _)        → do
-    τ ← inst (γ !! i !! j)
-    return (τ, (⊤))
+    inst (γ !! i !! j)
   ConTm n es                    → do
     (τs, cs)         ← unzip <$> mapM (infer δ γ) es
     return (ConTy n τs, mconcat cs)
@@ -151,16 +153,21 @@ arrowQualifier γ e =
   where ?deref = readTV
 
 -- | Instantiate a prenex quantifier
-inst ∷ MonadU tv m ⇒ Type tv → m (Type tv)
+inst ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
+       Type tv → m (Type tv, c)
 inst σ0 = do
-  σ ← deref σ0
-  τ ← case σ of
-    QuaTy AllQu ns τ → do
-      αs ← replicateM (length ns) newTVTy
-      return (openTy 0 αs τ)
-    τ → return τ
-  trace ("inst", σ, τ)
-  return τ
+  σ      ← deref σ0
+  (τ, c) ← case σ of
+    QuaTy AllQu nqs τ → do
+      (αs, cs) ← unzip <$> sequence
+        [ do
+            α ← newTVTy
+            return (α, α ⊏ q)
+        | (_, q) ← nqs ]
+      return (openTy 0 αs τ, mconcat cs)
+    τ → return (τ, (⊤))
+  trace ("inst", σ, τ, c)
+  return (τ, c)
 
 -- | Given a type variable environment, a pattern, and optionally an
 --   expected type, and
@@ -701,10 +708,23 @@ i a = do
 
 -}
 
+time ∷ IO a → IO (a, POSIXTime)
+time m = do
+  ptime1 ← getPOSIXTime
+  result ← m
+  ptime2 ← getPOSIXTime
+  return (result, ptime2 - ptime1)
+
+reportTime ∷ IO a → IO a
+reportTime m = do
+  (result, elapsed) ← time m
+  hPutStrLn stderr $ "Elapsed time: " ++ show elapsed
+  return result
+
 tests, inferTests ∷ IO ()
 
 inferTests = tests
-tests      = do
+tests      = reportTime $ do
   syntaxTests
   T.runTestTT inferFnTests
   return ()
@@ -716,9 +736,9 @@ inferFnTests = T.test
   , "λx.x"      -: "∀ α:L. α → α"
   , "λa.id id"  -: "∀ α:A, β:L. α → β → β"
   , "λ_.choose id"
-                -: "∀ α:A, β γ. α → (β -γ> β) -γ> β -γ> β"
+                -: "∀ α:A, β, γ:A. α → (β -γ> β) -γ> β -γ> β"
   , "λ_.choose (id : α → α)"
-                -: "∀ α:A, β γ. α → (β -γ> β) -γ> β -γ> β"
+                -: "∀ α:A, β, γ:A. α → (β -γ> β) -γ> β -γ> β"
   , te "λf. P (f A) (f B)"
   , "λ_. single id" -: "∀ α:A, β. α → List (β → β)"
   , "λf x. f (f x)"     -: "∀α, β:R. (α -β> α) → α -β> α"
@@ -734,6 +754,25 @@ inferFnTests = T.test
   , pe "λ(A x x). B"
   , "λ(B a (C b c) (D d (E e f g))). F"
                 -: "∀ α β γ δ e f g: A. B α (C β γ) (D δ (E e f g)) → F"
+  -- Let rec
+  , "let rec f = λx. f x in f"
+      -: "∀α β. α → β"
+  , "let rec f = λx. f (f x) in f"
+      -: "∀α. α → α"
+  , "let rec f = λx. match Z with _ → f x | _ → x in f"
+      -: "∀α. α → α"
+  , "let rec f = λx. match Z with _ → f x | _ → Z in f"
+      -: "∀α:A. α → Z"
+  , "let rec f = λx. match Z with _ → f (f x) | _ → x in f"
+      -: "∀α. α → α"
+  , "let rec f = λx. match Z with _ → f (f x) | _ → Z in f"
+      -: "Z → Z"
+      {- XXX
+  , "let rec f = λ_. g G    \
+    \    and g = λ_. f F in \
+    \  Pair f g"
+      -: "∀α. Pair (F → α) (G → α)"
+      -}
   -- Occurs check
   , te "λf. f f"
   , te "let rec f = λ(C x).f (C (f x)) in f"
@@ -792,25 +831,40 @@ inferFnTests = T.test
       -: "B"
   , te "let f = bot : (B -U> B) → B in let g = bot : B -L> B in f g"
   , te "let f = bot : (B -R> B) → B in let g = bot : B -A> B in f g"
-  , "λ(x:α). let f = cast B : (B -L> B) → B in let g = cast B : B -R> B in f g"
+  , "λ(x:α). let f = cast B : (B -L> B) → B in \
+    \        let g = cast B : B -R> B in f g"
       -: "∀α:A. α → B"
-  , "λ(x:α). let f = cast B : (B -L> B) → B in let g = cast B : B -α> B in f g"
+  , "λ(x:α). let f = cast B : (B -L> B) → B in \
+    \        let g = cast B : B -α> B in f g"
       -: "∀α:A. α → B"
-  , "λ(x:α). let f = cast B : (B -α> B) → B in let g = cast B : B -α> B in f g"
+  , "λ(x:Z -α> Z). let f = cast B:(B -L> B) → B in \
+    \              let g = cast B:B -α> B in f g"
+      -: "(Z -A> Z) → B"
+  , "λ(x:α). let f = cast B : (B -α> B) → B in \
+    \        let g = cast B : B -α> B in f g"
       -: "∀α:A. α → B"
-  , "λ(x:α). let f = cast B : (B -α> B) → B in let g = cast B : B -U> B in f g"
+  , "λ(x:α). let f = cast B : (B -α> B) → B in \
+    \        let g = cast B : B -U> B in f g"
       -: "∀α:A. α → B"
-  , te "λ(x:α).let f = cast B: (B -α> B) → B in let g = cast B: B -A> B in f g"
-  , "λ(x:B -α> B).let f=cast B: (B -α> B) → B in let g=cast B: B -A> B in f g"
+  , te "λ(x:α). let f = cast B : (B -α> B) → B in \
+       \        let g = cast B: B -A> B in f g"
+  , "λ(x:B -α> B). let f = cast B : (B -α> B) → B in \
+    \              let g = cast B : B -A> B in f g"
       -: "(B -A> B) → B"
-  , "λ(x:α). let f = cast B : (B -A> B) → B in let g = cast B : B -α> B in f g"
+  , "λ(x:α). let f = cast B : (B -A> B) → B in \
+    \        let g = cast B : B -α> B in f g"
       -: "∀α:A. α → B"
-  , "λ(x:α). let f = cast B : (B -U> B) → B in let g = cast B : B -α> B in f g"
+  , "λ(x:α). let f = cast B : (B -U> B) → B in \
+    \        let g = cast B : B -α> B in f g"
       -: "∀α:U. α → B"
-  , "λ(x:α). let f = cast B : (B -R> B) → B in let g = cast B : B -α> B in f g"
+  , "λ(x:α). let f = cast B : (B -R> B) → B in \
+    \        let g = cast B : B -α> B in f g"
       -: "∀α:U. α → B"
-  , te "λ(x:α).let f = cast B: (B -α> B) → B in let g = cast B: B -L> B in f g"
+  , te "λ(x:α). let f = cast B: (B -α> B) → B in \
+    \           let g = cast B: B -L> B in f g"
   , "λ(f : (B -L> B) → B) (g : B -α> B). f g"
+      -: "((B -L> B) → B) → (B -L> B) → B"
+  , "λ(f : (B -α> B) → B) (g : B -L> B). f g"
       -: "((B -L> B) → B) → (B -L> B) → B"
   , "λ(f : (B -α> B) → B) (g : B -α> B). f g"
       -: "∀α. ((B -α> B) → B) → (B -α> B) → B"
@@ -829,6 +883,8 @@ inferFnTests = T.test
       -: "∀α β:A. α → β → B"
   , "λ(_:α) (_:β). (cast B: (B -α> B) → B) (cast B: B -α β> B)"
       -: "∀α:A, β:U. α → β → B"
+  , "λ(x:α) (y:β). eat (P x y) ((cast B: (B -α> B) → B) (cast B: B -α β> B))"
+      -: "∀α, β:U. α → β -α> B"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"

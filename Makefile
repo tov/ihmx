@@ -1,2 +1,2 @@
 ihmx: *.hs
-	ghc -o $@ --make Main
+	ghc -o $@ --make Main -O3

@@ -107,14 +107,12 @@ instance Lattice QLit where
   A ⊓ A = A; A ⊓ R = U
   L ⊓ q = q; q ⊓ L = q
 
--- | @residual a b@ is the least @c@ such that
+-- | @a \-\ b@ is the least @c@ such that
 --   @a ⊑ b ⊔ c@.  (This is sort of dual to a pseudocomplement.)
-residual ∷ QLit → QLit → QLit
-residual L R = A
-residual L A = R
-residual a b
- | a ⊑ b     = U
- | otherwise = a
+(\-\) ∷ QLit → QLit → QLit
+L \-\ R = A
+L \-\ A = R
+a \-\ b = if a ⊑ b then U else a
 
 -- | The intent is that only well-formed qualifiers should be wrapped
 --   in 'QExp'.
@@ -636,6 +634,7 @@ isAnnotated (AnnTm _ _)      = True
       , ("inr",         "∀ α β. β → Either α β")
       , ("either",      "∀ α β γ. (α -A> γ) → (β -A> γ) -A> Either α β -A> γ")
       -- Any
+      , ("eat",         "∀ α β. α → β → β")
       , ("bot",         "∀ α. α")
       , ("botU",        "∀ α:U. α")
       , ("botR",        "∀ α:R. α")
@@ -793,11 +792,23 @@ lfvTm = Set.toList . lfvTmK 0 where
 --- Occurrence analysis
 ---
 
--- | The number of occurrences of a variable in a term.  These
---   are an abstraction of the natural numbers as zero, one, many, or
---   combinations thereof.
---   (Note: no { 0, 2+ })
---
+{- | The number of occurrences of a variable in a term.  These
+     are an abstraction of the natural numbers as zero, one, many, or
+     combinations thereof.
+     (Note: no { 0, 2+ })
+
+      U
+     / \
+    /   \
+   A     R
+   |\   /|
+   | \ / |
+   Z  L  /
+    \ | /
+     \|/
+      E
+
+-}
 data Occurrence
   -- | Any number of times { 0, 1, 2+ }
   = UO
@@ -809,8 +820,6 @@ data Occurrence
   | LO
   -- | Zero times { 0 }
   | ZO
-  -- | More than one time { 2+ }
-  | MO
   -- | Dead code / error { }
   | EO
   deriving (Eq, Show)
@@ -822,7 +831,6 @@ occToInts RO = [1, 2]
 occToInts AO = [0, 1]
 occToInts LO = [1]
 occToInts ZO = [0]
-occToInts MO = [2]
 occToInts EO = []
 
 -- | Convert an occurrence to the best qualifier literal
@@ -832,7 +840,6 @@ occToQLit RO = R
 occToQLit AO = A
 occToQLit LO = L
 occToQLit ZO = A
-occToQLit MO = R
 occToQLit EO = L
 
 instance Bounded Occurrence where
@@ -841,17 +848,16 @@ instance Bounded Occurrence where
 
 instance Lattice Occurrence where
   EO ⊔ o  = o;  o  ⊔ EO = o
-  MO ⊔ LO = RO; LO ⊔ MO = RO
-  MO ⊔ RO = RO; RO ⊔ MO = RO
   ZO ⊔ LO = AO; LO ⊔ ZO = AO
   ZO ⊔ AO = AO; AO ⊔ ZO = AO
+  LO ⊔ RO = RO; RO ⊔ LO = RO
+  LO ⊔ AO = AO; AO ⊔ LO = AO
   o  ⊔ o' | o == o'   = o
           | otherwise = UO
   --
   UO ⊓ o  = o;  o  ⊓ UO = o
   RO ⊓ AO = LO; AO ⊓ RO = LO
   RO ⊓ LO = LO; LO ⊓ RO = LO
-  RO ⊓ MO = MO; MO ⊓ RO = MO
   AO ⊓ LO = LO; LO ⊓ AO = LO
   AO ⊓ ZO = ZO; ZO ⊓ AO = ZO
   o  ⊓ o' | o == o'   = o
@@ -861,21 +867,20 @@ instance Lattice Occurrence where
 instance Num Occurrence where
   fromInteger 0             = ZO
   fromInteger 1             = LO
-  fromInteger z | z > 1     = MO
+  fromInteger z | z > 1     = RO
                 | otherwise = EO
   abs = id
   negate = const EO
   signum o = bigJoin (map (fromInteger . toInteger . signum) (occToInts o))
   EO + _  = EO; _  + EO = EO
-  MO + _  = MO; _  + MO = MO
   ZO + o  = o;  o  + ZO = o
-  LO + LO = MO;
+  LO + LO = RO;
   LO + AO = RO; AO + LO = RO
-  LO + RO = MO; RO + LO = MO
+  LO + RO = RO; RO + LO = RO
   LO + UO = RO; UO + LO = RO
   AO + RO = RO; RO + AO = RO
-  RO + RO = MO;
-  RO + UO = RO; UO + RO = UO
+  RO + RO = RO;
+  RO + UO = RO; UO + RO = RO
   _  + _  = UO
   --
   o  * o' = bigJoin $ do
