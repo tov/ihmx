@@ -18,6 +18,7 @@ module MonadU (
   MonadU(..), deref, derefAll, isUnifiableTV,
   -- ** Change monitoriing
   setChanged, withChanged, monitorChange, whileChanging, iterChanging,
+  (>=>!),
   -- * Implementations of 'MonadU'
   -- ** Representation of type variables
   TV, TypeR,
@@ -26,7 +27,7 @@ module MonadU (
   -- ** Pure
   U, runU,
   -- * Debugging
-  trace,
+  warn, trace,
 ) where
 
 import Control.Applicative
@@ -41,6 +42,7 @@ import Control.Monad.RWS    as RWS
 import Data.STRef
 import Data.IORef
 import qualified Text.PrettyPrint as Ppr
+import System.IO (hPutStrLn, stderr)
 
 import Syntax
 import Ppr
@@ -168,7 +170,7 @@ monitorChange m = do
   putChanged False
   r  ← m
   b  ← hasChanged
-  putChanged b0
+  putChanged (b || b0)
   return (r, b)
 
 -- | Iterate a computation until it stops changing
@@ -185,6 +187,15 @@ iterChanging f z = do
   if b
     then iterChanging f z'
     else return z'
+
+(>=>!) ∷ MonadU tv m ⇒ (a → m a) → (a → m a) → a → m a
+(>=>!) m n z = do
+  (z', changed) ← monitorChange (m z)
+  if changed
+    then return z'
+    else n z
+
+infixr 1 >=>!
 
 ---
 --- Representation of free type variables
@@ -344,6 +355,9 @@ unsafeReadTV TV { tvRef = r } = unsafeReadRef r
 
 debug ∷ Bool
 debug = False
+
+warn ∷ MonadU r m ⇒ String → m ()
+warn = unsafeIOToU . hPutStrLn stderr
 
 trace ∷ (MonadU r m, Show a) ⇒ a → m ()
 trace = if debug

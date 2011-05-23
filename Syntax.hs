@@ -635,6 +635,9 @@ isAnnotated (AnnTm _ _)      = True
       , ("either",      "∀ α β γ. (α -A> γ) → (β -A> γ) -A> Either α β -A> γ")
       -- Any
       , ("eat",         "∀ α β. α → β → β")
+      , ("eatU",        "∀ α:U, β. α → β → β")
+      , ("eatA",        "∀ α:A, β. α → β → β")
+      , ("eatR",        "∀ α:R, β. α → β → β")
       , ("bot",         "∀ α. α")
       , ("botU",        "∀ α:U. α")
       , ("botR",        "∀ α:R. α")
@@ -946,6 +949,9 @@ instance Monoid (FtvTree v) where
   mappend a b = FTBranch [a, b]
   mconcat     = FTBranch
 
+-- | Map from variables to variances
+type VarMap v = Map.Map v Variance
+
 -- | A fold for 'FtvTree's. It's necessary to specify how to
 --   add a free type variable and its variance to the result, and the
 --   initial result.  Note that this fold gives no information about
@@ -977,7 +983,7 @@ class Ord v ⇒ Ftv a v | a → v where
   --   type variables that occur more than once.
   ftvList  ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m [(v, Variance)]
   -- | To get a map from free type variables to their variances.
-  ftvV     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Map.Map v Variance)
+  ftvV     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (VarMap v)
   -- | To get a map from free type variables to a list of all their
   --   occurrences' variances.
   ftvSet   ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Set.Set v)
@@ -986,6 +992,10 @@ class Ord v ⇒ Ftv a v | a → v where
   ftvVs    ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Map.Map v [Variance])
   -- | To get a list of the free type variables in a type (with no repeats).
   ftvM     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m [v]
+  -- | To get the set of (apparent) free variables without trying to
+  --   dereference anything
+  ftvPure  ∷ a → VarMap v
+  -- 
   --
   ftvFold each zero a
                  = foldFtvTree each zero `liftM` ftvTree a
@@ -994,6 +1004,7 @@ class Ord v ⇒ Ftv a v | a → v where
   ftvSet         = ftvFold (const . Set.insert) Set.empty
   ftvVs          = ftvFold (\v a → Map.insertWith (++) v [a]) Map.empty
   ftvM a         = liftM (ordNub . map fst) (ftvList a)
+  ftvPure a      = runIdentity (ftvV a) where ?deref = return . Left
 
 instance Ord v ⇒ Ftv (Type v) v where
   ftvTree = foldType

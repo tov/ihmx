@@ -97,8 +97,11 @@ infer δ γ e0 = case e0 of
   AbsTm π e                     → do
     (δ', c1, τ1, τs) ← inferPatt δ π Nothing
     (τ2, c2)         ← infer δ' (τs:γ) e
+    -- qe               ← qvarexp . FreeVar <$> newTV
+    -- let cqe          = mconcat (map (⊏ qe) (termFreeTypes γ (AbsTm π e)))
     qe               ← arrowQualifier γ (AbsTm π e)
-    return (arrTy τ1 qe τ2, c1 ⋀ c2 ⋀ τs ⊏* e)
+    let cqe          = (⊤)
+    return (arrTy τ1 qe τ2, c1 ⋀ c2 ⋀ cqe ⋀ τs ⊏* e)
   LetTm π e1 e2                 → do
     (τ1, c1)         ← infer δ γ e1
     (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1)
@@ -143,6 +146,13 @@ infer δ γ e0 = case e0 of
     (δ', τ', _)      ← instAnnot δ annot
     (τ, c)           ← infer δ' γ e
     return (τ', c ⋀ τ ≤ τ')
+
+termFreeTypes ∷ Γ tv → Term a → [Type tv]
+termFreeTypes γ e =
+  [ σ
+  | (i, j) ← lfvTm e
+  , rib:_ ← [drop i γ]
+  , σ:_   ← [drop j rib] ]
 
 arrowQualifier ∷ (MonadU tv m) ⇒ Γ tv → Term a → m (QExp tv)
 arrowQualifier γ e =
@@ -767,12 +777,14 @@ inferFnTests = T.test
       -: "∀α. α → α"
   , "let rec f = λx. match Z with _ → f (f x) | _ → Z in f"
       -: "Z → Z"
-      {- XXX
   , "let rec f = λ_. g G    \
     \    and g = λ_. f F in \
     \  Pair f g"
-      -: "∀α. Pair (F → α) (G → α)"
-      -}
+      -: "∀α β. Pair (F → α) (G → β)"
+  , "let rec f = λ_. g G : B \
+    \    and g = λ_. f F in  \
+    \  Pair f g"
+      -: "Pair (F → B) (G → B)"
   -- Occurs check
   , te "λf. f f"
   , te "let rec f = λ(C x).f (C (f x)) in f"
@@ -825,6 +837,10 @@ inferFnTests = T.test
       -: "∀ α β δ1, δ2 : R. (β -δ2> β) → (α -δ1> β) -δ2> α -δ1 δ2> β"
   , "λf g x. f (f (g x x))"
       -: "∀ α:R, β δ1, δ2:R. (β -δ2> β) → (α -δ1> α -L> β) -δ2> α -δ1 δ2> β"
+  , "λf. f (f X X) X"
+      -: "(X -R> X -L> X) → X"
+  , "λf g x. f (f (g x) C) C"
+      -: "∀ α β, δ1:R, δ2. (β -δ1> C -L> β) → (α -δ2> β) -δ1> α -δ2 δ1> β"
   , "λf g x. f (f (g x) (g x)) (g x)"
       -: "∀ α:R, β, δ1 δ2:R. (β -δ2> β -L> β) → (α -δ1> β) -δ2> α -δ1 δ2> β"
   , "let f = bot : (B -L> B) → B in let g = bot : B -U> B in f g"
@@ -885,6 +901,16 @@ inferFnTests = T.test
       -: "∀α:A, β:U. α → β → B"
   , "λ(x:α) (y:β). eat (P x y) ((cast B: (B -α> B) → B) (cast B: B -α β> B))"
       -: "∀α, β:U. α → β -α> B"
+  --
+  , "let rec f = λg x. let _ = f ((λC.C) : C -R> C) in g x in f"
+      -: "∀α. (C -R α> C) → (C -R α> C)"
+  --
+  -- Generalization with non-empty Γ
+  --
+  , "λ(f : B -α> B). let g = λh. h f in Pair f g"
+      -: "∀ α:R, β. (B -α> B) → Pair (B -α> B) (((B -α> B) -L> β) -α> β)"
+  , "λ(f : B -α> B). let g = λh. h f in g"
+      -: "∀ α β. (B -α> B) → ((B -α> B) -L> β) -α> β"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"
@@ -1236,10 +1262,14 @@ inferFnTests = T.test
   -}
   ]
   where
-  a -: b = T.assertBool ("⊢ " ++ a ++ " : " ++ b)
-             (case showInfer (read a) of
-                Left _       → False
-                Right (τ, _) → τ == elimEmptyF (standardizeType (read b)))
+  a -: b = case readsPrec 0 a of
+    [(e,[])] →
+      let typing = showInfer e in
+      T.assertBool ("⊢ " ++ a ++ "\n  : " ++ show typing ++ "\n  ≠ " ++  b)
+        (case typing of
+           Left _       → False
+           Right (τ, _) → τ == elimEmptyF (standardizeType (read b)))
+    _  → T.assertBool ("Syntax error: " ++ a) False
   te a   = T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))
   pe a   = T.assertBool ("expected syntax error: " ++ a)

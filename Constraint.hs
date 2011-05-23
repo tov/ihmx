@@ -813,20 +813,33 @@ Syntactic metavariables:
 
 First rewrite as follows:
 
+(DECOMPOSE)
   γs₁ \ γs₂ = γ₁ ... γⱼ
   βs = { γ ∈ γs₂ | γ is Q-variant }
   ---------------------------------------------------------------------
   q₁ γs₁ ⊑ q₂ γs₂  --->  q₁ \-\ q₂ ⊑ βs ⋀ γ₁ ⊑ q₁ βs ⋀ ... ⋀ γⱼ ⊑ q₁ βs
 
+(BOT-SAT)
   ---------------
   U ⊑ βs  --->  ⊤
 
+(TOP-SAT)
   -----------------
   γ ⊑ L βs  --->  ⊤
 
+(BOT-UNSAT)
   q ≠ U
   -----------------
   q ⊑ U  --->  fail
+
+(COMBINE-QLIT)
+  --------------------------------------------
+  γ ⊑ q ⋀ γ ⊑ q' ⋀ C; τ  --->  γ ⊑ q⊓q' ⋀ C; τ
+
+(COMBINE-LE)
+  q ⊑ q'   βs ⊆ βs'
+  ---------------------------------------------------
+  γ ⊑ q βs ⋀ γ ⊑ q' βs' ⋀ C; τ  --->  γ ⊑ q βs ⋀ C; τ
 
 Then we have a constraint where each inequality is in one of two forms:
 
@@ -844,59 +857,49 @@ of a constraint C as lftv(C) and uftv(C), respectively.
 These are non-lossy rewrites. Repeat them as much as possible,
 continuing to apply the rewrites above when applicable:
 
-  V(δ,τ) ∈ { Q-, Q= }
+(FORCE-U)
   -------------------------------
-  δ ⊑ U ⋀ C; τ  --->  [U/δ](C; τ)
+  β ⊑ U ⋀ C; τ  --->  [U/β](C; τ)
 
-  V(δ,τ) ∈ { Q-, Q= }
-  ---------------------------------------
-  δ ⊑ R ⋀ δ ⊑ A ⋀ C; τ  --->  [U/δ](C; τ)
-
-  q ⊑ q'   βs ⊆ βs'
-  ---------------------------------------------------
-  γ ⊑ q βs ⋀ γ ⊑ q' βs' ⋀ C; τ  --->  γ ⊑ q βs ⋀ C; τ
-
+(SUBST-NEG)
   δ ∉ lftv(C)   V(δ,τ) ⊑ Q-
   ---------------------------------
   δ ⊑ qe ⋀ C; τ  --->  [qe/δ](C; τ)
 
-  δ ∉ uftv(C)   V(δ,τ) ⊑ Q+
-  -----------------------------------------------------------
-  qe₁ ⊑ δ ⋀ ... ⋀ qeⱼ ⊑ δ ⋀ C; τ  --->  [qe₁⊔...⊔qeⱼ/δ](C; τ)
-
-  δ ∉ uftv(C)   V(δ,τ) = Q=   δ' fresh
-  --------------------------------------------------------------
-  qe₀ ⊑ δ ⋀ ... ⋀ qeⱼ ⊑ δ ⋀ C; τ  --->  [δ'⊔qe₀⊔...⊔qeⱼ/δ](C; τ)
-
+(SUBST-NEG-TOP)
   δ ∉ lftv(C)   V(δ,τ) ⊑ Q-
   -------------------------
   C; τ  --->  [L/δ](C; τ)
 
-  δ₁, δ₂ ∉ uftv(C)   V(δ₁,τ) ⊑ Q+   V(δ₂,τ) ⊑ Q+
-  --------------------------------------------------------
-  qe₁ ⊑ qe₁' δ₁ δ₂ ⋀ ... ⋀ qeⱼ ⊑ qeⱼ' δ1 δ2 ⋀ C; τ
-     --->  [δ₁/δ₂](qe₁ ⊑ qe₁' δ₁ ⋀ ... ⋀ qeⱼ ⊑ qeⱼ' δ₁ ⋀ C; τ)
+(SUBST-POS)
+  δ ∉ uftv(C)   V(δ,τ) ⊑ Q+
+  -----------------------------------------------------------
+  qe₁ ⊑ δ ⋀ ... ⋀ qeⱼ ⊑ δ ⋀ C; τ  --->  [qe₁⊔...⊔qeⱼ/δ](C; τ)
 
--- These are locally non-lossy rewrites, in the sense that they won't raise
--- the current type scheme, but may do so for some later generalization.
+(SUBST-INV)
+  δ ∉ uftv(C)   V(δ,τ) = Q=   δ' fresh
+  --------------------------------------------------------------
+  qe₀ ⊑ δ ⋀ ... ⋀ qeⱼ ⊑ δ ⋀ C; τ  --->  [δ'⊔qe₀⊔...⊔qeⱼ/δ](C; τ)
 
-  -- V(β,τ) ∈ { Q+, Q= }   βs ≠ ∅
-  -- ------------------------------------
-  -- qe ⊑ q β βs ⋀ C  --->  qe ⊑ q βs ⋀ C
+Substitute for contravariant qualifier variables by adding these lossy
+rewrites:
 
-Finish by adding these lossy rewrites:
+(SUBST-NEG-LOSSY)
+  δ ∉ lftv(C)   V(δ,τ) = Q-
+  -----------------------------------------------
+  δ ⊑ q₁ βs₁ ⋀ ... ⋀ δ ⊑ qⱼ βsⱼ ⋀ C; τ
+    --->  [(q₁⊓...⊓qⱼ) (βs₁ ∩ ... ∩ βsⱼ)/δ](C; τ)
 
-  ----------------------------------------------------------------
-  α ⊑ q βs ⋀ α ⊑ q' βs' ⋀ C; τ  --->  α ⊑ (q⊓q') (βs ∩ βs') ⋀ C; τ
+Run SAT as below for anything we missed.  Then, add bounds:
 
-Finally, add bounds:
+(BOUND)
+  α ∉ lftv(C)   V(β,τ) ∈ { -, +, =, Q= }   q = q₁⊓...⊓qⱼ
+  ------------------------------------------------------
+  α ⊑ q₁ βs₁ ⋀ ... ⋀ α ⊑ qⱼ βsⱼ ⋀ C; τ
+    ---> [U/α]C; ∀α:q. τ
 
-  α ≠ lftv(C)   V(β,τ) ∈ { -, +, =, Q= }
-  --------------------------------------
-  α ⊑ q βs ⋀ C; τ  --->  C; ∀α:q. τ
 
-
-We can convert it to SAT as follows:
+We convert it to SAT as follows:
 
   Define:
 
@@ -922,13 +925,117 @@ We can convert it to SAT as follows:
 
 -}
 
+data QE tv = QE { qeQLit ∷ !QLit, qeQSet ∷ !(Set.Set tv) }
+
+instance Tv tv ⇒ Show (QE tv) where
+  show (QE L _)  = "L"
+  show (QE q γs) = concat (List.intersperse "⊔" (q' γs'))
+    where γs' = map (show . tvUniqueID) (Set.toList γs)
+          q'  = if q == U && not (Set.null γs) then id else (show q :)
+
+instance Eq tv ⇒ Eq (QE tv) where
+    QE L  _   == QE L  _   = True
+    QE q1 γs1 == QE q2 γs2 = q1 == q2 && γs1 == γs2
+
+instance Ord tv ⇒ Ord (QE tv) where
+    QE L  _   `compare` QE L  _   = EQ
+    QE q1 γs1 `compare` QE q2 γs2
+      | q1 == q2  = γs1 `compare` γs2
+      | q1 ⊑  q2  = LT
+      | otherwise = GT
+
+instance Bounded (QE tv) where
+  minBound = QE U Set.empty
+  maxBound = QE L Set.empty
+
+instance Ord tv ⇒ Lattice (QE tv) where
+  QE L _    ⊔ _         = maxBound
+  _         ⊔ QE L _    = maxBound
+  QE q1 γs1 ⊔ QE q2 γs2 = QE (q1 ⊔ q2) (γs1 `Set.union` γs2)
+  --
+  QE L _    ⊓ qe2       = qe2
+  qe1       ⊓ QE L _    = qe1
+  QE q1 γs1 ⊓ QE q2 γs2 = QE (q1 ⊓ q2) (γs1 `Set.intersection` γs2)
+  --
+  _         ⊑ QE L  _   = True
+  QE q1 γs1 ⊑ QE q2 γs2 = q1 ⊑ q2 && γs1 `Set.isSubsetOf` γs2
+
+instance Qualifier (QE tv) tv where
+  toQualifierType (QE q γs) =
+    toQualifierType (QExp q (FreeVar <$> Set.toList γs))
+
+instance Ord tv ⇒ Ftv (QE tv) tv where
+  ftvTree (QE _ γs) = return (FTBranch (map FTSingle (Set.toList γs)))
+
+qeSubst ∷ Ord tv ⇒ tv → QE tv → QE tv → QE tv
+qeSubst β (QE q βs) (QE q' βs')
+  | Set.member β βs' = QE (q ⊔ q') (Set.union βs (Set.delete β βs'))
+  | otherwise        = QE q' βs'
+
+-- | Represents the meet of several qualifier expressions, which happens
+--   when some variable has multiple upper bounds.  These are normalized
+--   to implement COMBINE-QLIT and COMBINE-LE.
+newtype QEMeet tv = QEMeet { unQEMeet ∷ [QE tv] }
+
+instance Bounded (QEMeet tv) where
+  minBound = QEMeet [minBound]
+  maxBound = QEMeet []
+
+instance Tv tv ⇒ Show (QEMeet tv) where
+  show (QEMeet [])  = "L"
+  show (QEMeet qem) = concat (List.intersperse " ⊓ " (map show qem))
+
+instance Ord tv ⇒ Ftv (QEMeet tv) tv where
+  ftvTree = ftvTree . unQEMeet
+
+qemSingleton ∷ QE tv → QEMeet tv
+qemSingleton (QE L _) = maxBound
+qemSingleton qe       = QEMeet [qe]
+
+qemInsert ∷ Ord tv ⇒ QE tv → QEMeet tv → QEMeet tv
+qemInsert qe (QEMeet qem) = QEMeet (loop qe qem) where
+  loop (QE L _)       qem = qem
+  loop qe             []  = [qe]
+  loop (qe@(QE q γs)) (qe'@(QE q' γs'):qem)
+    | Set.null γs, Set.null γs'
+                          = loop (QE (q ⊓ q') Set.empty) qem
+    | qe ⊑ qe'            = loop qe qem
+    | qe' ⊑ qe            = qe':qem
+    | otherwise           = qe':loop qe qem
+
+qemSubst ∷ Ord tv ⇒ tv → QE tv → QEMeet tv → QEMeet tv
+qemSubst β qe = foldr (qemInsert . qeSubst β qe) mempty . unQEMeet
+
+instance Ord tv ⇒ Monoid (QEMeet tv) where
+  mempty  = maxBound
+  mappend = foldr qemInsert <$.> unQEMeet
+
+data SQState tv
+  = SQState {
+      sq_αs    ∷ !(Set.Set tv),
+      sq_βs    ∷ !(Set.Set tv),
+      sq_τftv  ∷ !(VarMap tv),
+      sq_βlst  ∷ ![(QLit, Set.Set tv)],
+      sq_vmap  ∷ !(Map.Map tv (QEMeet tv))
+    }
+  deriving Show
+
+instance Ord tv ⇒ Monoid (SQState tv) where
+  mempty  = SQState mempty mempty mempty mempty mempty
+  mappend (SQState a b c d e) (SQState a' b' c' d' e')
+          = SQState (mappend a a')
+                    (mappend b b')
+                    (Map.unionWith (⊔) c c')
+                    (mappend d d')
+                    (Map.unionWith mappend e e')
+
 -- | Given a list of type variables that need qlit bounds and a set
 --   of qualifier inequalities, solve and produce bounds.  Also return
 --   any remaining inequalities (which must be satisfiable, but we
 --   haven't guessed how to satisfy them yet.)
 solveQualifiers      ∷ MonadU tv m ⇒
                        Bool → Set.Set tv → Set.Set tv →
-                       Map.Map tv Variance →
+                       VarMap tv →
                        [(Type tv, Type tv)] →
                        m ([(Type tv, Type tv)], [(tv, QLit)])
 solveQualifiers value αs βs τftv qc = do
@@ -938,264 +1045,332 @@ solveQualifiers value αs βs τftv qc = do
   -- deal with trivial stuff right away:
   qc             ← stdize qc
   trace ("solveQ (stdize)", qc)
-  -- Replace contravariant variables that never appear on the left side
-  -- of a comparison with top (L).
-  (αs, τftv, qc) ← substUppers (αs, τftv, qc)
-  trace ("solveQ (uppers)", αs, τftv, qc)
-  (αs, τftv, qc) ← unifyBounds (αs, τftv, qc)
-  trace ("solveQ (unify)", αs, τftv, qc)
-  (vmap, βlst)   ← decompose qc
-  trace ("solveQ (decompose)", vmap, βlst)
-  (αs, τftv, vmap, βlst)
-                 ← findExtremes (αs, τftv, vmap, βlst)
-  trace ("solveQ (extremes)", αs, τftv, vmap, βlst)
-  (αs, τftv, vmap, βlst)
-                 ← runSat (αs, τftv, vmap, βlst) True
-  trace ("solveQ (sat)", αs, τftv, vmap, βlst)
-  runSat (αs, τftv, vmap, βlst) False
-  αs             ← genVars αs τftv
-  return (reconstruct αs vmap βlst, getBounds αs vmap)
+  -- Decompose implements DECOMPOSE, TOP-SAT, BOT-SAT, and BOT-UNSAT.
+  state          ← decompose qc mempty {
+                     sq_αs = αs,
+                     sq_βs = βs,
+                     sq_τftv = τftv
+                   }
+  trace ("solveQ (decompose)", state)
+  -- Rewrite until it stops changing
+  state          ← iterChanging
+                     (forceU            >=>
+                      substNeg False    >=>!
+                      substPosInv       >=>!
+                      substNeg True)
+                     state
+  trace ("solveQ (rewrites)", state)
+  -- Try the SAT solver, then recheck
+  state          ← runSat state True
+  trace ("solveQ (sat)", state)
+  runSat state False
+  -- Finish by reconstructing the constraint and returning the bounds
+  -- for the variables to quantify.
+  state          ← genVars state
+  return (recompose state, getBounds state)
   where
+  --
+  -- Given a list of qualifier inequalities on types, produce a list of
+  -- inequalities on standard-form qualifiers, omitting trivial
+  -- inequalities along the way.
   stdize qc = foldM each [] qc where
     each qc' (τl, τh) = do
       QExp q1 γs1 ← qualifier τl
       QExp q2 γs2 ← qualifier τh
-      let γs1' = Set.fromList (fromVar <$> γs1)
-          γs2' = Set.fromList (fromVar <$> γs2)
-      if q2 == L || q1 ⊑ q2 && γs1' `Set.isSubsetOf` γs2'
+      let qe1 = QE q1 $ Set.fromList (fromVar <$> γs1)
+          qe2 = QE q2 $ Set.fromList (fromVar <$> γs2)
+      if qe1 ⊑ qe2
         then return qc'
-        else return (((q1, γs1'), (q2, γs2')) : qc')
+        else return ((qe1, qe2) : qc')
   --
-  unstdize qc = (toQualifierType *** toQualifierType) <$> qc
+  -- Given a list of inequalities on qualifiers, rewrite them into
+  -- the two decomposed forms:
   --
-  substUppers (αs, τftv, qc) =
-    subst
-        [ α
-        | α ← Set.toList (αs Set.\\ Set.unions (snd . fst <$> qc))
-        , Map.findWithDefault 0 α τftv ⊑ QContravariant ]
-      (repeat (L, Set.empty))
-      (αs, τftv, qc)
+  --  • γ ⊑ q βs
   --
-  unifyBounds state0 = flip iterChanging state0 $ \state@(αs,τftv,qc) → do
-    trace ("unifyBounds", state)
-    let lbs    = Map.fromListWith joinQ
-                   [ (γ, (q, γs))
-                   | ((q, γs), (U, Set.toList → [γ])) ← qc ]
-        ubs    = Map.fromListWith meetQ
-                   [ (γ, (q, γs))
-                   | ((U, Set.toList → [γ]), (q, γs)) ← qc ]
-        look q = Map.findWithDefault (q, Set.empty)
-        (pos, neg, inv) = Set.fold each mempty αs where
-          each α (pos, neg, inv) = case Map.lookup α τftv of
-            Just QCovariant     → (α:pos, neg,   inv)
-            Just QContravariant → (pos,   α:neg, inv)
-            Just QInvariant
-              | value
-              , Just lb@(q, γs) ← Map.lookup α lbs
-              , not (q == U && Set.null γs)
-                                → (pos,   neg,   (α,lb):inv)
-            _                   → (pos,   neg,   inv)
-    case (pos, neg, inv) of
-      (_:_, _  , _       ) → subst pos (map (look U <-> lbs) pos) state
-      (_  , _  , (β,lb):_) → subst [β] [lb] state
-      (_  , β:_, _       ) → subst [β] [look L β ubs] state
-      _                    → return state
+  --  • q ⊑ βs
   --
-  subst βs bounds (αs0, τftv0, qc0) = do
-    let αs   = foldr Set.delete αs0 βs
-        τftv = foldr2 each τftv0 βs bounds where
-          each β (_,γs) τftv = case Map.lookup β τftv of
-            Just v  → Map.unionWith (+)
-                        (Map.delete β τftv)
-                        (setToMap (const v) γs)
-            Nothing → τftv
-    zipWithM_ writeTV βs (map toQualifierType bounds)
-    qc ← stdize (unstdize qc0)
-    return (αs, τftv, qc)
-  --
-  joinQ (q1,βs1) (q2,βs2) = case q1 ⊔ q2 of
-    L → (L, Set.empty)
-    q → (q, βs1 `Set.union` βs2)
-  meetQ (q1,βs1) (q2,βs2) = case q1 ⊓ q2 of
-    L → (L, Set.empty)
-    q → (q, βs1 `Set.intersection` βs2)
-  --
-  decompose qc = foldM each (Map.empty, []) qc where
-    each (vmap, βlst) ((q1,αs1), (q2,αs2)) = do
-      let αs' = αs1 Set.\\ αs2
-          βs' = βs `Set.intersection` αs2
+  -- This implements DECOMPOSE, BOT-SAT, TOP-SAT, and BOT-UNSAT.
+  decompose qc state0 = foldM each state0 qc where
+    each state (QE q1 γs1, QE q2 γs2) = do
+      let γs' = γs1 Set.\\ γs2
+          βs' = γs2 `Set.intersection` sq_βs state
       fβlst ← case q1 \-\ q2 of
+        -- (BOT-SAT)
         U  →   return id
-        q' | Set.null βs →
+        -- (BOT-UNSAT)
+        q' | Set.null βs' →
                fail $ "Qualifier inequality unsatisfiable: " ++
-                      show (toQualifierType (q1,αs1)) ++
-                      " ⊑ " ++ show (toQualifierType (q2,αs2))
+                      show (toQualifierType (QE q1 γs1)) ++
+                      " ⊑ " ++ show (toQualifierType (QE q2 γs2))
            | otherwise →
                return ((q', βs') :)
-      let fvmap = if q2 == L then
-                    id
-                  else
-                    Map.unionWith (++) (setToMap (\_ → [(q2, βs')]) αs')
-      return (fvmap vmap, fβlst βlst)
+      let fvmap = if q2 == L
+                    then id     -- (TOP-SAT)
+                    else Map.unionWith mappend
+                           (setToMap (qemSingleton (QE q2 βs')) γs')
+      return state {
+               sq_βlst = fβlst (sq_βlst state),
+               sq_vmap = fvmap (sq_vmap state)
+             }
   --
-  findExtremes = iterChanging $ \(αs, τftv, vmap, βlst) → do
-    (αs, τftv, vmap, βlst) ← doSubst (αs, τftv, vmap, βlst)
-      [ (α, U)
-      | (α, ubs) ← Map.toList vmap
-      , Set.member α αs
-      , Set.member α βs
-      , bigMeet [ ql | (ql, γs) ← ubs, Set.null γs ] == U ]
-    doSubst (αs, τftv, vmap, βlst)
-      [ (α, L)
-      | α ← Set.toList αs
-      , Map.findWithDefault QContravariant α τftv == QContravariant
-      , Map.notMember α vmap ]
+  -- Substitute U for qualifier variables upper bounded by U (FORCE-U).
+  forceU state =
+    subst "forceU" state $
+      Map.fromDistinctAscList
+      [ (β, minBound)
+      | (β, QEMeet [QE U βs]) ← Map.toAscList
+           (sq_vmap state `Map.intersection` setToMap () (sq_βs state))
+      , Set.null βs ]
   --
-  runSat (αs, τftv, vmap, βlst) doIt = do
-    let formula = toSat vmap βlst
-        sats    = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
-        αs'     = Set.toList (αs `Set.intersection` βs)
-    trace ("runSat", formula, sats)
-    case sats of
-      [] → fail "Qualifier constraints unsatisfiable"
+  -- Replace Q- or 0 variables by a single upper bound, if they have only
+  -- one (SUBST-NEG), or by L if they have none (SUBST-NEG-TOP).  If
+  -- 'doLossy', then we include SUBST-NEG-LOSSY as well, which uses
+  -- approximate lower bounds for combining multiple upper bounds.
+  substNeg doLossy state =
+    subst who state $ Map.fromDistinctAscList $ do
+      δ ← Set.toAscList (sq_αs state)
+      guard (Map.findWithDefault 0 δ (sq_τftv state) ⊑ QContravariant)
+      case Map.lookup δ (sq_vmap state) of
+        Nothing            → return (δ, maxBound)
+        Just (QEMeet [])   → return (δ, maxBound)
+        Just (QEMeet [qe]) → return (δ, qe)
+        Just (QEMeet qes)
+          | doLossy        → return (δ, bigMeet qes)
+          | otherwise      → mzero
+    where who = if doLossy then "substNeg (lossy)" else "substNeg"
+  --
+  -- Replace Q+ and Q= variables with tight lower bounds.
+  substPosInv state = do
+    let add qe (QE U (Set.toList → [β]))
+          | β `Set.member` sq_αs state
+          = Map.insertWith (liftM2 (⊔)) β (Just qe)
+        add _  (QE _ βs)
+          = Map.union (setToMap Nothing βs)
+        lbs0 = setToMap (Just minBound)
+                        (sq_αs state `Set.intersection` sq_βs state)
+                 Map.\\ sq_vmap state
+        lbs1 = Map.foldrWithKey each lbs0 (sq_vmap state) where
+          each γ (QEMeet qem) = foldr (add (QE U (Set.singleton γ))) <-> qem
+        lbs2 = Map.mapMaybe id (foldr each lbs1 (sq_βlst state)) where
+          each (q, βs) = add (QE q Set.empty) (QE U βs)
+        pos  = lbs2 Map.\\ Map.filter (/= QCovariant) (sq_τftv state)
+        inv  = lbs2 `Map.intersection`
+                 Map.filter (== QInvariant) (sq_τftv state)
+    (δ's, inv) ← first Set.fromDistinctAscList . unzip <$> sequence
+      [ do
+          δ' ← newTV
+          return (δ', (δ, QE q (Set.insert δ' βs)))
+      | (δ, qe@(QE q βs)) ← Map.toAscList inv
+      , qe /= minBound ]
+    subst "substPosInv"
+          state {
+            sq_αs = sq_αs state `Set.union` δ's,
+            sq_βs = sq_βs state `Set.union` δ's
+          }
+          (pos `Map.union` Map.fromDistinctAscList inv)
+  --
+  -- Given a list of type variables and qualifiers, substitute for each,
+  -- updating the state as necessary.
+  subst who state γqes0
+    | Map.null γqes0 = return state
+    | otherwise      = do
+    trace (who, γqes0, state)
+    let image = Set.unions (map qeQSet (Map.elems γqes0))
+        γqes  = γqes0 Map.\\ setToMap () image
+    if Map.null γqes
+      then fail $ "BUG! (subst)" ++ who ++
+                  " attempt non-idempotent substitution: " ++
+                  show γqes0
+      else unsafeSubst state γqes
+  --
+  unsafeSubst state γqes = do
+    sequence [ writeTV γ (toQualifierType qe) | (γ, qe) ← Map.toList γqes ]
+    let γmap = Map.map each γqes
+          where each (QE q γs) = QE q (γs `Set.intersection` sq_βs state)
+        vmap = Map.fromDistinctAscList
+          [ (γ, qem'')
+          | (γ, qem) ← Map.toAscList (sq_vmap state)
+          , let γmap' = γmap `Map.intersection` ftvPure qem
+                qem'  = foldr (uncurry qemSubst) qem (Map.toList γmap')
+                qem'' = QEMeet (filter (Set.notMember γ . qeQSet)
+                                       (unQEMeet qem')) ]
+    βlst ← sequence $ do
+      (q0, βs0) ← sq_βlst state
+      let γmap'     = γmap `Map.intersection` setToMap () βs0
+          QE q' βs' = bigJoin (Map.elems γmap')
+          q''       = q0 \-\ q'
+          βs''      = (βs0 Set.\\ Map.keysSet γmap') `Set.union` βs'
+      guard (q'' /= U)
+      return $ if Set.null βs''
+        then fail $ "Qualifier error: " ++ show q'' ++ " /⊑ U."
+        else return (q'', βs'')
+    state ← decompose
+      [ (qe, qe')
+      | (qe, qem) ← Map.elems (Map.intersectionWith (,) γmap vmap)
+      , qe'       ← unQEMeet qem ]
+      SQState {
+        sq_αs   = sq_αs state Set.\\ Map.keysSet γmap,
+        sq_βs   = sq_βs state Set.\\ Map.keysSet γmap,
+        sq_τftv = Map.foldrWithKey (\γ (QE _ γs) → substMap γ γs)
+                                   (sq_τftv state) γqes,
+        sq_βlst = βlst,
+        sq_vmap = vmap Map.\\ γmap
+      }
+    trace ("subst", γqes, state)
+    return state
+  --
+  -- As a last ditch effort, use a simple SAT solver to find a
+  -- decent literal-only substitution.
+  runSat state doIt = do
+    let formula = toSat state
+        sols    = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
+        δs      = sq_αs state `Set.intersection` sq_βs state
+    trace ("runSat", formula, sols)
+    case sols of
+      []  → fail "Qualifier constraints unsatisfiable"
       sat:_ | doIt
-         → doSubst (αs, τftv, vmap, βlst)
-             [ (α, lb)
-             | α  ← αs'
-             , let lb = satVarLB α sat
-             , lb /= U || Map.lookup α τftv == Just Covariant ]
-      _  → return (αs, τftv, vmap, βlst)
+          → subst "sat" state =<<
+              Map.fromDistinctAscList <$> sequence
+                [ do
+                    βs ← case var of
+                      QInvariant → Set.singleton <$> newTV
+                      _          → return Set.empty
+                    warn $ "SAT: substituting " ++ show (QE q βs) ++
+                           " for type variable " ++ show δ
+                    return (δ, QE q βs)
+                | δ ← Set.toAscList δs
+                , let (q, var) = decodeSatVar δ (sq_τftv state) sat
+                , q /= U || var /= QInvariant ]
+      _   → return state
   --
-  toSat vmap βlst = foldr (SAT.:&&:) SAT.Yes $
-      [ (πr q ==> πr (U,βs)) SAT.:&&: (πa q ==> πa (U,βs))
-      | (q, βs) ← βlst ]
+  toSat state = foldr (SAT.:&&:) SAT.Yes $
+      [ (πr vm q ==> πr vm (U,βs)) SAT.:&&: (πa vm q ==> πa vm (U,βs))
+      | (q, βs) ← sq_βlst state ]
     ++
-      [ (πr (FreeVar α) ==> πr (q,αs)) SAT.:&&: (πa (FreeVar α) ==> πa (q,αs))
-      | (α, qes) ← Map.toList vmap
-      , (q, αs)  ← qes
+      [ (πr vm (FreeVar α) ==> πr vm (q,αs)) SAT.:&&:
+        (πa vm (FreeVar α) ==> πa vm (q,αs))
+      | (α, QEMeet qes) ← Map.toList (sq_vmap state)
+      , QE q αs         ← qes
       , α `Set.member` βs ]
     where
       p ==> q = SAT.Not p SAT.:||: q
+      vm = sq_τftv state
   --
-  doSubst = foldM $ \(αs0, τftv0, vmap0, βlst0) (γ, q) → do
-    writeTV γ (toQualifierType q)
-    let αs   = Set.delete γ αs0
-        τftv = Map.delete γ τftv0
-        vmap = Map.map (map eachUB) (Map.delete γ vmap0) where
-          eachUB (qu, βs) =
-            if γ `Set.member` βs
-              then (qu ⊔ q, Set.delete γ βs)
-              else (qu, βs)
-        βlst = [ (ql \-\ q, βs')
-               | (ql, βs) ← βlst0
-               , let βs' = Set.delete γ βs
-               , not (Set.null βs') ]
-    return (αs, τftv, vmap, βlst)
+  -- Find the variables to generalize
+  genVars state = return state { sq_αs = αs' } where
+    αs'  = sq_αs state `Set.intersection` kset
+    kset = Map.keysSet (keep (sq_τftv state))
+    keep = if value then id else Map.filter (`elem` [-2,-1,1,2])
   --
-  genVars αs τftv = return $ Set.filter keep αs where
-    keep α = case Map.lookup α τftv of
-      Just v  → value || v `elem` [-2,-1,1,2]
-      Nothing → False
+  -- Find the the bounds of variables to generalize
+  getBounds state =
+    map (id &&& getBound) (Set.toList (sq_αs state)) where
+      getBound α = case Map.lookup α (sq_vmap state) of
+        Nothing           → L
+        Just (QEMeet qes) → bigMeet (map qeQLit qes)
   --
-  reconstruct αs vmap βlst =
-    map (second clean) $
-        [ (fvTy v, (q, βs))
-        | (v, qes) ← Map.toList vmap
-        , v `Set.notMember` αs
-        , (q, βs) ← qes ]
-      ++
-        [ (toQualifierType q, (U, βs))
-        | (q, βs) ← βlst ]
+  -- Turn the decomposed constraint back into a list of pairs of types.
+  recompose state =
+      [ (fvTy γ, clean (q, βs))
+      | (γ, QEMeet qem) ← Map.toList (sq_vmap state)
+      , γ `Set.notMember` sq_αs state
+      , QE q βs ← qem ]
+    ++
+      [ (toQualifierType q, clean (U, βs))
+      | (q, βs) ← sq_βlst state ]
     where
-    clean (q, βs) = toQualifierType (q, (Set.\\ αs) βs)
-  --
-  getBounds αs vmap = map (id &&& getBound) (Set.toList αs) where
-    getBound α = case Map.lookup α vmap of
-      Nothing  → L
-      Just qes → bigMeet (map fst qes)
+    clean (q, βs) = toQualifierType (q, βs Set.\\ sq_αs state)
   --
   fromVar (FreeVar α) = α
   fromVar _           = error "BUG! solveQualifiers got bound tyvar"
 
-setToMap   ∷ (k → a) → Set.Set k → Map.Map k a
-setToMap f = Map.fromDistinctAscList . map (id &&& f) . Set.toAscList
+substSet ∷ Ord tv ⇒ tv → Set.Set tv → Set.Set tv → Set.Set tv
+substSet β βs γs
+  | Set.member β γs = Set.union βs (Set.delete β γs)
+  | otherwise       = γs
 
-{-
-  #0 → #3
+substMap ∷ Ord tv ⇒ tv → Set.Set tv → VarMap tv → VarMap tv
+substMap β βs vmap = case takeMap β vmap of
+  (Just v, vmap') → Map.unionWith (⊔) vmap' (setToMap v βs)
+  _               → vmap
 
-  expand:
+takeMap ∷ Ord k ⇒ k → Map.Map k v → (Maybe v, Map.Map k v)
+takeMap = Map.updateLookupWithKey (\_ _ → Nothing)
 
-  #1 → #1 -#1> #1 ≤ (#2 → #2) -L> #3
+setToMap   ∷ a → Set.Set k → Map.Map k a
+setToMap   = setToMapWith . const
 
-  1 ← #12 -#13> #14
+setToMapWith   ∷ (k → a) → Set.Set k → Map.Map k a
+setToMapWith f = Map.fromDistinctAscList . map (id &&& f) . Set.toAscList
 
-  (#12 -#13> #14) → (#12 -#13> #14) -#13> (#12 -#13> #14)
-    ≤ (#2 → #2) -L> #3
+class SATable a v where
+  πa ∷ VarMap v → a → SAT.Boolean
+  πr ∷ VarMap v → a → SAT.Boolean
 
-  3 ← #15 -#16> #17
-  (#0 → #15 -#16> #17)
+instance SATable QLit v where
+  πa _ ql | A ⊑ ql    = SAT.Yes
+          | otherwise = SAT.No
+  πr _ ql | R ⊑ ql    = SAT.Yes
+          | otherwise = SAT.No
 
-  (#12 -#13> #14) →   (#12 -#13> #14) -#13> (#12 -#13> #14)
-  ≤
-  (#2  →      #2) -L> #15             -#16> #17
+instance Tv v ⇒ SATable (Var v) v where
+  πa vm (FreeVar β) = encodeSatVar A β vm
+  πa _  _           = SAT.No
+  πr vm (FreeVar β) = encodeSatVar R β vm
+  πr _  _           = SAT.No
 
-  15 ← #18 -#19> #20
-  (#0 → (#18 -#19> #20) -#16> #17)
+instance (Tv v, SATable (Var v) v) ⇒ SATable (QLit, Set.Set v) v where
+  πa vm (q, vs) = Set.fold ((SAT.:||:) . πa vm . FreeVar) (πa vm q) vs
+  πr vm (q, vs) = Set.fold ((SAT.:||:) . πr vm . FreeVar) (πr vm q) vs
 
-  (#12 -#13> #14) →  (#12 -#13> #14) -#13> (#12 -#13> #14)
-  ≤
-  (#2  →     #2) -L> (#18 -#19> #20) -#16> #17
-
-  17 ← #21 -#22> #23
-  (#0 → (#18 -#19> #20) -#16> (#21 -#22> #23))
-
-  (#12 -#13> #14) →  (#12 -#13> #14) -#13> #12 -#13> #14
-  ≤
-  (#2  →     #2) -L> (#18 -#19> #20) -#16> #21 -#22> #23
-
-  decompose:
-
-  2≤14, 12≤2, 20≤14, 12≤18, 21≤12, 14≤23
-  U⊑13, U⊑L, 19⊑13, 13⊑16, 13⊑22
-  (#0 → (#18 -#19> #20) -#16> (#21 -#22> #23))
--}
-
-class SATable a where
-  πa ∷ a → SAT.Boolean
-  πr ∷ a → SAT.Boolean
-
-instance SATable QLit where
-  πr ql | R ⊑ ql    = SAT.Yes
-        | otherwise = SAT.No
-  πa ql | A ⊑ ql    = SAT.Yes
-        | otherwise = SAT.No
-
-instance Tv v ⇒ SATable (Var v) where
-  πr (FreeVar β) = SAT.Not (SAT.Var (2 * tvUniqueID β))
-  πr _           = SAT.No
-  πa (FreeVar β) = SAT.Not (SAT.Var (2 * tvUniqueID β + 1))
-  πa _           = SAT.No
-
-instance (Tv v, SATable (Var v)) ⇒ SATable (QLit, Set.Set v) where
-  πr (q, vs) = πr (QExp q (FreeVar <$> Set.toList vs))
-  πa (q, vs) = πa (QExp q (FreeVar <$> Set.toList vs))
-
-instance Tv v ⇒ SATable (QExp v) where
-  πr (QExp ql vs) = foldr (SAT.:||:) (πr ql) (map πr vs)
-  πa (QExp ql vs) = foldr (SAT.:||:) (πa ql) (map πa vs)
-
--- | Given a type variable and a SAT solution, return a lower bound
+-- | Given a type variable and a SAT solution, return a bound
 --   for that type variable as implied by the solution.
-satVarLB ∷ Tv v ⇒ v → SAT.SatSolver → QLit
-satVarLB β solver = case (mbr, mba) of
-  (Just False, Just False) → L
-  (Just False, _         ) → R
-  (_         , Just False) → A
-  _                        → U
-  where mbr = SAT.lookupVar βr solver
-        mba = SAT.lookupVar βa solver
-        βr  = 2 * tvUniqueID β
-        βa  = 2 * tvUniqueID β + 1
+decodeSatVar ∷ Tv tv ⇒ tv → VarMap tv → SAT.SatSolver → (QLit, Variance)
+decodeSatVar β vm solver = (q, var) where
+  (maximize, var) = maximizeVariance β vm
+  q   = case (maximize, mba, mbr) of
+    -- For minimizing variables, each component tells us whether that
+    -- component may be omitted from the substitution, so we choose the
+    -- smallest qualifier literal that includes the required components.
+    (False, Just False, Just False) → L
+    (False, Just False, _         ) → A
+    (False, _         , Just False) → R
+    (False, _         , _         ) → U
+    -- For maximizing variables, each component tells us whether that
+    -- component may be included in the substitution, so we choose the
+    -- largest qualifier literal that omits the forbidden components.
+    (True , Just False, Just False) → U
+    (True , Just False, _         ) → R
+    (True , _         , Just False) → A
+    (True , _         , _         ) → L
+  mba = SAT.lookupVar βa solver
+  mbr = SAT.lookupVar βr solver
+  βa  = varComponent A β
+  βr  = varComponent R β
+
+-- | Encode the 'q' component of type variable 'β'.  We want to maximize
+--   contravariant variables and minimize all the others.  Since the
+--   solver tries true before false, we use a positive literal to stand
+--   for the 'q' component of a maximized variable and a negative
+--   literal for a minimized variable.
+encodeSatVar ∷ Tv tv ⇒ QLit → tv → VarMap tv → SAT.Boolean
+encodeSatVar q β vm
+  | fst (maximizeVariance β vm) = SAT.Var z
+  | otherwise                 = SAT.Not (SAT.Var z)
+  where z = varComponent q β
+
+maximizeVariance ∷ Ord tv ⇒ tv → VarMap tv → (Bool, Variance)
+maximizeVariance γ vm = case Map.findWithDefault 0 γ vm of
+  v@QCovariant  → (False, v)
+  v@QInvariant  → (False, v)
+  v             → (True,  v)
+
+-- | We encode the A and R “components” of a variable via this
+--   bijection.
+varComponent ∷ Tv tv ⇒ QLit → tv → Int
+varComponent A β = 2 * tvUniqueID β
+varComponent _ β = 2 * tvUniqueID β + 1
 
 {-
 
