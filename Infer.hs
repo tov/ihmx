@@ -147,12 +147,14 @@ infer δ γ e0 = case e0 of
     (τ, c)           ← infer δ' γ e
     return (τ', c ⋀ τ ≤ τ')
 
+{-
 termFreeTypes ∷ Γ tv → Term a → [Type tv]
 termFreeTypes γ e =
   [ σ
   | (i, j) ← lfvTm e
   , rib:_ ← [drop i γ]
   , σ:_   ← [drop j rib] ]
+-}
 
 arrowQualifier ∷ (MonadU tv m) ⇒ Γ tv → Term a → m (QExp tv)
 arrowQualifier γ e =
@@ -1279,13 +1281,13 @@ inferFnTests = T.test
   where
   a -: b = case readsPrec 0 a of
     [(e,[])] →
-      let expect = standardizeType (read b)
+      let expect = standardize (read b)
           typing = showInfer e in
       T.assertBool ("⊢ " ++ a ++ "\n  : " ++ either show show typing ++
                     "\n  ≠  " ++ show expect)
         (case typing of
            Left _       → False
-           Right (τ, _) → τ == elimEmptyF expect)
+           Right (τ, _) → standardize τ == standardize (elimEmptyF expect))
     _  → T.assertBool ("Syntax error: " ++ a) False
   te a   = T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))

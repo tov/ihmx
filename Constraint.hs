@@ -76,7 +76,8 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
   τs ⊏* e    = mconcat (zipWith (⊏) τs (countOccs e))
   --
   -- | Figure out which variables to generalize in a piece of syntax
-  gen'       ∷ (MonadU r m, Ftv γ r, Ftv a r, Show a) ⇒
+  gen'       ∷ (MonadU r m, Ftv γ r, Ftv a r,
+                Derefable a m, Standardizable a r, Show a) ⇒
                Bool → c → γ → a → m ([r], [QLit], c)
   -- | Generalize a type under a constraint and environment,
   --   given whether the the value restriction is satisfied or not
@@ -323,9 +324,10 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
         βs       = Map.keysSet $
                      Map.filter isQVariance $
                        Map.unionsWith (⊔) [cγftv, qcftv, τftv]
-    (qc, αqs)    ← solveQualifiers value αs βs τftv qc
+    (qc, αqs, τ) ← solveQualifiers value αs βs qc τ
     let c        = reconstruct g qc
     trace ("gen (finished)", αqs, τ, c)
+    trace (Here ())
     return (map fst αqs, map snd αqs, c)
     where
       -- decompose takes a list of subtype constraint pairs and a list
@@ -1010,35 +1012,26 @@ instance Ord tv ⇒ Monoid (QEMeet tv) where
   mempty  = maxBound
   mappend = foldr qemInsert <$.> unQEMeet
 
-data SQState tv
+data SQState a tv
   = SQState {
       sq_αs    ∷ !(Set.Set tv),
       sq_βs    ∷ !(Set.Set tv),
       sq_τftv  ∷ !(VarMap tv),
       sq_βlst  ∷ ![(QLit, Set.Set tv)],
-      sq_vmap  ∷ !(Map.Map tv (QEMeet tv))
+      sq_vmap  ∷ !(Map.Map tv (QEMeet tv)),
+      sq_τ     ∷ !a
     }
   deriving Show
-
-instance Ord tv ⇒ Monoid (SQState tv) where
-  mempty  = SQState mempty mempty mempty mempty mempty
-  mappend (SQState a b c d e) (SQState a' b' c' d' e')
-          = SQState (mappend a a')
-                    (mappend b b')
-                    (Map.unionWith (⊔) c c')
-                    (mappend d d')
-                    (Map.unionWith mappend e e')
 
 -- | Given a list of type variables that need qlit bounds and a set
 --   of qualifier inequalities, solve and produce bounds.  Also return
 --   any remaining inequalities (which must be satisfiable, but we
 --   haven't guessed how to satisfy them yet.)
-solveQualifiers      ∷ MonadU tv m ⇒
-                       Bool → Set.Set tv → Set.Set tv →
-                       VarMap tv →
-                       [(Type tv, Type tv)] →
-                       m ([(Type tv, Type tv)], [(tv, QLit)])
-solveQualifiers value αs βs τftv qc = do
+solveQualifiers
+  ∷ (MonadU tv m, Derefable a m, Standardizable a tv, Ftv a tv, Show a) ⇒
+    Bool → Set.Set tv → Set.Set tv → [(Type tv, Type tv)] →
+    a → m ([(Type tv, Type tv)], [(tv, QLit)], a)
+solveQualifiers value αs βs qc τ = do
   let ?deref = readTV
   trace ("solveQ (init)", αs, βs, qc)
   -- Clean up the constraint, standardize types to qualifier form, and
@@ -1046,15 +1039,20 @@ solveQualifiers value αs βs τftv qc = do
   qc             ← stdize qc
   trace ("solveQ (stdize)", qc)
   -- Decompose implements DECOMPOSE, TOP-SAT, BOT-SAT, and BOT-UNSAT.
-  state          ← decompose qc mempty {
-                     sq_αs = αs,
-                     sq_βs = βs,
-                     sq_τftv = τftv
+  τftv           ← ftvV τ
+  state          ← decompose qc SQState {
+                     sq_αs   = αs,
+                     sq_βs   = βs,
+                     sq_τftv = τftv,
+                     sq_βlst = [],
+                     sq_vmap = Map.empty,
+                     sq_τ    = τ
                    }
   trace ("solveQ (decompose)", state)
   -- Rewrite until it stops changing
   state          ← iterChanging
-                     (forceU            >=>
+                     (stdizeType        >=>
+                      forceU            >=>
                       substNeg False    >=>!
                       substPosInv       >=>!
                       substNeg True)
@@ -1067,7 +1065,7 @@ solveQualifiers value αs βs τftv qc = do
   -- Finish by reconstructing the constraint and returning the bounds
   -- for the variables to quantify.
   state          ← genVars state
-  return (recompose state, getBounds state)
+  return (recompose state, getBounds state, τ)
   where
   --
   -- Given a list of qualifier inequalities on types, produce a list of
@@ -1113,6 +1111,19 @@ solveQualifiers value αs βs τftv qc = do
                sq_βlst = fβlst (sq_βlst state),
                sq_vmap = fvmap (sq_vmap state)
              }
+  --
+  -- Standardize the qualifiers in the type
+  stdizeType state = do
+    τ    ← derefAll (sq_τ state)
+    let meet = bigMeet . map qeQLit . filter (Set.null . qeQSet) . unQEMeet
+        qm   = Map.map meet (sq_vmap state)
+        τ'   = standardizeQuals qm τ
+    trace ("stdizeType", τ, τ', qm)
+    τftv ← ftvV τ'
+    return state {
+             sq_τ    = τ',
+             sq_τftv = τftv
+           }
   --
   -- Substitute U for qualifier variables upper bounded by U (FORCE-U).
   forceU state =
@@ -1220,7 +1231,7 @@ solveQualifiers value αs βs τftv qc = do
       [ (qe, qe')
       | (qe, qem) ← Map.elems (Map.intersectionWith (,) γmap vmap)
       , qe'       ← unQEMeet qem ]
-      SQState {
+      state {
         sq_αs   = sq_αs state Set.\\ Map.keysSet γmap,
         sq_βs   = sq_βs state Set.\\ Map.keysSet γmap,
         sq_τftv = Map.foldrWithKey (\γ (QE _ γs) → substMap γ γs)

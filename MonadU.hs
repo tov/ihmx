@@ -15,7 +15,7 @@
   #-}
 module MonadU (
   -- * Unification monad
-  MonadU(..), deref, derefAll, isUnifiableTV,
+  MonadU(..), Derefable(..), isUnifiableTV,
   -- ** Change monitoriing
   setChanged, withChanged, monitorChange, whileChanging, iterChanging,
   (>=>!),
@@ -137,15 +137,21 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
   -- | Arbitrary references inside the unification monad
   type URef m ∷ * → *
 
--- | Fully dereference a sequence of TV indirections, with path
---   compression
-deref ∷ MonadU tv m ⇒ Type tv → m (Type tv)
-deref (VarTy (FreeVar α)) = derefTV α
-deref τ                   = return τ
+class Monad m ⇒ Derefable a m | a → m where
+  -- | Fully dereference a sequence of TV indirections, with path
+  --   compression
+  deref    ∷ a → m a
+  -- | Fully dereference a thing
+  derefAll ∷ a → m a
 
--- | Fully dereference a type
-derefAll ∷ MonadU tv m ⇒ Type tv → m (Type tv)
-derefAll = foldType QuaTy (const bvTy) fvTy ConTy where ?deref = readTV
+instance Derefable a m ⇒ Derefable [a] m where
+  deref    = mapM deref
+  derefAll = mapM derefAll
+
+instance MonadU tv m ⇒ Derefable (Type tv) m where
+  deref (VarTy (FreeVar α)) = derefTV α
+  deref τ                   = return τ
+  derefAll = foldType QuaTy (const bvTy) fvTy ConTy where ?deref = readTV
 
 -- | Assert that a type variable is ununified
 isUnifiableTV ∷ MonadU tv m ⇒ tv → m Bool

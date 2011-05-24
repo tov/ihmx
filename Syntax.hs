@@ -9,7 +9,9 @@
       MultiParamTypeClasses,
       ParallelListComp,
       PatternGuards,
+      StandaloneDeriving,
       TupleSections,
+      TypeSynonymInstances,
       UndecidableInstances,
       UnicodeSyntax,
       ViewPatterns
@@ -117,7 +119,7 @@ a \-\ b = if a ⊑ b then U else a
 -- | The intent is that only well-formed qualifiers should be wrapped
 --   in 'QExp'.
 data QExp v = QExp QLit [Var v]
-  deriving Show
+  deriving (Show, Functor)
 
 unQExp ∷ QExp tv → Type tv
 unQExp (QExp ql vs) = ConTy (show ql) (map VarTy vs)
@@ -392,7 +394,7 @@ data Type a
   = QuaTy Quant [(Perhaps Name, QLit)] (Type a)
   | VarTy (Var a)
   | ConTy Name [Type a]
-  deriving (Eq, Functor, Show)
+  deriving (Eq, Functor)
 
 -- | Quantifiers
 data Quant
@@ -474,11 +476,11 @@ qualifier ∷ (Monad m, ?deref ∷ Deref m v) ⇒
             Type v → m (QExp v)
 qualifier = foldType fquant fbvar ffvar fcon
   where
-  fquant _ _ qe         = qe
-  fbvar (Just ql) _ _ _ = qlitexp ql
-  fbvar Nothing   i j n = qvarexp (BoundVar i j n)
-  ffvar                 = qvarexp . FreeVar
-  fcon n qes            = getQualifier n qes
+  fquant _ _ (QExp q vs) = QExp q (bumpVar (-1) <$> vs)
+  fbvar (Just ql) _ _ _  = qlitexp ql
+  fbvar Nothing   i j n  = qvarexp (BoundVar i j n)
+  ffvar                  = qvarexp . FreeVar
+  fcon n qes             = getQualifier n qes
 
 -- | Get something in the *form* of a qualifier without dereferencing
 pureQualifier ∷ Type v → QExp v
@@ -704,18 +706,18 @@ closeTy k vs (VarTy (FreeVar v))
 closeTy k vs (ConTy n ts) = ConTy n (map (closeTy k vs) ts)
 
 -- | Add the given quantifier while binding the given list of variables
-closeWith ∷ Eq a ⇒ Quant → [a] → Type a → Type a
+closeWith ∷ Ord a ⇒ Quant → [a] → Type a → Type a
 closeWith = closeWithNames []
 
 -- | Add the given quantifier while binding the given list of variables
-closeWithQuals ∷ Eq a ⇒ [QLit] → Quant → [a] → Type a → Type a
+closeWithQuals ∷ Ord a ⇒ [QLit] → Quant → [a] → Type a → Type a
 closeWithQuals qls = closeWithNames (map (Nope,) qls)
 
 -- | Add the given quantifier while binding the given list of variables
-closeWithNames ∷ Eq a ⇒
+closeWithNames ∷ Ord a ⇒
                  [(Perhaps Name, QLit)] → Quant → [a] → Type a → Type a
 closeWithNames _   _ []  ρ = ρ
-closeWithNames pns q tvs ρ = standardizeType (QuaTy q pns' (closeTy 0 tvs ρ))
+closeWithNames pns q tvs ρ = standardize (QuaTy q pns' (closeTy 0 tvs ρ))
   where pns' = take (length tvs) (pns ++ repeat (Nope, L))
 
 -- | @substTy τ' α 't@ substitutes @τ'@ for free variable @α@ in @τ@.
@@ -1075,7 +1077,7 @@ unfoldAbs e           = ([], e)
 --- Parsing
 ---
 
--- | @standardizeType@ puts a type in standard form.
+-- | @standardize@ puts a type in standard form.
 --   A type is in standard form if three conditions are met:
 --
 --   * All bound type variables actually appear in their scope.  That
@@ -1090,36 +1092,61 @@ unfoldAbs e           = ([], e)
 --
 --  Type standardization is necessary as a post-pass after parsing,
 --  because it's difficult to parse into standard form directly.
-standardizeType ∷ Type a → Type a
-standardizeType t00 = runST (loop 0 [] t00) where
-  loop depth g t0 = case t0 of
-    QuaTy u _ _ → do
-      rn ← ST.newSTRef []
-      let (qls, t) = unfoldQua u t0
-          i        = length qls
-          g'       = (depth + i, rn,) <$$> qls
-      t' ← loop (depth + i) (g' ++ g) t
-      nl ← ST.readSTRef rn
-      return $ case nl of
-        [] → openTyN i (-1) [] t'
-        _  → QuaTy u [ n | (_,n) ← nl ] (openTyN (i - 1) (i - 1) [] t')
-    ConTy con ts          → ConTy con <$> mapM (loop depth g) ts
-    VarTy (BoundVar i j n)
-      | rib:_               ← drop i g
-      , (olddepth, r, ql):_ ← drop j rib
-                          → do
-          s  ← ST.readSTRef r
-          j' ← case List.findIndex ((== (depth - i,j)) . fst) s of
-            Just j' → return j'
-            Nothing → do
-              ST.writeSTRef r (s ++ [((depth - i,j),(n,ql))])
-              return (length s)
-          return (VarTy (BoundVar (depth - olddepth) j' n))
-    VarTy v               → return (VarTy v)
+class Ord v ⇒ Standardizable a v | a → v where
+  standardize      ∷ a → a
+  standardize      = standardizeQuals Map.empty
+  standardizeQuals ∷ Map.Map v QLit → a → a
+
+instance Standardizable a v ⇒ Standardizable [a] v where
+  standardizeQuals = map . standardizeQuals
+
+instance Ord v ⇒ Standardizable (Type v) v where
+  standardizeQuals qm t00 = runST (loop 0 [] t00) where
+    loop depth g t0 = case t0 of
+      QuaTy u _ _ → do
+        rn ← ST.newSTRef []
+        let (qls, t) = unfoldQua u t0
+            i        = length qls
+            g'       = (depth + i, rn,) <$$> qls
+        t' ← loop (depth + i) (g' ++ g) t
+        nl ← ST.readSTRef rn
+        return $ case nl of
+          [] → openTyN i (-1) [] t'
+          _  → QuaTy u [ n | (_,n) ← nl ] (openTyN (i - 1) (i - 1) [] t')
+      ConTy con ts          → ConTy con <$> sequence
+        [ if isQVariance v
+            then doQual depth g t
+            else loop depth g t
+        | t ← ts
+        | v ← getVariances con (length ts) ]
+      VarTy v               → VarTy . fst <$> doVar depth g v
+    --
+    doVar depth g v0 = case v0 of
+      BoundVar i j n
+        | rib:_               ← drop i g
+        , (olddepth, r, ql):_ ← drop j rib
+                            → do
+            s  ← ST.readSTRef r
+            j' ← case List.findIndex ((== (depth - i,j)) . fst) s of
+              Just j' → return j'
+              Nothing → do
+                ST.writeSTRef r (s ++ [((depth - i,j),(n,ql))])
+                return (length s)
+            return (BoundVar (depth - olddepth) j' n, ql)
+        | otherwise   → return (v0, L)
+      FreeVar r       → return (FreeVar r, Map.findWithDefault L r qm)
+    --
+    doQual depth g t = do
+      let QExp q vs = pureQualifier t
+      vqs' ← mapM (doVar depth g) (Set.toList (Set.fromList vs))
+      let vs' = [ v
+                | (v, q') ← vqs'
+                , not (q' ⊑ q) ]
+      return (toQualifierType (QExp q vs'))
 
 -- | To put a type annotation in standard form.
-standardizeAnnot :: Annot → Annot
-standardizeAnnot (Annot ns t) = Annot ns (standardizeType t)
+instance Standardizable Annot Name where
+  standardizeQuals qm (Annot ns t) = Annot ns (standardizeQuals qm t)
 
 -- | A Parsec tokenizer
 tok ∷ TokenParser st
@@ -1195,7 +1222,7 @@ instance Parsable Annot where
     τ0    ← parseType
     somes ← getState
     let τ = openTy 0 (map fvTy somes) τ0
-    return (standardizeAnnot (Annot somes τ))
+    return (standardize (Annot somes τ))
 
 -- | To parse a closed type.
 instance Parsable (Type a) where
@@ -1612,10 +1639,9 @@ pprTerm  = loop 0 where
 instance Show Annot where
   show = Ppr.render . ppr
 
-{-
+-- deriving instance Show a ⇒ Show (Type a)
 instance Ppr a ⇒ Show (Type a) where
   showsPrec p t = showString (Ppr.render (pprPrec p t))
-  -}
 
 instance Ppr a ⇒ Show (Term a) where
   show = Ppr.render . ppr
@@ -1683,8 +1709,8 @@ parseTypeTests = T.test
 (<==>*) ∷ String → String → T.Assertion
 str1 <==>* str2 = T.assertBool (str1 ++ " <==> " ++ str2) (t1 == t2) where
   t1, t2 ∷ [(Type Empty, String)]
-  t1 = map (first standardizeType) (reads str1)
-  t2 = map (first standardizeType) (reads str2)
+  t1 = map (first standardize) (reads str1)
+  t2 = map (first standardize) (reads str2)
 
 standardizeTypeTests ∷ T.Test
 standardizeTypeTests = T.test
@@ -1720,7 +1746,7 @@ standardizeTypeTests = T.test
                                 <==>* "∃ β. ∀ α. α → A α → β"
   , let str = "∀ α. α → ∀ β. β → α" in
     T.assertBool str
-      ((standardizeType (read str) ∷ Type Empty) ==
+      ((standardize (read str) ∷ Type Empty) ==
        allTy [L] (VarTy (boundVar 0 0 "α") ↦
                   allTy [L] (VarTy (boundVar 0 0 "β") ↦
                              VarTy (boundVar 1 0 "α"))))
@@ -1734,3 +1760,4 @@ tryParsePprPatt s =
     Right (patt, names) → print (pprPatt 0 names (patt ∷ Patt Empty))
 
 -}
+
