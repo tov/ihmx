@@ -339,6 +339,9 @@ instance Eq Empty where
 instance Ord Empty where
   _ `compare` _ = EQ
 
+instance Show Empty where
+  show = elimEmpty
+
 ---
 --- Representation of variables
 ---
@@ -389,7 +392,7 @@ data Type a
   = QuaTy Quant [(Perhaps Name, QLit)] (Type a)
   | VarTy (Var a)
   | ConTy Name [Type a]
-  deriving (Eq, Functor)
+  deriving (Eq, Functor, Show)
 
 -- | Quantifiers
 data Quant
@@ -1609,8 +1612,10 @@ pprTerm  = loop 0 where
 instance Show Annot where
   show = Ppr.render . ppr
 
+{-
 instance Ppr a ⇒ Show (Type a) where
   showsPrec p t = showString (Ppr.render (pprPrec p t))
+  -}
 
 instance Ppr a ⇒ Show (Term a) where
   show = Ppr.render . ppr

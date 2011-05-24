@@ -103,14 +103,15 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
   --   an error.
   linkTV    ∷ tv → tv → m ()
   linkTV α β = do
-    setChanged
     (α', mτα) ← rootTV α
     (β', mτβ) ← rootTV β
-    trace ("linkTV", (α', mτα), (β', mτβ))
-    case (mτα, mτβ) of
-      (Nothing, _) → writeTV_ α' (fvTy β')
-      (_, Nothing) → writeTV_ β' (fvTy α')
-      _ → fail "BUG! linkTV: Tried to overwrite type variable"
+    when (α' /= β') $ do
+      setChanged
+      trace ("linkTV", (α', mτα), (β', mτβ))
+      case (mτα, mτβ) of
+        (Nothing, _) → writeTV_ α' (fvTy β')
+        (_, Nothing) → writeTV_ β' (fvTy α')
+        _ → fail "BUG! linkTV: Tried to overwrite type variable"
   -- | Write a type into an empty type variable.
   writeTV   ∷ tv → Type tv → m ()
   writeTV α τ = do

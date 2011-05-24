@@ -911,6 +911,14 @@ inferFnTests = T.test
       -: "∀α. Ref L α → α"
   , "λ(r: Ref L α). r"
       -: "∀α. Ref L α → Ref L α"
+  , "λ(f: Ref L α → α) (x: Ref L α). f x"
+      -: "∀α. (Ref L α → α) → Ref L α → α"
+  , "λ(f: Ref A α → α) (x: Ref A α). f x"
+      -: "∀α. (Ref A α → α) → Ref A α → α"
+  , te "λ(f: Ref L α → α) (x: Ref A α). f x"
+  , te "λ(f: Ref A α → α) (x: Ref L α). f x"
+  , "λ(f: Ref α β → β) (x: Ref α β). f x"
+      -: "∀ α β. (Ref α β → β) → Ref α β → β"
   --
   -- Generalization with non-empty Γ
   --
@@ -1271,11 +1279,13 @@ inferFnTests = T.test
   where
   a -: b = case readsPrec 0 a of
     [(e,[])] →
-      let typing = showInfer e in
-      T.assertBool ("⊢ " ++ a ++ "\n  : " ++ show typing ++ "\n  ≠ " ++  b)
+      let expect = standardizeType (read b)
+          typing = showInfer e in
+      T.assertBool ("⊢ " ++ a ++ "\n  : " ++ either show show typing ++
+                    "\n  ≠  " ++ show expect)
         (case typing of
            Left _       → False
-           Right (τ, _) → τ == elimEmptyF (standardizeType (read b)))
+           Right (τ, _) → τ == elimEmptyF expect)
     _  → T.assertBool ("Syntax error: " ++ a) False
   te a   = T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))
