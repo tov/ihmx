@@ -1464,31 +1464,41 @@ pprType  = loop where
               (loop 0 (tvs : g) t)
     VarTy (BoundVar ix jx (coerceOptional → n)) →
       Ppr.text $ maybe "?" id $ (listNth jx <=< listNth ix $ g) `mplus` n
-    VarTy (FreeVar a)        → pprPrec p a
-    ConTy "→" [t1, qe, t2] →
-      let qedoc = case qe of
-            ConTy "U" [] → Ppr.char '→'
-            ConTy "L" _  → Ppr.text "-L>"
-            ConTy c   ts
-              | Just _ ← readQLit c
-              , all isVarTy ts
-                         → Ppr.char '-' Ppr.<>
-                           (if c == "U" then id else (Ppr.text c Ppr.<+>))
-                              (Ppr.fsep (pprType 0 g <$> ts))
-                           Ppr.<> Ppr.char '>'
-            _ → Ppr.text "-{" Ppr.<> pprType 0 g qe Ppr.<> Ppr.text "}>"
-          isVarTy (VarTy _) = True
-          isVarTy _         = False
-       in parensIf (p > 1) $
-          Ppr.sep [loop 2 g t1, qedoc, loop 0 g t2]
+    VarTy (FreeVar a)      → pprPrec p a
+    ConTy "→" [t1, tq, t2] →
+      parensIf (p > 1) $
+        Ppr.sep [loop 2 g t1, pprQExp True 0 g tq, loop 0 g t2]
     ConTy c []          → Ppr.text c
     ConTy c ts          →
       parensIf (p > 2) $
-        Ppr.fsep (Ppr.text c : map (loop 3 g) ts)
+        Ppr.fsep (Ppr.text c : [ printer 3 g t
+                               | t ← ts
+                               | v ← getVariances c (length ts)
+                               , let printer = if isQVariance v
+                                                 then pprQExp False
+                                                 else pprType ])
   groupByQLits = foldr2 each [] where
     each tv ql ((ql',tvs):rest)
       | ql == ql'   = ((ql',tv:tvs):rest)
     each tv ql rest = (ql,[tv]):rest
+
+pprQExp ∷ Ppr a ⇒ Bool → Int → [[Name]] → Type a → Ppr.Doc
+pprQExp arrowStyle p g t =
+  case pureQualifier t of
+    QExp U [] | arrowStyle → Ppr.char '→'
+    QExp U vs | arrowStyle → addArrow $ Ppr.fsep (pprType 0 g . VarTy <$> vs)
+    QExp L _  → addArrow $ Ppr.char 'L'
+    QExp q vs → addArrow $ pprType p g (ConTy (show q) (VarTy <$> vs))
+  where addArrow doc
+          | arrowStyle = Ppr.char '-' Ppr.<> doc Ppr.<> Ppr.char '>'
+          | otherwise  = doc
+
+  {-
+pprQExp True       _ _ (ConTy "U" []) = Ppr.char '→'
+pprQExp True       _ _ (ConTy "L" _)  = Ppr.text "-L>"
+pprQExp arrowStyle _ _ (ConTy "L" _)  = Ppr.char 'L'
+pprQExp arrowStyle p g (ConTy q   vs) = case pureQualifier (ConTy q vs)
+  -}
 
 -- | To pretty-print a pattern and return the list of names of
 --   the bound variables.  (Avoiding the given list of names.)
