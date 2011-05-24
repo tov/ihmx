@@ -622,9 +622,20 @@ isAnnotated (AnnTm _ _)      = True
       , ("tail",        "∀ α : A. List α → List α")
       , ("app",         "∀ α. List α → List α → List α")
       -- Ref cells
-      , ("ref",         "∀ α. α → Ref α")
-      , ("readRef",     "∀ α : R. Ref α → α")
-      , ("writeRef",    "∀ α : A. Ref α → α → T")
+      , ("ref",         "∀ α: A, β. α → Ref β α")
+      , ("ref'",        "∀ α β. α → Ref (R β) α")
+      , ("uref",        "∀ α:A. α → Ref U α")
+      , ("rref",        "∀ α. α → Ref R α")
+      , ("aref",        "∀ α:A. α → Ref A α")
+      , ("lref",        "∀ α. α → Ref L α")
+      , ("swapRef",     "∀ α β. Pair (Ref β α) α → Pair (Ref β α) α")
+      , ("swapRef'",    "∀ α β γ. Pair (Ref (A β γ) α) β → \
+                        \         Pair (Ref (A β γ) β) α")
+      , ("readRef",     "∀ α:R, β. Ref β α → α")
+      , ("readRef'"  ,  "∀ α:R, β. Ref β α → Pair (Ref β α) α")
+      , ("freeRef'",    "∀ α β. Ref (A β) α → α")
+      , ("writeRef",    "∀ α β:A. Pair (Ref β α) α → T")
+      , ("writeRef'",   "∀ α:A, β γ. Pair (Ref (A β γ) α) β → Ref (A β γ) β")
       -- Products
       , ("pair",        "∀ α β. α → β -α> Pair α β")
       , ("fst",         "∀ α : L, β : A. Pair α β → α")
@@ -1486,6 +1497,7 @@ pprQExp ∷ Ppr a ⇒ Bool → Int → [[Name]] → Type a → Ppr.Doc
 pprQExp arrowStyle p g t =
   case pureQualifier t of
     QExp U [] | arrowStyle → Ppr.char '→'
+    QExp U [v]             → addArrow $ pprType 0 g (VarTy v)
     QExp U vs | arrowStyle → addArrow $ Ppr.fsep (pprType 0 g . VarTy <$> vs)
     QExp L _  → addArrow $ Ppr.char 'L'
     QExp q vs → addArrow $ pprType p g (ConTy (show q) (VarTy <$> vs))

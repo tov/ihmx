@@ -905,6 +905,13 @@ inferFnTests = T.test
   , "let rec f = λg x. let _ = f ((λC.C) : C -R> C) in g x in f"
       -: "∀α. (C -R α> C) → (C -R α> C)"
   --
+  , "λ(Ref A x). x"
+      -: "∀α. Ref A α → α"
+  , "λ(Ref L x). x"
+      -: "∀α. Ref L α → α"
+  , "λ(r: Ref L α). r"
+      -: "∀α. Ref L α → Ref L α"
+  --
   -- Generalization with non-empty Γ
   --
   , "λ(f : B -α> B). let g = λh. h f in Pair f g"

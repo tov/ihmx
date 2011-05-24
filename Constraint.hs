@@ -1176,14 +1176,25 @@ solveQualifiers value αs βs τftv qc = do
     | Map.null γqes0 = return state
     | otherwise      = do
     trace (who, γqes0, state)
-    let image = Set.unions (map qeQSet (Map.elems γqes0))
-        γqes  = γqes0 Map.\\ setToMap () image
-    if Map.null γqes
-      then fail $ "BUG! (subst)" ++ who ++
-                  " attempt non-idempotent substitution: " ++
-                  show γqes0
-      else unsafeSubst state γqes
+    let sanitize _    []  []
+          = fail $ "BUG! (subst)" ++ who ++
+                   " attempt impossible substitution: " ++ show γqes0
+        sanitize _    acc []
+          = unsafeSubst state (Map.fromDistinctAscList (reverse acc))
+        sanitize seen acc ((γ, QE q γs):rest)
+          | Set.member γ seen
+          = sanitize seen acc rest
+          | otherwise
+          = sanitize (seen `Set.union` γs) ((γ, QE q γs):acc) rest
+    sanitize Set.empty [] (Map.toAscList γqes0)
   --
+  -- This does the main work of substitution, and it has a funny
+  -- precondition (which is enforced by 'subst', above), namely:
+  -- the type variables will be substituted in increasing order, so the
+  -- image of later variables must not contain earlier variables.
+  --
+  -- This is okay:     { 1 ↦ 2 3, 2 ↦ 4 }
+  -- This is not okay: { 1 ↦ 3 4, 2 ↦ 1 }
   unsafeSubst state γqes = do
     sequence [ writeTV γ (toQualifierType qe) | (γ, qe) ← Map.toList γqes ]
     let γmap = Map.map each γqes
