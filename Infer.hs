@@ -1287,7 +1287,7 @@ inferFnTests = T.test
                     "\n  ≠  " ++ show expect)
         (case typing of
            Left _       → False
-           Right (τ, _) → standardize τ == standardize (elimEmptyF expect))
+           Right (τ, _) → τ == elimEmptyF expect)
     _  → T.assertBool ("Syntax error: " ++ a) False
   te a   = T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))

@@ -1119,9 +1119,9 @@ instance Ord v ⇒ Standardizable (Type v) v where
             else loop depth g t
         | t ← ts
         | v ← getVariances con (length ts) ]
-      VarTy v               → VarTy . fst <$> doVar depth g v
+      VarTy v               → VarTy . fst <$> doVar depth g (const True) v
     --
-    doVar depth g v0 = case v0 of
+    doVar depth g keep v0 = case v0 of
       BoundVar i j n
         | rib:_               ← drop i g
         , (olddepth, r, ql):_ ← drop j rib
@@ -1130,18 +1130,17 @@ instance Ord v ⇒ Standardizable (Type v) v where
             j' ← case List.findIndex ((== (depth - i,j)) . fst) s of
               Just j' → return j'
               Nothing → do
-                ST.writeSTRef r (s ++ [((depth - i,j),(n,ql))])
+                when (keep ql) $
+                  ST.writeSTRef r (s ++ [((depth - i,j),(n,ql))])
                 return (length s)
-            return (BoundVar (depth - olddepth) j' n, ql)
-        | otherwise   → return (v0, L)
-      FreeVar r       → return (FreeVar r, Map.findWithDefault L r qm)
+            return (BoundVar (depth - olddepth) j' n, keep ql)
+        | otherwise   → return (v0, True)
+      FreeVar r       → return (FreeVar r, keep (Map.findWithDefault L r qm))
     --
     doQual depth g t = do
       let QExp q vs = pureQualifier t
-      vqs' ← mapM (doVar depth g) (Set.toList (Set.fromList vs))
-      let vs' = [ v
-                | (v, q') ← vqs'
-                , not (q' ⊑ q) ]
+      vqs' ← mapM (doVar depth g (not . (⊑ q))) (ordNub vs)
+      let vs' = List.sort (map fst (filter snd vqs'))
       return (toQualifierType (QExp q vs'))
 
 -- | To put a type annotation in standard form.
