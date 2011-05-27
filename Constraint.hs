@@ -673,19 +673,6 @@ extSkelsM = mapM each . Map.toList . unSkelMap
       (set, mshape) ← UF.desc proxy
       return (α, Set.toList set, mshape)
 
-r _ = runUT $ do
-  let t = ConTy "T" []
-  -- α ← newTVTy
-  β ← newTVTy
-  γ ← newTVTy
-  -- δ ← newTVTy
-  -- α' ← newTVTy
-  -- β' ← newTVTy
-  -- γ' ← newTVTy
-  -- δ' ← newTVTy
-  skeletonize [(RowTy "A" t (RowTy "B" t β), RowTy "A" t (RowTy "C" t γ))
-               ]
-
 -- | Build an internal subtype constraint from an external subtype
 --   constraint.
 skeletonize ∷ MonadU tv m ⇒
@@ -694,51 +681,53 @@ skeletonize sc0 = do
   rskels ← newRef Map.empty
   let -- | Record that @τ1@ is a subtype of @τ2@, and do some
       --   unification.
-      addSubtype (τ1, τ2) = do
-        α1 ← tvOf τ1
-        α2 ← tvOf τ2
-        relateTVs α1 α2
-      -- | Relate two type variables in the same skeleton
-      relateTVs α1 α2 = do
-        skel1 ← getSkel α1
-        skel2 ← getSkel α2
+      relateTypes τ1 τ2 = do
+        (_, skel1) ← registerType τ1
+        (_, skel2) ← registerType τ2
         UF.coalesce combiner skel1 skel2
-      -- | Get the skeleton associated with a type variable. If it doesn't
-      --   exist, create it. This may require creating a shape, which may
-      --   recursively create skeletons for type constructor arguments.
-      getSkel α = do
-        skels ← readRef rskels
-        case Map.lookup α skels of
-          Just skel → return skel
-          Nothing   → do
-            shape ← getShape α
-            skel  ← UF.create (Set.singleton α, shape)
-            modifyRef (Map.insert α skel) rskels
-            return skel
-      -- | Build a new shape for a type variable. A shape is a "small type"
-      --   comprising a type constructor name and type variables as
-      --   arguments.  This may require generating more type variables to
-      --   abstract concrete parameters appearing in the type.
-      getShape α = do
-        τ ← readTV α
+      -- | Relate two type variables in the same skeleton
+      relateTVs α1 α2 = relateTypes (fvTy α1) (fvTy α2)
+      --
+      -- Given a type, create a shape and skeleton for it, store them in
+      -- the relevant data structures, and return the type variable that
+      -- associates the type with its skeleton.
+      registerType τ = do
         case τ of
-          Left _                → return NoShape
-          Right (ConTy con τs)  → do
-            αs     ← mapM tvOf τs
-            mapM_ getSkel αs
-            return (ConShape con αs)
-          Right (RowTy n τ1 τ2) → do
-            α1     ← tvOf τ1
-            α2     ← tvOf τ2
-            rewriteTV α (RowTy n (fvTy α1) (fvTy α2))
-            getSkel α1
-            getSkel α2
-            return (RowShape n α1 α2)
-          Right _               → fail $ "BUG! skeletonize"
+          ConTy c τs → do
+            αs ← mapM (fst <$$> registerType) τs
+            α  ← tvOf (ConTy c (map fvTy αs))
+            newSkel α (ConShape c αs)
+          RowTy n τ1 τ2 → do
+            α1 ← fst <$> registerType τ1
+            α2 ← fst <$> registerType τ2
+            α  ← tvOf (RowTy n (fvTy α1) (fvTy α2))
+            newSkel α (RowShape n α1 α2)
+          VarTy (FreeVar α) → registerTV α
+          _ → fail $ "BUG! skeletonize"
+      --
+      -- Lookup or register a type variable.
+      registerTV α = do
+        mskel ← Map.lookup α <$> readRef rskels
+        case mskel of
+          Just skel → return (α, skel)
+          Nothing   → do
+            mτ ← readTV α
+            case mτ of
+              Left α'  → newSkel α' NoShape
+              Right τ' → do
+                (α', skel) ← registerType τ'
+                rewriteTV α (fvTy α')
+                return (α', skel)
+      --
+      -- Given a type variable and shape, construct a new skeleton
+      newSkel α shape = do
+        skel ← UF.create (Set.singleton α, shape)
+        modifyRef (Map.insert α skel) rskels
+        return (α, skel)
       --
       -- Combine two skeletons
       combiner (αs1, shape1) (αs2, shape2) = do
-        trace ("BEGIN combiner", shape1, shape2, αs1, αs2)
+        trace ("combiner (begin)", shape1, shape2, αs1, αs2)
         shape' ← case (shape1, shape2) of
           (NoShape, _)                    → return shape2
           (_, NoShape)                    → return shape1
@@ -747,100 +736,41 @@ skeletonize sc0 = do
             | c1 == c2 && length βs1 == length βs2
                                          → do
             sequence_ [ unless (var ⊑ QInvariant) $
-                          if var == Invariant
-                            then unifyTVs β1 β2
-                            else relateTVs β1 β2
+                          relateTVs β1 β2
                       | var ← getVariances c1 (length βs1)
                       | β1  ← βs1
                       | β2  ← βs2 ]
             return (ConShape c1 βs1)
           (RowShape n1 α1 β1, RowShape n2 α2 β2)
-            | n1 == n2                   → do
-              relateTVs α1 α2
-              relateTVs β1 β2
-              return (RowShape n1 α1 β1)
-                {-
-              α  ← newTV
-              unifyTypes (fvTy β2) (RowTy n1 (fvTy α1) (fvTy α))
-              α' ← tvOf (RowTy n2 (fvTy α2) (fvTy α))
-              getSkel α'
-              rewriteTV γ2 (RowTy n1 (fvTy α1) (fvTy α'))
-              -}
-            | n1 < n2                    → do
-              α's ← sequence
-                [ do
-                    eτ2 ← readTV γ2
-                    case eτ2 of
-                      Left _  → return Nothing
-                      Right (RowTy n2 α2 β2) → do
-                        α  ← newTV
-                        β2' ← tvOf β2
-                        β2'' ← tvOf (RowTy n1 (fvTy α1) (fvTy α))
-                        relateTVs β2' β2''
-                        unifyTVs β2' β2''
-                        α' ← tvOf (RowTy n2 α2 (fvTy α))
-                        rewriteTV γ2 (RowTy n1 (fvTy α1) (fvTy α'))
-                        return (Just α')
-                      Right x → fail ("meh! " ++ show x)
-                | γ2  ← Set.toList αs2 ]
-              mapM_ (relateTVs β1) (catMaybes α's)
-              return (RowShape n1 α1 β1)
-            | n2 < n1                    → do
-              α's ← sequence
-                [ do
-                    eτ1 ← readTV γ1
-                    case eτ1 of
-                      Left _  → return Nothing
-                      Right (RowTy n1 α1 β1) → do
-                        α  ← newTV
-                        β1' ← tvOf β1
-                        β1'' ← tvOf (RowTy n2 (fvTy α2) (fvTy α))
-                        relateTVs β1' β1''
-                        unifyTVs β1' β1''
-                        α' ← tvOf (RowTy n1 α1 (fvTy α))
-                        rewriteTV γ1 (RowTy n2 (fvTy α2) (fvTy α'))
-                        return (Just α')
-                      Right x → fail ("meh! " ++ show x)
-                | γ1  ← Set.toList αs1 ]
-              mapM_ (relateTVs β2) (catMaybes α's)
-              return (RowShape n2 α2 β2)
-          _                              → fail $
+            | n1 < n2   → mutate (n1, α1, β1) αs2
+            | n1 > n2   → mutate (n2, α2, β2) αs1
+            | otherwise → do
+                relateTVs α1 α2
+                relateTVs β1 β2
+                return (RowShape n1 α1 β1)
+          _             → fail $
             "Could not unify " ++ show shape1 ++ " and " ++ show shape2
-        trace ("END combiner", shape1, shape2, αs1, αs2)
+        trace ("combiner (end)", shape1, shape2, αs1, αs2)
         return (Set.union αs1 αs2, shape')
-      -- Unify (at equality) two types
-      unifyTypes τ1 τ2 = join (unifyTVs <$> tvOf τ1 <*> tvOf τ2)
-      -- Unify (at equality) two type variables
-      unifyTVs α1 α2 = do
-        τ10 ← readTV α1
-        τ20 ← readTV α2
-        case (τ10, τ20) of
-          (Left _, _) → linkTV α1 α2
-          (_, Left _) → linkTV α2 α1
-          (Right (ConTy c1 τs1), Right (ConTy c2 τs2))
-            | c1 == c2 && length τs1 == length τs2 → do
-                αs1 ← mapM tvOf τs1
-                αs2 ← mapM tvOf τs2
-                sequence_ [ when (var /= Omnivariant) $ unifyTVs α1 α2
-                          | var ← getVariances c1 (length αs1)
-                          | α1  ← αs1
-                          | α2  ← αs2 ]
-          (Right (RowTy n1 τ1 τ1'), Right (RowTy n2 τ2 τ2'))
-            | n1 == n2                   → do
-              join (unifyTVs <$> tvOf τ1  <*> tvOf τ2)
-              join (unifyTVs <$> tvOf τ1' <*> tvOf τ2')
-            | n1 < n2                    → do
-              α  ← newTV
-              unifyTypes τ2' (RowTy n1 τ1 (fvTy α))
-              unifyTypes τ1' (RowTy n2 τ2 (fvTy α))
-            | n1 > n2                    → do
-              α  ← newTV
-              unifyTypes τ2' (RowTy n1 τ1 (fvTy α))
-              unifyTypes τ1' (RowTy n2 τ2 (fvTy α))
-          (Right τ1', Right τ2') →
-            fail $ "Could not unify " ++ show τ1' ++ " and " ++ show τ2'
       --
-  mapM_ addSubtype sc0
+      -- Permute rows to bring matching labels together.
+      mutate (la, α, α') βs = do
+        sequence_
+          [ do
+              eτ ← readTV β
+              case eτ of
+                Left _  → return ()
+                Right (RowTy lb τ τ') → do
+                  δ  ← newTV
+                  relateTypes τ' (RowTy la (fvTy α) (fvTy δ))
+                  δ' ← tvOf (RowTy lb τ (fvTy δ))
+                  relateTVs α' δ'
+                  rewriteTV β (RowTy la (fvTy α) (fvTy δ'))
+                Right x → fail $ "BUG! bad skeleton: " ++ show x
+          | β  ← Set.toList βs ]
+        return (RowShape la α α')
+      --
+  mapM_ (uncurry relateTypes) sc0
   SkelMap <$> readRef rskels
 
 -- | Make sure an internal subtype constraint is consistent with a
