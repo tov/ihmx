@@ -593,6 +593,13 @@ totalPatt (ConPa _ _) = False
 totalPatt (InjPa _ _) = False
 totalPatt (AnnPa π _) = totalPatt π
 
+pattHasWild ∷ Patt a → Bool
+pattHasWild (VarPa _)    = False
+pattHasWild WldPa        = True
+pattHasWild (ConPa _ πs) = any pattHasWild πs
+pattHasWild (InjPa _ π)  = pattHasWild π
+pattHasWild (AnnPa π _)  = pattHasWild π
+
 ---
 --- Terms
 ---

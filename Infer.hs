@@ -95,19 +95,19 @@ infer ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
         Δ tv → Γ tv → Term Empty → m (Type tv, c)
 infer δ γ e0 = case e0 of
   AbsTm π e                     → do
-    (δ', c1, τ1, τs) ← inferPatt δ π Nothing
+    (δ', c1, τ1, τs) ← inferPatt δ π Nothing (countOccs e)
     (τ2, c2)         ← infer δ' (τs:γ) e
     -- qe               ← qvarexp . FreeVar <$> newTV
     -- let cqe          = mconcat (map (⊏ qe) (termFreeTypes γ (AbsTm π e)))
     qe               ← arrowQualifier γ (AbsTm π e)
     let cqe          = (⊤)
-    return (arrTy τ1 qe τ2, c1 ⋀ c2 ⋀ cqe ⋀ τs ⊏* e)
+    return (arrTy τ1 qe τ2, c1 ⋀ c2 ⋀ cqe)
   LetTm π e1 e2                 → do
     (τ1, c1)         ← infer δ γ e1
-    (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1)
+    (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1) (countOccs e2)
     (τs', c')        ← genList (syntacticValue e1) (c1 ⋀ cπ) γ τs
     (τ2, c2)         ← infer δ' (τs':γ) e2
-    return (τ2, c' ⋀ c2 ⋀ τs ⊏* e2)
+    return (τ2, c' ⋀ c2)
   MatTm e1 bs                   → do
     (τ1, c1) ← infer δ γ e1
     (τ2, c2) ← inferMatch δ γ τ1 bs
@@ -157,19 +157,21 @@ inferMatch δ γ τ ((InjPa n πi, ei):bs) | totalPatt πi = do
   β               ← newTVTy
   mαr             ← extractLabel n <$> derefAll τ
   (α, r)          ← maybe ((,) <$> newTVTy <*> newTVTy) return mαr
-  (δ', ci, _, τs) ← inferPatt δ πi (Just α)
+  (δ', ci, _, τs) ← inferPatt δ πi (Just α) (countOccs ei)
   (τi, ci')       ← infer δ' (τs:γ) ei
   (τk, ck)        ← if null bs
                       then return (β, r ≤ endTy)
                       else inferMatch δ' γ r bs
+  let cτ = replicate (length τs) τ ⊏* ei
+         ⋀ if pattHasWild πi then τ ⊏ A else (⊤)
   trace ("inferMatch", τs, ei)
-  return (β, ci ⋀ ci' ⋀ ck ⋀ τi ≤ β ⋀ τk ≤ β ⋀ τ ≤ RowTy n α r ⋀ τs ⊏* ei)
+  return (β, ci ⋀ ci' ⋀ ck ⋀ cτ ⋀ τi ≤ β ⋀ τk ≤ β ⋀ τ ≤ RowTy n α r)
 inferMatch δ γ τ ((πi, ei):bs) = do
   β               ← newTVTy
-  (δ', ci, _, τs) ← inferPatt δ πi (Just τ)
+  (δ', ci, _, τs) ← inferPatt δ πi (Just τ) (countOccs ei)
   (τi, ci')       ← infer δ' (τs:γ) ei
   (τk, ck)        ← inferMatch δ' γ τ bs
-  return (β, ci ⋀ ci' ⋀ ck ⋀ τi ≤ β ⋀ τk ≤ β ⋀ τs ⊏* ei)
+  return (β, ci ⋀ ci' ⋀ ck ⋀ τi ≤ β ⋀ τk ≤ β)
 
 {-
 termFreeTypes ∷ Γ tv → Term a → [Type tv]
@@ -205,17 +207,20 @@ inst σ0 = do
   trace ("inst", σ, τ, c)
   return (τ, c)
 
--- | Given a type variable environment, a pattern, and optionally an
---   expected type, and
---   compute an updated type variable environment, a constraint,
+-- | Given a type variable environment, a pattern, optionally an
+--   expected type, and a list of how each bound variable will be used,
+--   and compute an updated type variable environment, a constraint,
 --   a type for the whole pattern, and a type for each variable bound by
 --   the pattern.
 inferPatt ∷ (MonadU tv m, Constraint c tv) ⇒
-           Δ tv → Patt Empty → Maybe (Type tv) →
+           Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
            m (Δ tv, c, Type tv, [Type tv])
-inferPatt δ0 π0 mτ0 = do
+inferPatt δ0 π0 mτ0 occs = do
   (σ, δ, (c, τs)) ← runRWST (loop π0 mτ0) () δ0
-  return (δ, c, σ, τs)
+  let c' = mconcat (zipWith (⊏) τs occs)
+         ⋀ σ ⊏ bigJoin (take (length τs) occs)
+         ⋀ if pattHasWild π0 then σ ⊏ A else (⊤)
+  return (δ, c ⋀ c', σ, τs)
   where
   bind τ      = do tell ((⊤), [τ]); return τ
   constrain c = tell (c, [])
@@ -243,16 +248,16 @@ inferPatt δ0 π0 mτ0 = do
             return τ
   loop (InjPa name π)  mτ = do
     case mτ of
-      Nothing → RowTy name <$> loop π Nothing <*> pure endTy
+      Nothing → RowTy name <$> loop π Nothing <*> newTVTy
       Just τ0 → do
         τ ← deref τ0
         case τ of
+          -- XXX Need to permute?
           RowTy name' τ' τr | name == name' → do
-            τ' ← RowTy name <$> loop π (Just τ') <*> pure endTy
-            constrain (τr ≤ endTy)
+            τ' ← RowTy name <$> loop π (Just τ') <*> pure τr
             return τ'
           _ → do
-            τ' ← RowTy name <$> loop π Nothing <*> pure endTy
+            τ' ← RowTy name <$> loop π Nothing <*> newTVTy
             constrain (τ ≤ τ')
             return τ
   loop (AnnPa π annot) mτ = do
@@ -959,6 +964,8 @@ inferFnTests = T.test
   , te "λ(f: Ref A α → α) (x: Ref L α). f x"
   , "λ(f: Ref α β → β) (x: Ref α β). f x"
       -: "∀ α β. (Ref α β → β) → Ref α β → β"
+  , "λx. match x with B _ → C"
+      -: "∀ α:A. B α → C"
   , "choose ((λ_ _.X) : X -> X -R> X) ((λ_ _.X) : X -> X -A> X)"
       -: "X → X -L> X"
   --
