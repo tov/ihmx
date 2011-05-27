@@ -374,9 +374,24 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
               | otherwise
               → fail $
                   "Could not unify type constructors: " ++ c1 ++ " ≤ " ++ c2
+            (τ1@(RowTy _ _ _),    τ2@(RowTy _ _ _)) → do
+              τ1' ← derefAll τ1
+              τ2' ← derefAll τ2
+              let r@(matches, (extra1, rest1), (extra2, rest2))
+                    = matchLabels τ1' τ2'
+              trace ("decomp row", τ1, τ2, r)
+              unless (null extra1 && null extra2) $ fail "EXTRA!"
+              sequence
+                [ decompLe (τ1i, τ2i)
+                | ((_, τ1i), (_, τ2i)) ← matches ]
+              decompLe (rest1, rest2)
             (VarTy (FreeVar α), ConTy _ _)
               → fail $ "BUG! gen (decompose) saw unexpanded tyvar: " ++ show α
             (ConTy _ _,         VarTy (FreeVar β))
+              → fail $ "BUG! gen (decompose) saw unexpanded tyvar: " ++ show β
+            (VarTy (FreeVar α), RowTy _ _ _)
+              → fail $ "BUG! gen (decompose) saw unexpanded tyvar: " ++ show α
+            (RowTy _ _ _,       VarTy (FreeVar β))
               → fail $ "BUG! gen (decompose) saw unexpanded tyvar: " ++ show β
             (_,                 _)
               → do
@@ -620,21 +635,31 @@ newtype SkelMap tv m
       --   determines the shape of the skeleton.
       unSkelMap   ∷ Map.Map tv (Skeleton tv (URef m))
     }
-type Skeleton tv r = UF.Proxy r (Set.Set tv, Maybe (Name, [tv]))
+type Skeleton tv r = UF.Proxy r (Set.Set tv, Shape tv)
 
-type ExtSkels tv = [(tv, [tv], Maybe (Name, [tv]))]
+data Shape tv
+  = ConShape Name [tv]
+  | RowShape Name tv tv
+  | NoShape
+  deriving Show
+
+type ExtSkels tv = [(tv, [tv], Shape tv)]
 
 instance (Tv tv, MonadU tv m) ⇒
          Show (SkelMap tv m) where
   show skm = concat $
-    [ " ⋀ {" ++ show α ++ " ∈ " ++
+    [ "\n⋀ {" ++ show α ++ " ∈ " ++
       concat (List.intersperse "≈" [ show (tvUniqueID β) | β ← βs ]) ++
       case shape of
-        Nothing      → ""
-        Just (c, γs) →
+        NoShape       → ""
+        ConShape c γs →
           " ≈ " ++ unwords (c : [ show (tvUniqueID γ) | γ ← γs ])
+        RowShape n α β →
+          " ≈ [ " ++ n ++ ": " ++ show (tvUniqueID α) ++ " | "
+                  ++ show (tvUniqueID β) ++ " ]"
       ++ "}"
-    | (α, βs, shape) ← extSkels skm ]
+    | (α, βs, shape) ← List.sortBy (\(_,x,_) (_,y,_) → compare x y)
+                                   (extSkels skm) ]
 
 extSkels ∷ MonadU tv m ⇒ SkelMap tv m → ExtSkels tv
 extSkels = unsafePerformU . extSkelsM
@@ -647,6 +672,19 @@ extSkelsM = mapM each . Map.toList . unSkelMap
     each (α, proxy) = do
       (set, mshape) ← UF.desc proxy
       return (α, Set.toList set, mshape)
+
+r _ = runUT $ do
+  let t = ConTy "T" []
+  -- α ← newTVTy
+  β ← newTVTy
+  γ ← newTVTy
+  -- δ ← newTVTy
+  -- α' ← newTVTy
+  -- β' ← newTVTy
+  -- γ' ← newTVTy
+  -- δ' ← newTVTy
+  skeletonize [(RowTy "A" t (RowTy "B" t β), RowTy "A" t (RowTy "C" t γ))
+               ]
 
 -- | Build an internal subtype constraint from an external subtype
 --   constraint.
@@ -684,40 +722,102 @@ skeletonize sc0 = do
       getShape α = do
         τ ← readTV α
         case τ of
-          Left _               → return Nothing
-          Right (ConTy con τs) → do
+          Left _                → return NoShape
+          Right (ConTy con τs)  → do
             αs     ← mapM tvOf τs
             mapM_ getSkel αs
-            return (Just (con, αs))
-          Right _              → fail $ "BUG! skeletonize"
+            return (ConShape con αs)
+          Right (RowTy n τ1 τ2) → do
+            α1     ← tvOf τ1
+            α2     ← tvOf τ2
+            rewriteTV α (RowTy n (fvTy α1) (fvTy α2))
+            getSkel α1
+            getSkel α2
+            return (RowShape n α1 α2)
+          Right _               → fail $ "BUG! skeletonize"
       --
       -- Combine two skeletons
       combiner (αs1, shape1) (αs2, shape2) = do
+        trace ("BEGIN combiner", shape1, shape2, αs1, αs2)
         shape' ← case (shape1, shape2) of
-          (Nothing, _)                  → return shape2
-          (_, Nothing)                  → return shape1
-          (Just (c1, []), Just (_, [])) → return (Just (c1, []))
-          (Just (c1, βs1), Just (c2, βs2))
+          (NoShape, _)                    → return shape2
+          (_, NoShape)                    → return shape1
+          (ConShape c1 [], ConShape _ []) → return (ConShape c1 [])
+          (ConShape c1 βs1, ConShape c2 βs2)
             | c1 == c2 && length βs1 == length βs2
                                          → do
-            sequence_ [ do
-                          unless (var ⊑ QInvariant) $ relateTVs β1 β2
-                          when (var == Invariant) $ unifyTVs β1 β2
+            sequence_ [ unless (var ⊑ QInvariant) $
+                          if var == Invariant
+                            then unifyTVs β1 β2
+                            else relateTVs β1 β2
                       | var ← getVariances c1 (length βs1)
                       | β1  ← βs1
                       | β2  ← βs2 ]
-            return (Just (c1, βs1))
+            return (ConShape c1 βs1)
+          (RowShape n1 α1 β1, RowShape n2 α2 β2)
+            | n1 == n2                   → do
+              relateTVs α1 α2
+              relateTVs β1 β2
+              return (RowShape n1 α1 β1)
+                {-
+              α  ← newTV
+              unifyTypes (fvTy β2) (RowTy n1 (fvTy α1) (fvTy α))
+              α' ← tvOf (RowTy n2 (fvTy α2) (fvTy α))
+              getSkel α'
+              rewriteTV γ2 (RowTy n1 (fvTy α1) (fvTy α'))
+              -}
+            | n1 < n2                    → do
+              α's ← sequence
+                [ do
+                    eτ2 ← readTV γ2
+                    case eτ2 of
+                      Left _  → return Nothing
+                      Right (RowTy n2 α2 β2) → do
+                        α  ← newTV
+                        β2' ← tvOf β2
+                        β2'' ← tvOf (RowTy n1 (fvTy α1) (fvTy α))
+                        relateTVs β2' β2''
+                        unifyTVs β2' β2''
+                        α' ← tvOf (RowTy n2 α2 (fvTy α))
+                        rewriteTV γ2 (RowTy n1 (fvTy α1) (fvTy α'))
+                        return (Just α')
+                      Right x → fail ("meh! " ++ show x)
+                | γ2  ← Set.toList αs2 ]
+              mapM_ (relateTVs β1) (catMaybes α's)
+              return (RowShape n1 α1 β1)
+            | n2 < n1                    → do
+              α's ← sequence
+                [ do
+                    eτ1 ← readTV γ1
+                    case eτ1 of
+                      Left _  → return Nothing
+                      Right (RowTy n1 α1 β1) → do
+                        α  ← newTV
+                        β1' ← tvOf β1
+                        β1'' ← tvOf (RowTy n2 (fvTy α2) (fvTy α))
+                        relateTVs β1' β1''
+                        unifyTVs β1' β1''
+                        α' ← tvOf (RowTy n1 α1 (fvTy α))
+                        rewriteTV γ1 (RowTy n2 (fvTy α2) (fvTy α'))
+                        return (Just α')
+                      Right x → fail ("meh! " ++ show x)
+                | γ1  ← Set.toList αs1 ]
+              mapM_ (relateTVs β2) (catMaybes α's)
+              return (RowShape n2 α2 β2)
           _                              → fail $
             "Could not unify " ++ show shape1 ++ " and " ++ show shape2
+        trace ("END combiner", shape1, shape2, αs1, αs2)
         return (Set.union αs1 αs2, shape')
+      -- Unify (at equality) two types
+      unifyTypes τ1 τ2 = join (unifyTVs <$> tvOf τ1 <*> tvOf τ2)
       -- Unify (at equality) two type variables
       unifyTVs α1 α2 = do
-        τ1 ← readTV α1
-        τ2 ← readTV α2
-        case (τ1, τ2) of
+        τ10 ← readTV α1
+        τ20 ← readTV α2
+        case (τ10, τ20) of
           (Left _, _) → linkTV α1 α2
           (_, Left _) → linkTV α2 α1
-          (Right τ1'@(ConTy c1 τs1), Right τ2'@(ConTy c2 τs2))
+          (Right (ConTy c1 τs1), Right (ConTy c2 τs2))
             | c1 == c2 && length τs1 == length τs2 → do
                 αs1 ← mapM tvOf τs1
                 αs2 ← mapM tvOf τs2
@@ -725,9 +825,20 @@ skeletonize sc0 = do
                           | var ← getVariances c1 (length αs1)
                           | α1  ← αs1
                           | α2  ← αs2 ]
-            | otherwise →
-                fail $ "Could not unify " ++ show τ1' ++ " and " ++ show τ2'
-          _ → fail "BUG! skeletonize (unifyTVs): not yet supported"
+          (Right (RowTy n1 τ1 τ1'), Right (RowTy n2 τ2 τ2'))
+            | n1 == n2                   → do
+              join (unifyTVs <$> tvOf τ1  <*> tvOf τ2)
+              join (unifyTVs <$> tvOf τ1' <*> tvOf τ2')
+            | n1 < n2                    → do
+              α  ← newTV
+              unifyTypes τ2' (RowTy n1 τ1 (fvTy α))
+              unifyTypes τ1' (RowTy n2 τ2 (fvTy α))
+            | n1 > n2                    → do
+              α  ← newTV
+              unifyTypes τ2' (RowTy n1 τ1 (fvTy α))
+              unifyTypes τ1' (RowTy n2 τ2 (fvTy α))
+          (Right τ1', Right τ2') →
+            fail $ "Could not unify " ++ show τ1' ++ " and " ++ show τ2'
       --
   mapM_ addSubtype sc0
   SkelMap <$> readRef rskels
@@ -748,11 +859,12 @@ occursCheck skm = do
   addSkel gr (α, proxy) = do
     (_, mshape) ← UF.desc proxy
     case mshape of
-      Nothing      → return gr
-      Just (c, βs) → foldM (assertGt α) gr
-                       [ β
-                       | (β, v) ← zip βs (getVariances c (length βs))
-                       , not (v ⊑ QInvariant) ]
+      NoShape         → return gr
+      ConShape c βs   → foldM (assertGt α) gr
+                          [ β
+                          | (β, v) ← zip βs (getVariances c (length βs))
+                          , not (v ⊑ QInvariant) ]
+      RowShape _ β β' → assertGt α <-> β >=> assertGt α <-> β' $ gr
   assertGt α gr β = case Map.lookup β (unSkelMap skm) of
     Nothing        → fail "BUG! occursCheck (1)"
     Just proxy     → do
@@ -779,16 +891,16 @@ expand skm0 αs0 = do
             Just proxy ← Map.lookup α <$> readRef rskels
             (_, shape) ← UF.desc proxy
             case shape of
-              Nothing      → return []
-              Just (_, []) → return []
-              Just (c, βs) → do
+              NoShape       → return []
+              ConShape _ [] → return []
+              ConShape c βs → do
                 βs' ← replicateM (length βs) newTV
                 writeTV α' (ConTy c (map fvTy βs'))
                 sequence_
                   [ do
                       Just proxy   ← Map.lookup β <$> readRef rskels
-                      (γs, shape') ← UF.desc proxy
-                      UF.setDesc proxy (Set.insert β' γs, shape')
+                      -- (γs, shape') ← UF.desc proxy
+                      -- UF.setDesc proxy (Set.insert β' γs, shape')
                       modifyRef (Map.insert β' proxy) rskels
                   | β  ← βs
                   | β' ← βs' ]
@@ -796,6 +908,14 @@ expand skm0 αs0 = do
                    map fst .
                      filter (not . isQVariance . snd) $
                        zip βs' (getVariances c (length βs'))
+              RowShape n β1 β2 → do
+                β1' ← newTV
+                β2' ← newTV
+                writeTV α' (RowTy n (fvTy β1') (fvTy β2'))
+                modifyRef (alias β1' β1 . alias β2' β2) rskels
+                return [β1', β2']
+      alias α' α m | Just v ← Map.lookup α m = Map.insert α' v m
+                   | otherwise               = error "BUG! skeletonize (alias)"
   expandTVs αs0
   skels' ← readRef rskels
   return skm0 { unSkelMap = skels' }
@@ -895,7 +1015,7 @@ rewrites:
 Run SAT as below for anything we missed.  Then, add bounds:
 
 (BOUND)
-  α ∉ lftv(C)   V(β,τ) ∈ { -, +, =, Q= }   q = q₁⊓...⊓qⱼ
+  α ∉ lftv(C)   V(α,τ) ∈ { -, +, =, Q= }   q = q₁⊓...⊓qⱼ
   ------------------------------------------------------
   α ⊑ q₁ βs₁ ⋀ ... ⋀ α ⊑ qⱼ βsⱼ ⋀ C; τ
     ---> [U/α]C; ∀α:q. τ
@@ -1190,10 +1310,10 @@ solveQualifiers value αs βs qc τ = do
     let sanitize _    []  []
           = fail $ "BUG! (subst)" ++ who ++
                    " attempt impossible substitution: " ++ show γqes0
-        sanitize _    acc []
-          = unsafeSubst state (Map.fromDistinctAscList (reverse acc))
+        sanitize _    (acc:_) [] -- XXX one at a time
+          = unsafeSubst state (Map.fromDistinctAscList (return acc))
         sanitize seen acc ((γ, QE q γs):rest)
-          | Set.member γ seen
+          | Set.member γ (Set.union seen γs)
           = sanitize seen acc rest
           | otherwise
           = sanitize (seen `Set.union` γs) ((γ, QE q γs):acc) rest
@@ -1258,8 +1378,8 @@ solveQualifiers value αs βs qc τ = do
                     βs ← case var of
                       QInvariant → Set.singleton <$> newTV
                       _          → return Set.empty
-                    warn $ "SAT: substituting " ++ show (QE q βs) ++
-                           " for type variable " ++ show δ
+                    -- warn $ "\nSAT: substituting " ++ show (QE q βs) ++
+                    --        " for type variable " ++ show δ
                     return (δ, QE q βs)
                 | δ ← Set.toAscList δs
                 , let (q, var) = decodeSatVar δ (sq_τftv state) sat
@@ -1449,3 +1569,61 @@ OPTIMIZATIONS FROM SIMONET 2003
     A × B → 1
 -}
 
+{-
+
+{#0 ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
+{#3 ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
+{[ A: #1 | [ C: #6 | #33 ] ] ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
+{#10 ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
+{#11 ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
+{[ A: #1 | #2 ] ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
+{[ C: #6 | [ A: #1 | #33 ] ] ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
+
+{#1 ∈ 1≈18 ≈ M}
+{M ∈ 1≈18 ≈ M}
+
+{#2 ∈ 2≈35 ≈ [ C: 6 | 33 ]}
+{[ C: #6 | #33 ] ∈ 2≈35 ≈ [ C: 6 | 33 ]}
+
+{[ A: #1 | #33 ] ∈ 5≈9≈25 ≈ [ B: 7 | 8 ]}
+{#9 ∈ 5≈9≈25 ≈ [ B: 7 | 8 ]}
+{[ B: #7 | #8 ] ∈ 5≈9≈25 ≈ [ B: 7 | 8 ]}
+
+{#6 ∈ 6}
+
+{#7 ∈ 7≈26 ≈ N}
+{N ∈ 7≈26 ≈ N}
+
+{#8 ∈ 8}
+
+{X ∈ 12≈13 ≈ X}
+{X ∈ 12≈13 ≈ X}
+
+{#1 → [ A: #1 | #2 ] ∈ 14≈15 ≈ -> 1 16 17}
+{M -L> #3 ∈ 14≈15 ≈ -> 1 16 17}
+
+{U ∈ 16 ≈ U}
+
+{L ∈ 19 ≈ L}
+
+{X ∈ 20≈21 ≈ X}
+{X ∈ 20≈21 ≈ X}
+
+{#7 → [ B: #7 | #8 ] ∈ 22≈23 ≈ -> 7 24 25}
+{N -L> #9 ∈ 22≈23 ≈ -> 7 24 25}
+
+{U ∈ 24 ≈ U}
+
+{L ∈ 27 ≈ L}
+
+{[ A: #1 | #33 ] → [ C: #6 | [ A: #1 | #33 ] ] ∈ 28≈29 ≈ -> 5 30 31}
+{#9 -L> #10 ∈ 28≈29 ≈ -> 5 30 31}
+
+{U ∈ 30 ≈ U}
+
+{L ∈ 32 ≈ L}
+
+{#33 ∈ 33}
+
+
+-}

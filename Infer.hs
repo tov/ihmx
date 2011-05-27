@@ -109,15 +109,9 @@ infer δ γ e0 = case e0 of
     (τ2, c2)         ← infer δ' (τs':γ) e2
     return (τ2, c' ⋀ c2 ⋀ τs ⊏* e2)
   MatTm e1 bs                   → do
-    α                ← newTVTy
-    (τ1, c1)         ← infer δ γ e1
-    cs               ← sequence
-      [ do
-          (δ', ci, _, τs) ← inferPatt δ πi (Just τ1)
-          (τi, ci') ← infer δ' (τs:γ) ei
-          return (ci ⋀ ci' ⋀ τi ≤ α ⋀ τs ⊏* ei)
-      | (πi, ei) ← bs ]
-    return (α, c1 ⋀ mconcat cs)
+    (τ1, c1) ← infer δ γ e1
+    (τ2, c2) ← inferMatch δ γ τ1 bs
+    return (τ2, c1 ⋀ c2)
   RecTm bs e2                   → do
     αs               ← replicateM (length bs) newTVTy
     cs               ← sequence
@@ -137,6 +131,11 @@ infer δ γ e0 = case e0 of
   ConTm n es                    → do
     (τs, cs)         ← unzip <$> mapM (infer δ γ) es
     return (ConTy n τs, mconcat cs)
+  LabTm b n                     → do
+    let (n1, n2, j1, j2) = if b then ("α","r",0,1) else ("r","α",1,0)
+    inst $ QuaTy AllQu [(Here n1, L), (Here n2, L)] $
+             arrTy (bvTy 0 0 (Here n1)) (qlitexp U) $
+               RowTy n (bvTy 0 j1 (Here "α")) (bvTy 0 j2 (Here "r"))
   AppTm e1 e2                   → do
     (τ1, c1)         ← infer δ γ e1
     (τ2, c2)         ← infer δ γ e2
@@ -146,6 +145,31 @@ infer δ γ e0 = case e0 of
     (δ', τ', _)      ← instAnnot δ annot
     (τ, c)           ← infer δ' γ e
     return (τ', c ⋀ τ ≤ τ')
+
+-- | To infer a type and constraint for a match form
+inferMatch ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
+             Δ tv → Γ tv → Type tv → [(Patt Empty, Term Empty)] →
+             m (Type tv, c)
+inferMatch _ _ _ [] = do
+  β ← newTVTy
+  return (β, (⊤))
+inferMatch δ γ τ ((InjPa n πi, ei):bs) | totalPatt πi = do
+  β               ← newTVTy
+  mαr             ← extractLabel n <$> derefAll τ
+  (α, r)          ← maybe ((,) <$> newTVTy <*> newTVTy) return mαr
+  (δ', ci, _, τs) ← inferPatt δ πi (Just α)
+  (τi, ci')       ← infer δ' (τs:γ) ei
+  (τk, ck)        ← if null bs
+                      then return (β, r ≤ endTy)
+                      else inferMatch δ' γ r bs
+  trace ("inferMatch", τs, ei)
+  return (β, ci ⋀ ci' ⋀ ck ⋀ τi ≤ β ⋀ τk ≤ β ⋀ τ ≤ RowTy n α r ⋀ τs ⊏* ei)
+inferMatch δ γ τ ((πi, ei):bs) = do
+  β               ← newTVTy
+  (δ', ci, _, τs) ← inferPatt δ πi (Just τ)
+  (τi, ci')       ← infer δ' (τs:γ) ei
+  (τk, ck)        ← inferMatch δ' γ τ bs
+  return (β, ci ⋀ ci' ⋀ ck ⋀ τi ≤ β ⋀ τk ≤ β ⋀ τs ⊏* ei)
 
 {-
 termFreeTypes ∷ Γ tv → Term a → [Type tv]
@@ -190,42 +214,55 @@ inferPatt ∷ (MonadU tv m, Constraint c tv) ⇒
            Δ tv → Patt Empty → Maybe (Type tv) →
            m (Δ tv, c, Type tv, [Type tv])
 inferPatt δ0 π0 mτ0 = do
-  (σ, δ, (c, τs)) ← runRWST (loop π0 1 mτ0) () δ0
+  (σ, δ, (c, τs)) ← runRWST (loop π0 mτ0) () δ0
   return (δ, c, σ, τs)
   where
   bind τ      = do tell ((⊤), [τ]); return τ
   constrain c = tell (c, [])
-  loop (VarPa _)       _ mτ = do
+  loop (VarPa _)       mτ = do
     α ← maybe newTVTy return mτ
     bind α
-  loop WldPa           _ mτ = do
+  loop WldPa           mτ = do
     α ← maybe newTVTy return mτ
     constrain (α ⊏ A)
     return α
-  loop (ConPa name πs) v mτ = do
+  loop (ConPa name πs) mτ = do
     case mτ of
-      Nothing → ConTy name <$> sequence [ loop πi 1 Nothing | πi ← πs ]
+      Nothing → ConTy name <$> sequence [ loop πi Nothing | πi ← πs ]
       Just τ0 → do
         τ ← deref τ0
         case τ of
           ConTy name' τs@(_:_) | length τs == length πs, name == name' →
             ConTy name <$> sequence
-              [ loop πi (v*vi) (Just τi)
+              [ loop πi (Just τi)
               | πi ← πs
-              | τi ← τs
-              | vi ← getVariances name (length τs) ]
+              | τi ← τs ]
           _ → do
-            τ' ← ConTy name <$> sequence [ loop πi 1 Nothing | πi ← πs ]
-            constrain (relate v τ τ')
+            τ' ← ConTy name <$> sequence [ loop πi Nothing | πi ← πs ]
+            constrain (τ ≤ τ')
             return τ
-  loop (AnnPa π annot) v mτ = do
+  loop (InjPa name π)  mτ = do
+    case mτ of
+      Nothing → RowTy name <$> loop π Nothing <*> pure endTy
+      Just τ0 → do
+        τ ← deref τ0
+        case τ of
+          RowTy name' τ' τr | name == name' → do
+            τ' ← RowTy name <$> loop π (Just τ') <*> pure endTy
+            constrain (τr ≤ endTy)
+            return τ'
+          _ → do
+            τ' ← RowTy name <$> loop π Nothing <*> pure endTy
+            constrain (τ ≤ τ')
+            return τ
+  loop (AnnPa π annot) mτ = do
     δ ← get
     (δ', τ', _) ← lift (instAnnot δ annot)
     put δ'
-    τ ← loop π v (Just τ')
+    τ ← loop π (Just τ')
     case mτ of
       Just τ'' → do
-        constrain (relate v τ'' τ)
+        constrain (τ'' ≤ τ)
         return τ''
       Nothing  → return τ
 
@@ -279,7 +316,8 @@ showInfer e = runU $ do
   return (τ', show c)
 
 stringifyType ∷ (MonadU s m, Show s) ⇒ Type s → m (Type String)
-stringifyType = foldType QuaTy (const bvTy) (fvTy . show) ConTy where ?deref = readTV
+stringifyType = foldType QuaTy (const bvTy) (fvTy . show) ConTy RowTy
+  where ?deref = readTV
 
 {-
 -- | Given a type, strip off the outermost quantifier and make the bound
@@ -921,6 +959,8 @@ inferFnTests = T.test
   , te "λ(f: Ref A α → α) (x: Ref L α). f x"
   , "λ(f: Ref α β → β) (x: Ref α β). f x"
       -: "∀ α β. (Ref α β → β) → Ref α β → β"
+  , "choose ((λ_ _.X) : X -> X -R> X) ((λ_ _.X) : X -> X -A> X)"
+      -: "X → X -L> X"
   --
   -- Generalization with non-empty Γ
   --
@@ -928,6 +968,51 @@ inferFnTests = T.test
       -: "∀ α:R, β. (B -α> B) → Pair (B -α> B) (((B -α> B) -L> β) -α> β)"
   , "λ(f : B -α> B). let g = λh. h f in g"
       -: "∀ α β. (B -α> B) → ((B -α> B) -L> β) -α> β"
+  --
+  -- Row types
+  --
+  , "choose (`A M) (`A M)"
+      -: "∀ r. [ A: M | r ]"
+  , te "choose (`A M) (`A N)"
+  , "choose (`A M) (`B N)"
+      -: "∀ r. [ A: M | B: N | r ]"
+  , "choose (`A M) (choose (`B N) (`C Q))"
+      -: "∀ r. [ A: M | B: N | C: Q | r ]"
+  , "choose (`A M) (#C (`B N))"
+      -: "∀ α r. [ A: M | B: N | C: α | r ]"
+  , "choose (#C (`A M)) (#C (`B N))"
+      -: "∀ α r. [ A: M | B: N | C: α | r ]"
+  , "choose (#B (`A M)) (#C (`B N))"
+      -: "∀ α r. [ A: M | B: N | C: α | r ]"
+  , "choose (#C (`A M)) (#A (`B N))"
+      -: "∀ α r. [ A: M | B: N | C: α | r ]"
+  , "choose (#A (`A M)) (#A (`B N))"
+      -: "∀ α r. [ A: α | A: M | B: N | r ]"
+  , "choose (#A (`A M)) (`A N)"
+      -: "∀ r. [ A: N | A: M | r ]"
+  , "λx. match x with `A y → y"
+      -: "∀ α. [ A: α ] → α"
+  , "λx. match x with `A y → y | `B y → y"
+      -: "∀ α. [ A: α | B: α ] → α"
+  , "λx. match x with `A y → y | `B y → M y"
+      -: "∀ α. [ A: M α | B: α ] → M α"
+  , te "λx. match x with `A y → y | `B y → x" -- occurs check
+  , "λx. match x with `A y → y | `A y → M y"
+      -: "∀ α. [ A: M α | A: α ] → M α"
+  , "λx. match x with `A y → y | `B y → y | _ → botU"
+      -: "∀ α r. [ A: α | B: α | r ] → α"
+  , "λx. match x with `A y → `B y | `B y → `A y | y → #A (#B y)"
+      -: "∀ α β r. [ A: α | B: β | r ] → [ A: β | B: α | r]"
+  , "λx. match x with `A y → `B y | `B y → `A y | y → #B (#A y)"
+      -: "∀ α β r. [ A: α | B: β | r ] → [ A: β | B: α | r]"
+  , "λf. f (`A M)"
+      -: "∀ r β. ([ A: M | r ] -L> β) → β"
+  , "λf. eat (f (`A M)) (f (`B N))"
+      -: "∀ r β. ([ A: M | B: N | r ] -R> β) → β"
+  , "λx. match x with `A _ → M | `B y → y"
+      -: "∀ α:A. [ A: α | B: M ] → M"
+  , "choose (`A ((λ_ _.X) : X -> X -R> X)) (`A ((λ_ _.X) : X -> X -A> X))"
+      -: "∀ r. [ A: X → X -L> X | r ]"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"

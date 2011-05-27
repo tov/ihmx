@@ -95,6 +95,7 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
   tvOf ∷ Type tv → m tv
   tvOf (VarTy (FreeVar α)) = reprTV α
   tvOf τ = do
+    trace ("tvOf", τ)
     α ← newTV
     writeTV_ α τ
     return α
@@ -121,6 +122,13 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
     case mτα of
       Nothing → writeTV_ α' τ
       Just _  → fail "BUG! writeTV: Tried to overwrite type variable"
+  -- | Write a type into a type variable, even if it's not empty.
+  rewriteTV   ∷ tv → Type tv → m ()
+  rewriteTV α τ = do
+    setChanged
+    (α', mτα) ← rootTV α
+    trace ("rewriteTV", (α', mτα), τ)
+    writeTV_ α' τ
   -- | Allocate a new type variable and wrap it in a type
   newTVTy   ∷ m (Type tv)
   newTVTy   = liftM fvTy newTV
@@ -151,7 +159,8 @@ instance Derefable a m ⇒ Derefable [a] m where
 instance MonadU tv m ⇒ Derefable (Type tv) m where
   deref (VarTy (FreeVar α)) = derefTV α
   deref τ                   = return τ
-  derefAll = foldType QuaTy (const bvTy) fvTy ConTy where ?deref = readTV
+  derefAll = foldType QuaTy (const bvTy) fvTy ConTy RowTy
+    where ?deref = readTV
 
 -- | Assert that a type variable is ununified
 isUnifiableTV ∷ MonadU tv m ⇒ tv → m Bool
@@ -235,9 +244,9 @@ instance Ppr (TV s) where
 
 instance Show (TV s) where
   showsPrec p tv = case (debug, unsafeReadTV tv) of
-    (True, Just t) → showsPrec p t
-                     -- showChar '#' . shows (tvId tv) . showChar '[' .
-                     -- shows t . showChar ']'
+    (True, Just t) → -- showsPrec p t
+                     shows (tvId tv) . showChar '=' .
+                     showsPrec 2 t
     _              → showChar '#' . shows (tvId tv)
 
 instance Ftv (TV s) (TV s) where
@@ -361,7 +370,7 @@ unsafeReadTV ∷ TV s → Maybe (TypeR s)
 unsafeReadTV TV { tvRef = r } = unsafeReadRef r
 
 debug ∷ Bool
-debug = False
+debug = True
 
 warn ∷ MonadU r m ⇒ String → m ()
 warn = unsafeIOToU . hPutStrLn stderr

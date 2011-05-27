@@ -19,6 +19,7 @@ module Util (
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
   (<$.>), (<$$.>), (<$$$.>), (<$$$$.>),
   (<->), (<-->), (<--->), (<---->), (<----->),
+  mapHead, mapTail, mapInit, mapLast,
 ) where
 
 {-
@@ -157,3 +158,20 @@ f <----> x = (<---> x) <$> f
 f <-----> x = (<----> x) <$> f
 
 infixl 4 <->, <-->, <--->, <---->, <----->
+
+mapHead, mapTail, mapInit, mapLast ∷ (a → a) → [a] → [a]
+
+mapHead _ []     = []
+mapHead f (x:xs) = f x : xs
+
+mapTail _ []     = []
+mapTail f (x:xs) = x : map f xs
+
+mapInit _ []     = []
+mapInit _ [x]    = [x]
+mapInit f (x:xs) = f x : mapInit f xs
+
+mapLast _ []     = []
+mapLast f [x]    = [f x]
+mapLast f (x:xs) = x : mapLast f xs
+
