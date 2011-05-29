@@ -189,7 +189,20 @@ data SubtypeConstraint r
       scTypes ∷ [(Type r, Type r)],
       scQuals ∷ [(Type r, Type r)]
     }
-  deriving (Show)
+
+instance Ppr r ⇒ Show (SubtypeConstraint r) where
+  showsPrec _ sc = case sc of
+    SC [] [] → id
+    SC ts [] → brak $ showsTypes ts
+    SC [] qs → brak $ showsQuals qs
+    SC ts qs → brak $ showsTypes ts . showString "; " . showsQuals qs
+    where
+      brak s         = showChar '[' . s . showChar ']'
+      showsTypes     = showsIneqs " <: "
+      showsQuals     = showsIneqs " ⊑ "
+      showsIneqs cmp = foldr (.) id
+                     . List.intersperse (showString ", ")
+                     . map (\(x,y) → shows x . showString cmp . shows y)
 
 instance Monoid (SubtypeConstraint r) where
   mempty      = SC [] []
@@ -209,7 +222,7 @@ type LN r = Gr.LNode (Atom r)
 -}
 
 instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
-  τ  ≤ τ'  = SC [(τ, τ')] []
+  τ  ≤ τ' = SC [(τ, τ')] []
   q  ⊏ q' = SC [] [(toQualifierType q, toQualifierType q')]
   --
   -- Generalization proceeds in several steps:
@@ -282,12 +295,12 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
   -- 13. generalize: candidates that are not free in the constraint
   gen' value (SC c qc) γ τ = do
     let ?deref = readTV
-    trace ("gen (begin)", (c, qc), τ)
+    trace ("gen (begin)", SC c qc, τ)
     skm1         ← skeletonize c
     trace ("gen (skeletonized)", skm1, c, τ)
-    αs           ← occursCheck skm1
-    trace ("gen (occursCheck)", αs)
-    skm2         ← expand skm1 αs
+    (αs, μs)     ← occursCheck skm1
+    trace ("gen (occursCheck)", αs, μs)
+    skm2         ← expand skm1 αs μs
     trace ("gen (expand)", skm2, c, τ)
     (c, qc)      ← decompose (c, qc)
     γftv         ← ftvSet γ
@@ -775,78 +788,90 @@ skeletonize sc0 = do
 
 -- | Make sure an internal subtype constraint is consistent with a
 --   finite model. Returns the type variables topologically sorted by
---   size (smallest first).
+--   size (largest first), and a list of type variables to avoid
+--   expanding because they are involved in (legal) cycles.
 occursCheck ∷ ∀ tv m. MonadU tv m ⇒
-              SkelMap tv m → m [tv]
+              SkelMap tv m → m ([tv], [tv])
 occursCheck skm = do
   let skels = Map.toList (unSkelMap skm)
       gr0   = Gr.insNodes [ (tvUniqueID α, α) | (α, _) ← skels ] Gr.empty
   gr  ← foldM addSkel gr0 skels
-  let scc = Gr.labScc (gr ∷ Gr tv ())
+  let scc = Gr.labScc (gr ∷ Gr tv Bool)
   trace ("occursCheck", Gr.edges gr, scc)
-  mapM checkSCC scc
+  mconcatMapM (checkSCC gr) scc
   where
   addSkel gr (α, proxy) = do
     (_, mshape) ← UF.desc proxy
     case mshape of
       NoShape         → return gr
-      ConShape c βs   → foldM (assertGt α) gr
+      ConShape c βs   → foldM (assertGt False α) gr
                           [ β
                           | (β, v) ← zip βs (getVariances c (length βs))
                           , not (v ⊑ QInvariant) ]
-      RowShape _ β β' → assertGt α <-> β >=> assertGt α <-> β' $ gr
-  assertGt α gr β = case Map.lookup β (unSkelMap skm) of
+      RowShape _ β β' → assertGt True α <-> β >=> assertGt False α <-> β' $ gr
+  assertGt ok α gr β = case Map.lookup β (unSkelMap skm) of
     Nothing        → fail "BUG! occursCheck (1)"
     Just proxy     → do
       (βs, _) ← UF.desc proxy
-      return (foldr (addEdgeTo α) gr (Set.toList βs))
-  addEdgeTo α β    = Gr.insEdge (tvUniqueID β, tvUniqueID α, ())
-  checkSCC [(_,α)] = return α
-  checkSCC lns     = fail $ "Occurs check failed: " ++ show (map snd lns)
+      return (foldr (addEdgeTo ok α) gr (Set.toList βs))
+  addEdgeTo ok α β = Gr.insEdge (tvUniqueID β, tvUniqueID α, ok)
+  checkSCC _  [(_,α)] = return ([α], [])
+  checkSCC gr lns     =
+    let nodes = Set.fromList (map fst lns) in
+     if null [ ()
+             | (n, _)     ← lns
+             , (n', True) ← Gr.lsuc gr n
+             , n' `Set.member` nodes ]
+      then fail $ "Occurs check failed: " ++ show (map snd lns)
+      else return ([], map snd lns)
 
 -- | Expand all type variables to their full shape.
 expand ∷ MonadU tv m ⇒
-         SkelMap tv m → [tv] → m (SkelMap tv m)
-expand skm0 αs0 = do
+         -- | the skeletons
+         SkelMap tv m →
+         -- | variables in order of expansion
+         [tv] →
+         -- | variables not to expand
+         [tv] →
+         m (SkelMap tv m)
+expand skm0 αs0 μs0 = do
   rskels ← newRef (unSkelMap skm0)
-  let expandTVs []     = return ()
-      expandTVs (α:αs) = do
-        αs' ← expandTV α
-        expandTVs (αs'++αs)
+  let noExpand   = Set.fromList μs0
       expandTV α = do
-        eτ         ← readTV α
+        eτ ← readTV α
         case eτ of
-          Right _ → return []
+          Right _ → return ()
           Left α' → do
             Just proxy ← Map.lookup α <$> readRef rskels
-            (_, shape) ← UF.desc proxy
-            case shape of
-              NoShape       → return []
-              ConShape _ [] → return []
-              ConShape c βs → do
-                βs' ← replicateM (length βs) newTV
-                writeTV α' (ConTy c (map fvTy βs'))
-                sequence_
-                  [ do
-                      Just proxy   ← Map.lookup β <$> readRef rskels
-                      -- (γs, shape') ← UF.desc proxy
-                      -- UF.setDesc proxy (Set.insert β' γs, shape')
-                      modifyRef (Map.insert β' proxy) rskels
-                  | β  ← βs
-                  | β' ← βs' ]
-                return .
-                   map fst .
-                     filter (not . isQVariance . snd) $
-                       zip βs' (getVariances c (length βs'))
-              RowShape n β1 β2 → do
-                β1' ← newTV
-                β2' ← newTV
-                writeTV α' (RowTy n (fvTy β1') (fvTy β2'))
-                modifyRef (alias β1' β1 . alias β2' β2) rskels
-                return [β1', β2']
+            (αs, shape) ← UF.desc proxy
+            when (Set.null (αs `Set.intersection` noExpand)) $
+              case shape of
+                NoShape       → return ()
+                ConShape _ [] → return ()
+                ConShape c βs → do
+                  βs' ← replicateM (length βs) newTV
+                  writeTV α' (ConTy c (map fvTy βs'))
+                  sequence_
+                    [ do
+                        Just proxy   ← Map.lookup β <$> readRef rskels
+                        -- (γs, shape') ← UF.desc proxy
+                        -- UF.setDesc proxy (Set.insert β' γs, shape')
+                        modifyRef (Map.insert β' proxy) rskels
+                    | β  ← βs
+                    | β' ← βs' ]
+                  mapM_ (expandTV . fst) .
+                    filter (not . isQVariance . snd) $
+                      zip βs' (getVariances c (length βs'))
+                RowShape n β1 β2 → do
+                  β1' ← newTV
+                  β2' ← newTV
+                  writeTV α' (RowTy n (fvTy β1') (fvTy β2'))
+                  modifyRef (alias β1' β1 . alias β2' β2) rskels
+                  expandTV β1'
+                  expandTV β2'
       alias α' α m | Just v ← Map.lookup α m = Map.insert α' v m
                    | otherwise               = error "BUG! skeletonize (alias)"
-  expandTVs αs0
+  mapM_ expandTV αs0
   skels' ← readRef rskels
   return skm0 { unSkelMap = skels' }
 
@@ -1499,61 +1524,3 @@ OPTIMIZATIONS FROM SIMONET 2003
     A × B → 1
 -}
 
-{-
-
-{#0 ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
-{#3 ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
-{[ A: #1 | [ C: #6 | #33 ] ] ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
-{#10 ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
-{#11 ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
-{[ A: #1 | #2 ] ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
-{[ C: #6 | [ A: #1 | #33 ] ] ∈ 0≈3≈4≈10≈11≈17≈31 ≈ [ A: 1 | 2 ]}
-
-{#1 ∈ 1≈18 ≈ M}
-{M ∈ 1≈18 ≈ M}
-
-{#2 ∈ 2≈35 ≈ [ C: 6 | 33 ]}
-{[ C: #6 | #33 ] ∈ 2≈35 ≈ [ C: 6 | 33 ]}
-
-{[ A: #1 | #33 ] ∈ 5≈9≈25 ≈ [ B: 7 | 8 ]}
-{#9 ∈ 5≈9≈25 ≈ [ B: 7 | 8 ]}
-{[ B: #7 | #8 ] ∈ 5≈9≈25 ≈ [ B: 7 | 8 ]}
-
-{#6 ∈ 6}
-
-{#7 ∈ 7≈26 ≈ N}
-{N ∈ 7≈26 ≈ N}
-
-{#8 ∈ 8}
-
-{X ∈ 12≈13 ≈ X}
-{X ∈ 12≈13 ≈ X}
-
-{#1 → [ A: #1 | #2 ] ∈ 14≈15 ≈ -> 1 16 17}
-{M -L> #3 ∈ 14≈15 ≈ -> 1 16 17}
-
-{U ∈ 16 ≈ U}
-
-{L ∈ 19 ≈ L}
-
-{X ∈ 20≈21 ≈ X}
-{X ∈ 20≈21 ≈ X}
-
-{#7 → [ B: #7 | #8 ] ∈ 22≈23 ≈ -> 7 24 25}
-{N -L> #9 ∈ 22≈23 ≈ -> 7 24 25}
-
-{U ∈ 24 ≈ U}
-
-{L ∈ 27 ≈ L}
-
-{[ A: #1 | #33 ] → [ C: #6 | [ A: #1 | #33 ] ] ∈ 28≈29 ≈ -> 5 30 31}
-{#9 -L> #10 ∈ 28≈29 ≈ -> 5 30 31}
-
-{U ∈ 30 ≈ U}
-
-{L ∈ 32 ≈ L}
-
-{#33 ∈ 33}
-
-
--}

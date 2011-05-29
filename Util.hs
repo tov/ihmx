@@ -14,7 +14,7 @@ module Util (
   -- module Data.Foldable,
   -- module Data.Traversable,
   findLastIndex, listNth,
-  allM, whenM, unlessM, foldr2, ordNub, concatMapM, foldM1,
+  allM, whenM, unlessM, foldr2, ordNub, concatMapM, mconcatMapM, foldM1,
   before,
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
   (<$.>), (<$$.>), (<$$$.>), (<$$$$.>),
@@ -75,6 +75,9 @@ ordNub = loop Set.empty where
 
 concatMapM   ∷ Monad m ⇒ (a → m [b]) → [a] → m [b]
 concatMapM f = foldr (liftM2 (++) . f) (return [])
+
+mconcatMapM   ∷ (Monad m, Monoid b) ⇒ (a → m b) → [a] → m b
+mconcatMapM f = foldr (liftM2 mappend . f) (return mempty)
 
 foldM1       ∷ Monad m ⇒ (a → a → m a) → [a] → m a
 foldM1 _ []     = fail "foldM1: empty"

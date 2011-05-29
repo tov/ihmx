@@ -1441,6 +1441,7 @@ parsePatt p = withState [] $ (,) <$> level p <*> getState where
 -- | To parse a closed term.
 instance Parsable (Term a) where
   genParser  = withState [] $ do
+    whiteSpace tok
     (e, free) ← parseTerm (map fst γ0')
     case free of
       [] → return e

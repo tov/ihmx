@@ -309,10 +309,11 @@ extractPattAnnot π0 = do
 --- Testing functions
 ---
 
-check ∷ String → IO (Type String, String)
+check ∷ String → IO ()
 check e = case showInfer (read e) of
-  Left err → fail err
-  Right τc → return τc
+  Left err    → fail err
+  Right (τ,c) →
+    putStrLn $ show τ ++ if null c then "" else " constraint " ++ c
 
 showInfer ∷ Term Empty → Either String (Type String, String)
 showInfer e = runU $ do

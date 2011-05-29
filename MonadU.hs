@@ -370,7 +370,7 @@ unsafeReadTV ∷ TV s → Maybe (TypeR s)
 unsafeReadTV TV { tvRef = r } = unsafeReadRef r
 
 debug ∷ Bool
-debug = False
+debug = True
 
 warn ∷ MonadU r m ⇒ String → m ()
 warn = unsafeIOToU . hPutStrLn stderr

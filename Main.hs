@@ -21,6 +21,7 @@ repl = do
       case runParser (genParser <* eof) [] "" line of
         Left err  -> hPutStrLn stderr (show err)
         Right exp -> case showInfer exp of
-          Left err  -> hPutStrLn stderr err
-          Right t   -> print t
+          Left err    -> hPutStrLn stderr err
+          Right (t,c) ->
+            putStrLn $ show t ++ if null c then "" else " constraint " ++ c
       repl
