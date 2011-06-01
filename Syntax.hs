@@ -2,13 +2,14 @@
       BangPatterns,
       DeriveFunctor,
       EmptyDataDecls,
-      ExistentialQuantification,
       FlexibleInstances,
       FunctionalDependencies,
       ImplicitParams,
       MultiParamTypeClasses,
       ParallelListComp,
       PatternGuards,
+      RankNTypes,
+      ScopedTypeVariables,
       StandaloneDeriving,
       TupleSections,
       TypeSynonymInstances,
@@ -86,7 +87,9 @@ infixl 7 ⊓
 infix 4 ⊑, ⊒
 
 data QLit = U | R | A | L
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
+  -- NB: Ord instance is not the subsumption order, but merely an order
+  -- used for binary search trees.
 
 readQLit ∷ String → Maybe QLit
 readQLit "U" = Just U
@@ -398,7 +401,10 @@ data Type a
   | VarTy (Var a)
   | ConTy Name [Type a]
   | RowTy Name (Type a) (Type a)
-  deriving (Eq, Functor)
+  | RecTy (Perhaps Name) (Type a)
+  deriving (Eq, Ord, Functor)
+  -- NB: Ord instance is not the subsumption order, but merely an order
+  -- used for binary search trees.
 
 -- | Quantifiers
 data Quant
@@ -442,28 +448,30 @@ annot0  = Annot ["_"] (fvTy "_")
 type Deref m v = v → m (Either v (Type v))
 
 -- | Fold a type, while dereferencing type variables
-foldType ∷ (Monad m, ?deref ∷ Deref m v) ⇒
+foldType ∷ ∀ m v r s. (Monad m, ?deref ∷ Deref m v) ⇒
            -- | For quantifiers
-           (Quant → [(Perhaps Name, QLit)] → r → r) →
+           (∀a. Quant → [(Perhaps Name, QLit)] → ([s] → (r → r) → a) → a) →
            -- | For bound variables
-           (Maybe QLit → Int → Int → Perhaps Name → r) →
+           (Either s (Int, Int) → Perhaps Name → r) →
            -- | For free variables
            (v → r) →
            -- | For constructor applications
            (Name → [r] → r) →
            -- | For row type labels
            (Name → r → r → r) →
+           -- | For recursive types
+           (∀a. Perhaps Name → (s → (r → r) → a) → a) →
            -- | Type to fold
            Type v →
            m r
-foldType fquant fbvar ffvar fcon frow t0 =
+foldType fquant fbvar ffvar fcon frow frec t0 =
   let ?deref = lift . ?deref in CMR.runReaderT (loop t0) []
   where
   loop (QuaTy q αs t)           =
-    fquant q αs `liftM` CMR.local (map snd αs:) (loop t)
+    fquant q αs $ \ss f → f `liftM` CMR.local (ss:) (loop t)
   loop (VarTy (BoundVar i j n)) = do
     env ← CMR.ask
-    return (fbvar (look i j env) i j n)
+    return (fbvar (look i j env) n)
   loop (VarTy (FreeVar v))      = do
     mt ← ?deref v
     case mt of
@@ -478,42 +486,49 @@ foldType fquant fbvar ffvar fcon frow t0 =
       | v ← getVariances n (length ts) ]
   loop (RowTy n t1 t2)          =
     frow n `liftM` loop t1 `ap` loop t2
+  loop (RecTy n t)              =
+    frec n (\s f → f `liftM` CMR.local ([s]:) (loop t))
   --
   look i j env
     | rib:_ ← drop i env
-    , elt:_ ← drop j rib = Just elt
-  look _ _ _             = Nothing
+    , elt:_ ← drop j rib = Left elt
+  look i j _             = Right (i, j)
 
 -- | Get the qualifier of a type
 qualifier ∷ (Monad m, ?deref ∷ Deref m v) ⇒
             Type v → m (QExp v)
-qualifier = foldType fquant fbvar ffvar fcon frow
+qualifier = foldType fquant fbvar ffvar fcon frow frec
   where
-  fquant _ _ (QExp q vs) = QExp q (bumpVar (-1) <$> vs)
-  fbvar (Just ql) _ _ _  = qlitexp ql
-  fbvar Nothing   i j n  = qvarexp (BoundVar i j n)
+  fquant _ αs k          = k (map snd αs) bumpQExp
+  fbvar (Left ql)     _  = qlitexp ql
+  fbvar (Right (i,j)) n  = qvarexp (BoundVar i j n)
   ffvar                  = qvarexp . FreeVar
   fcon n qes             = getQualifier n qes
   frow _ qe1 qe2         = getQualifier "*" [qe1, qe2]
+  frec _ k               = k U bumpQExp
+  bumpQExp (QExp q vs) = QExp q (bumpVar (-1) <$> vs)
 
 -- | Get something in the *form* of a qualifier without dereferencing
 pureQualifier ∷ Type v → QExp v
 pureQualifier t = runIdentity (qualifier t) where ?deref = return . Left
 
 -- | Monadic version of type folding
-foldTypeM ∷ (Monad m, ?deref ∷ Deref m v) ⇒
-            (Quant → [(Perhaps Name, QLit)] → r → m r) →
-            (Maybe QLit → Int → Int → Perhaps Name → m r) →
-            (v → m r) →
-            (Name → [r] → m r) →
-            (Name → r → r → m r) →
-            Type v →
-            m r
-foldTypeM fquant fbvar ffvar fcon frow t =
-  join (foldType fquantM fbvar ffvar fconM frowM t) where
-    fquantM q αs mr  = fquant q αs =<< mr
-    fconM c mrs      = fcon c =<< sequence mrs
-    frowM c t1 t2    = join (frow c `liftM` t1 `ap` t2)
+foldTypeM
+  ∷ ∀m v r s. (Monad m, ?deref ∷ Deref m v) ⇒
+    (∀a. Quant → [(Perhaps Name, QLit)] → ([s] → (r → m r) → a) → a) →
+    (Either s (Int, Int) → Perhaps Name → m r) →
+    (v → m r) →
+    (Name → [r] → m r) →
+    (Name → r → r → m r) →
+    (∀a. Perhaps Name → (s → (r → m r) → a) → a) →
+    Type v →
+    m r
+foldTypeM fquant fbvar ffvar fcon frow frec t =
+  join (foldType fquantM fbvar ffvar fconM frowM frecM t) where
+    fquantM q αs k = fquant q αs $ k <$.> (=<<)
+    fconM c mrs    = fcon c =<< sequence mrs
+    frowM c t1 t2  = join (frow c `liftM` t1 `ap` t2)
+    frecM n k      = frec n $ k <$.> (=<<)
 
 -- The type monad does substitution
 instance Monad Type where
@@ -522,6 +537,7 @@ instance Monad Type where
   VarTy (BoundVar i j n) >>= _ = VarTy (BoundVar i j n)
   ConTy n ts             >>= f = ConTy n (map (>>= f) ts)
   RowTy n t1 t2          >>= f = RowTy n (t1 >>= f) (t2 >>= f)
+  RecTy n t              >>= f = RecTy n (t >>= f)
   return = VarTy . FreeVar
 
 -- | Apply a total substitution to a free type variable.  Total in this
@@ -536,27 +552,34 @@ totalSubst _ _ _ = error "BUG! substsAll saw unexpected free tv"
 -- | Use the given function to substitute for the free variables
 --   of a type; allows changing the ftv representation.
 typeMapM ∷ Monad m ⇒ (a → m (Type b)) → Type a → m (Type b)
-typeMapM f = foldTypeM (return <$$$> QuaTy)
-                       (const (return <$$$> bvTy))
+typeMapM f = foldTypeM (\q αs k → k (map (0,) [0..length αs - 1])
+                                    (return <$> QuaTy q αs))
+                       (return <$$> uncurry bvTy . either id id)
                        f
                        (return <$$> ConTy)
                        (return <$$$> RowTy)
+                       (\n k → k (0,0) (return <$> RecTy n))
              where ?deref = return . Left
 
 -- | Is the given type ground (type-variable and quantifier free)?
 isGroundType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
-isGroundType = foldType (\_ _ _ → False) (\_ _ _ _ → False)
+isGroundType = foldType (\_ _ k → k (repeat False) (const False))
+                        (const . either id (const False))
                         (\_ → False) (\_ → and) (\_ → (&&))
+                        (\_ k → k True id)
 
 -- | Is the given type closed? (ASSUMPTION: The type is locally closed)
 isClosedType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
-isClosedType = foldType (\_ _ → id) (\_ _ _ _ → True) (\_ → False)
-                        (\_ → and) (\_ → (&&))
+isClosedType = foldType (\_ _ k → k (repeat True) id)
+                        (const . either id (const False))
+                        (\_ → False) (\_ → and) (\_ → (&&))
+                        (\_ k → k True id)
 
 -- | Is the given type quantifier free?
 isMonoType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
-isMonoType = foldType (\_ _ _ → False) (\_ _ _ _ → True) (\_ → True)
-                      (\_ → and) (\_ → (&&))
+isMonoType = foldType (\_ _ k → k (repeat ()) (const False))
+                      (\_ _ → True) (\_ → True) (\_ → and) (\_ → (&&))
+                      (\_ k → k () id)
 
 -- | Is the given type (universal) prenex?
 --   (Precondition: the argument is standard)
@@ -587,11 +610,12 @@ pattSize (InjPa _ π)  = pattSize π
 pattSize (AnnPa π _)  = pattSize π
 
 totalPatt ∷ Patt a → Bool
-totalPatt (VarPa _)   = True
-totalPatt WldPa       = True
-totalPatt (ConPa _ _) = False
-totalPatt (InjPa _ _) = False
-totalPatt (AnnPa π _) = totalPatt π
+totalPatt (VarPa _)         = True
+totalPatt WldPa             = True
+totalPatt (ConPa "Pair" πs) = all totalPatt πs
+totalPatt (ConPa _ _)       = False
+totalPatt (InjPa _ _)       = False
+totalPatt (AnnPa π _)       = totalPatt π
 
 pattHasWild ∷ Patt a → Bool
 pattHasWild (VarPa _)    = False
@@ -727,6 +751,7 @@ openTyN n k vs t0 = case t0 of
   VarTy v          → openTV_N n k vs v
   ConTy name ts    → ConTy name (map this ts)
   RowTy name t1 t2 → RowTy name (this t1) (this t2)
+  RecTy name t     → RecTy name (next t)
   where
     this = openTyN n k vs
     next = openTyN n (k + 1) vs
@@ -755,6 +780,7 @@ closeTy k vs t0 = case t0 of
     | otherwise → VarTy (FreeVar v)
   ConTy n ts    → ConTy n (map this ts)
   RowTy n t1 t2 → RowTy n (this t1) (this t2)
+  RecTy n t     → RecTy n (next t)
   where
     this = closeTy k vs
     next = closeTy (k + 1) vs
@@ -795,6 +821,7 @@ lcTy  = loop 0 where
   loop _ (VarTy (FreeVar _))      = True
   loop k (ConTy _ ts)             = all (loop k) ts
   loop k (RowTy _ t1 t2)          = loop k t1 && loop k t2
+  loop k (RecTy _ t)              = loop (k + 1) t
 
 -- | Are there no bound vars of level k?
 lcTyK ∷ Int → Type a → Bool
@@ -804,6 +831,19 @@ lcTyK  = loop where
   loop _ (VarTy (FreeVar _))      = True
   loop k (ConTy _ ts)             = all (loop k) ts
   loop k (RowTy _ t1 t2)          = loop k t1 && loop k t2
+  loop k (RecTy _ t)              = loop (k + 1) t
+
+-- | Is the given type contractive at the given level? (A type is
+--   contractive if all occurrences of level k type variables appear
+--   under the field position of a row type.)
+contractiveTy ∷ Type a → Bool
+contractiveTy = loop 0 where
+  loop k (QuaTy _ _ t)            = loop (k + 1) t
+  loop k (VarTy (BoundVar i _ _)) = k /= i
+  loop _ (VarTy (FreeVar _))      = True
+  loop k (ConTy _ ts)             = all (loop k) ts
+  loop k (RowTy _ _ t2)           = loop k t2 -- don't check field
+  loop k (RecTy _ t)              = loop (k + 1) t
 
 -- | Rename the variables at rib level k, where we adjust the rib levels
 --   in the new names as we traverse under binders.
@@ -1084,14 +1124,15 @@ class Ord v ⇒ Ftv a v | a → v where
 
 instance Ord v ⇒ Ftv (Type v) v where
   ftvTree = foldType
-             (\_ _ tree → tree)
-             (\_ _ _ → mempty)
+             (\_ _ k → k (repeat ()) id)
+             (\_ _ → mempty)
              FTSingle
              (\c trees → FTBranch
                  [ FTVariance (* var) tree
                  | tree ← trees
                  | var  ← getVariances c (length trees) ])
              (\_ t1 t2 → FTBranch [t1, t2])
+             (\_ k → k () id)
 
 instance Ftv a v ⇒ Ftv [a] v where
   ftvTree a = FTBranch `liftM` mapM ftvTree a
@@ -1130,6 +1171,10 @@ unfoldRow ∷ Type a → ([(Name, Type a)], Type a)
 unfoldRow = first (List.sortBy (compare <$> fst <$.> fst)) . loop where
   loop (RowTy n t1 t2) = first ((n, t1):) (loop t2)
   loop t               = ([], t)
+
+unfoldRec ∷ Type a → ([Perhaps Name], Type a)
+unfoldRec (RecTy pn t) = first (pn:) (unfoldRec t)
+unfoldRec t            = ([], t)
 
 -- To find the operator and operands of a curried application.
 unfoldApp ∷ Term a → (Term a, [Term a])
@@ -1191,6 +1236,9 @@ matchLabels t10 t20 = (pairs, (extra1, ext1), (extra2, ext2))
 --     order that they appear in its scope.  That is,
 --     ‘∀ α β γ. C α γ β’ is not standard, but ‘∀ α β γ. C α β γ’ is.
 --
+--   * Type variables bound by μ appear in their scope, and there are
+--     never multiple, immediately nested μs.
+--
 --  Type standardization is necessary as a post-pass after parsing,
 --  because it's difficult to parse into standard form directly.
 class Ord v ⇒ Standardizable a v | a → v where
@@ -1208,7 +1256,7 @@ instance Ord v ⇒ Standardizable (Type v) v where
         rn ← ST.newSTRef []
         let (qls, t) = unfoldQua u t0
             i        = length qls
-            g'       = (depth + i, rn,) <$$> qls
+            g'       = (depth + i, rn, False,) <$$> qls
         t' ← loop (depth + i) (g' ++ g) t
         nl ← ST.readSTRef rn
         return $ case nl of
@@ -1228,20 +1276,38 @@ instance Ord v ⇒ Standardizable (Type v) v where
           | (ni, ti) ← row ]
         ext' ← loop depth g ext
         return (foldRow row' ext')
+      RecTy pn _            → do
+        rn ← ST.newSTRef []
+        let (pns, t) = unfoldRec t0
+            i        = length pns
+            g'       = (depth + i, rn, True,) <$$> replicate i [L]
+        t' ← loop (depth + i) (g' ++ g) t
+        nl ← ST.readSTRef rn
+        return $
+          if null nl
+            then openTyN i (-1) [] t'
+            else RecTy pn (openTyN (i - 1) (i - 1) [] t')
     --
     doVar depth g keep v0 = case v0 of
       BoundVar i j n
-        | rib:_               ← drop i g
-        , (olddepth, r, ql):_ ← drop j rib
+        | rib:_                    ← drop i g
+        , (olddepth, r, rec, ql):_ ← drop j rib
                             → do
-            s  ← ST.readSTRef r
-            j' ← case List.findIndex ((== (depth - i,j)) . fst) s of
-              Just j' → return j'
-              Nothing → do
-                when (keep ql) $
-                  ST.writeSTRef r (s ++ [((depth - i,j),(n,ql))])
-                return (length s)
-            return (BoundVar (depth - olddepth) j' n, keep ql)
+          s  ← ST.readSTRef r
+          if rec
+            then do
+              case List.findIndex ((== (depth - i)) . fst . fst) s of
+                Just _  → return ()
+                Nothing → ST.writeSTRef r (s ++ [((depth - i, 0), (n, ql))])
+              return (BoundVar (depth - olddepth) 0 n, True)
+            else do
+              j' ← case List.findIndex ((== (depth - i, j)) . fst) s of
+                Just j' → return j'
+                Nothing → do
+                  when (keep ql) $
+                    ST.writeSTRef r (s ++ [((depth - i, j), (n, ql))])
+                  return (length s)
+              return (BoundVar (depth - olddepth) j' n, keep ql)
         | otherwise   → return (v0, True)
       FreeVar r       → return (FreeVar r, keep (Map.findWithDefault L r qm))
     --
@@ -1262,18 +1328,18 @@ tok  = makeTokenParser LanguageDef {
   commentEnd   = "-}",
   commentLine  = "--",
   nestedComments = True,
-  identStart   = noλ $ upper <|> lower <|> oneOf "_",
-  identLetter  = noλ $ alphaNum <|> oneOf "_'′₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹",
+  identStart   = noλμ $ upper <|> lower <|> oneOf "_",
+  identLetter  = alphaNum <|> oneOf "_'′₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹",
   opStart      = empty,
   opLetter     = empty,
   reservedNames   = ["all", "ex", "let", "in", "rec", "and", "match", "with"],
-  reservedOpNames = ["->", "→", "⊸", "∀", "∃", ".", "*", "×",
+  reservedOpNames = ["->", "→", "⊸", "∀", "∃", "μ", ".", "*", "×",
                      "\\", "λ", "=", ":", "|"],
   caseSensitive   = True
 }
   -- 'λ' is not an identifier character, so that we can use it as
   -- a reserved operator. Otherwise, we'd need a space after it.
-  where noλ p = notFollowedBy (char 'λ') *> p
+  where noλμ p = notFollowedBy (char 'λ' <|> char 'μ') *> p
 
 parseArrow ∷ P ()
 parseArrow = reservedOp tok "→" <|> reservedOp tok "->"
@@ -1350,6 +1416,14 @@ parseType  = level0 []
                (quants, tvss) ← unzip <$> parseQuantifiers
                body   ← level0 (reverse (fst <$$> tvss) ++ g)
                return (foldr2 QuaTy body quants (first Here <$$> tvss))
+         <|> do
+               reservedOp tok "μ" <|> reserved tok "rec"
+               tv   ← lowerIdentifier
+               dot tok
+               body ← level0 ([tv]:g)
+               if contractiveTy body
+                 then return (RecTy (Here tv) body)
+                 else fail "Recursive type not contractive"
          <|> level1 g
   level1 g = do
                t1 ← level2 g
@@ -1662,6 +1736,14 @@ pprType  = loop where
           fext $
             [ Ppr.text ni Ppr.<> Ppr.char ':' Ppr.<+> loop 0 g ti
             | (ni, ti) ← row ]
+    RecTy pn t          →
+      let tv = freshName pn (concat g) tvNames in
+      parensIf (p > 0) $
+        Ppr.hang
+          (Ppr.char 'μ' Ppr.<> ppr tv Ppr.<> Ppr.char '.')
+          2
+          (loop 0 ([tv]:g) t)
+
   groupByQLits = foldr2 each [] where
     each tv ql ((ql',tvs):rest)
       | ql == ql'   = ((ql',tv:tvs):rest)
@@ -1846,6 +1928,18 @@ parseTypeTests = T.test
       ==> exTy [L] (allTy [L] (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
   , "∃ α. α → ∀ β. β → α"
       ==> exTy [L] (bv 0 0 ↦ allTy [L] (bv 0 0 ↦ bv 1 0))
+  , "[ A : A ]"
+      ==> RowTy "A" a endTy
+  , "[ A : A | B : B ]"
+      ==> RowTy "A" a (RowTy "B" b endTy)
+  , "[ A : A | B : B | A : C B ]"
+      ==> RowTy "A" a (RowTy "B" b (RowTy "A" (c b) endTy))
+  , "∀ α. [ A : A | B : B | α ]"
+      ==> allTy [L] (RowTy "A" a (RowTy "B" b (bv 0 0)))
+  , "∀ α β γ. [ A : α | B : β | γ ]"
+      ==> allTy [L,L,L] (RowTy "A" (bv 0 0) (RowTy "B" (bv 0 1) (bv 0 2)))
+  , "∀ β. μ α. [ A : α | β ]"
+      ==> allTy [L] (RecTy Nope (RowTy "A" (bv 0 0) (bv 1 0)))
   , "∀ α β. α → β"              <==> "∀ β α. β → α"
   , "∀ α. C α → ∀ α. C α"       <==> "∀ δ. C δ → ∀ e. C e"
   , "∃ α β. α → β"              <==> "∃ β α. β → α"
@@ -1895,6 +1989,22 @@ standardizeTypeTests = T.test
                                 <==>* "∃ β. ∀ α. α → ∀ γ. A γ → β"
   , "∃ α' ∀ β'. β' → ∀ α β γ. A β' → α'"
                                 <==>* "∃ β. ∀ α. α → A α → β"
+  , "∀ α. [ A : A | B : B | α ]"
+      <==>* "∀ α. [ A : A | B : B | α ]"
+  , "μ α. [ A : α ]"
+      <==>* "μ α. [ A : α ]"
+  , "μ α. [ A : M ]"
+      <==>* "[ A : M ]"
+  , "μ α. [ A : α | B : α ]"
+      <==>* "μ α. [ A : α | B : α ]"
+  , "μ α. μ β. [ A : α | B : α ]"
+      <==>* "μ α. [ A : α | B : α ]"
+  , "μ α. μ β. [ A : α | B : β ]"
+      <==>* "μ α. [ A : α | B : α ]"
+  , "μ β. μ α. [ A : α | B : β ]"
+      <==>* "μ α. [ A : α | B : α ]"
+  , "μ α. μ β. μ γ. [ A : α | B : β ]"
+      <==>* "μ α. [ A : α | B : α ]"
   , let str = "∀ α. α → ∀ β. β → α" in
     T.assertBool str
       ((standardize (read str) ∷ Type Empty) ==

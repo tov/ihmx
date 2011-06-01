@@ -1004,7 +1004,6 @@ inferFnTests = T.test
       -: "∀ α. [ A: α | B: α ] → α"
   , "λx. match x with `A y → y | `B y → M y"
       -: "∀ α. [ A: M α | B: α ] → M α"
-  , te "λx. match x with `A y → y | `B y → x" -- occurs check
   , "λx. match x with `A y → y | `A y → M y"
       -: "∀ α. [ A: M α | A: α ] → M α"
   , "λx. match x with `A y → y | `B y → y | _ → botU"

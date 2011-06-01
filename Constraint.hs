@@ -102,11 +102,13 @@ infix  5 ≤, ≥, ≤≥, ⊏, ⊏*
 --   type variables or nullary type constructors.
 data Atom tv = VarAt !tv
              | ConAt !Name
+             | TypAt !(Type tv)
   deriving (Eq, Ord)
 
 instance Tv tv ⇒ Show (Atom tv) where
   show (VarAt α) = show (tvUniqueID α)
   show (ConAt c) = c
+  show (TypAt τ) = "REC(" ++ show τ ++ ")"
 
 instance Ppr tv ⇒ Ppr (Atom tv) where
   pprPrec p = pprPrec p . atomTy
@@ -118,6 +120,7 @@ instance Tv tv ⇒ Ftv (Atom tv) tv where
 atomTy ∷ Atom tv → Type tv
 atomTy (VarAt α) = fvTy α
 atomTy (ConAt n) = ConTy n []
+atomTy (TypAt τ) = τ
 
 ---
 --- The subtype order
@@ -298,11 +301,11 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
     trace ("gen (begin)", SC c qc, τ)
     skm1         ← skeletonize c
     trace ("gen (skeletonized)", skm1, c, τ)
-    (αs, μs)     ← occursCheck skm1
-    trace ("gen (occursCheck)", αs, μs)
-    skm2         ← expand skm1 αs μs
-    trace ("gen (expand)", skm2, c, τ)
-    (c, qc)      ← decompose (c, qc)
+    (expandSks, skipSks)
+                 ← occursCheck skm1
+    (skm2, noX)  ← expand skm1 expandSks skipSks
+    trace ("gen (expand)", skm2, noX, c, τ)
+    (c, qc)      ← decompose noX (c, qc)
     γftv         ← ftvSet γ
     τftv         ← ftvV τ
     trace ("gen (decompose)", (c, qc), γftv, τftv, τ)
@@ -346,12 +349,14 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
       -- decompose takes a list of subtype constraint pairs and a list
       -- of type variables, and returns when all of the constraint is
       -- reduced to pairs of atoms.
-      decompose (c, qc) = execWriterT $ do
+      decompose noX (c, qc) = execWriterT $ do
         tell (Set.empty, qc)
         mapM_ decompLe c
         where
         a1 ≤! a2 = tell (Set.singleton (a1, a2), [])
         τ1 ⊏! τ2 = tell (Set.empty, [(τ1, τ2)])
+        unexpanded α =
+          fail $ "BUG! gen (decompose) saw unexpanded tv: " ++ show α
         decompLe (τ10, τ20) = do
           τ1 ← deref τ10
           τ2 ← deref τ20
@@ -361,6 +366,10 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
               → return ()
               | otherwise
               → VarAt α ≤! VarAt β
+            (VarTy (FreeVar α), _)
+              | α `Set.member` noX → VarAt α ≤! TypAt τ2
+            (_,                 VarTy (FreeVar β))
+              | β `Set.member` noX → TypAt τ1 ≤! VarAt β
             (ConTy c1 [],       ConTy c2 [])
               | c1 `tyConLe` c2
               → return ()
@@ -398,14 +407,10 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                 [ decompLe (τ1i, τ2i)
                 | ((_, τ1i), (_, τ2i)) ← matches ]
               decompLe (rest1, rest2)
-            (VarTy (FreeVar α), ConTy _ _)
-              → fail $ "BUG! gen (decompose) saw unexpanded tyvar: " ++ show α
-            (ConTy _ _,         VarTy (FreeVar β))
-              → fail $ "BUG! gen (decompose) saw unexpanded tyvar: " ++ show β
-            (VarTy (FreeVar α), RowTy _ _ _)
-              → fail $ "BUG! gen (decompose) saw unexpanded tyvar: " ++ show α
-            (RowTy _ _ _,       VarTy (FreeVar β))
-              → fail $ "BUG! gen (decompose) saw unexpanded tyvar: " ++ show β
+            (VarTy (FreeVar α), ConTy _ _)          → unexpanded α
+            (ConTy _ _,         VarTy (FreeVar β))  → unexpanded β
+            (VarTy (FreeVar α), RowTy _ _ _)        → unexpanded α
+            (RowTy _ _ _,       VarTy (FreeVar β))  → unexpanded β
             (_,                 _)
               → do
                 τ1' ← derefAll τ1
@@ -417,6 +422,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
         snd . NM.run (Gr.empty ∷ Gr (Atom r) ()) $ do
           let varianceOf (VarAt α) = Map.lookup α τftv
               varianceOf (ConAt _) = Nothing
+              varianceOf (TypAt _) = Nothing
           NM.insMapNodesM (map fst pairs)
           NM.insMapNodesM (map snd pairs)
           NM.insMapNodesM (map (ConAt . snd) (Gr.labNodes tyConOrder))
@@ -472,6 +478,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                 else fail $ "Cannot unify: " ++ c1 ++ " ≤ " ++ c2
             | Just (ConAt c2) ← map (Gr.lab g) (Gr.suc g n)]
           return (g, γftv, τftv)
+        each (g, γftv, τftv) (_, TypAt _) = return (g, γftv, τftv)
       --
       -- Eliminate existentially-quantified type variables from the
       -- constraint
@@ -481,13 +488,14 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
         return (Set.fold (eliminateNode trans nm) g extvs)
       -- Get the existential type variables
       getExistentials (g, γftv, τftv) = do
-        cftv ← ftvSet (map snd (Gr.labNodes g))
-        return (cftv Set.\\ (γftv `Set.union` Map.keysSet τftv))
+        let cftv = Set.fromList [ α | (_, VarAt α) ← Gr.labNodes g ]
+        recftv ← ftvSet [ τ | (_, TypAt τ) ← Gr.labNodes g ]
+        return (cftv Set.\\ (recftv `Set.union` γftv `Set.union` Map.keysSet τftv))
       -- Remove a node unless it is necessary to associate some of its
       -- neighbors -- in particular, a node with multiple predecessors
       -- but no successor (or dually, multiple successors but no
       -- predecessor) should not be removed.
-      eliminateNode trans nm α g =
+      eliminateNode trans nm α g = do
         case (Gr.pre g node, Gr.suc g node) of
           (_:_:_, []) → g
           ([], _:_:_) → g
@@ -570,8 +578,9 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
           (ConAt c1, ConAt c2)
             | c1 == c2         →
             return ((n2, lab2), (assignNode n1 n2 g, γftv, τftv))
-            | otherwise        →
-            fail $ "Could not unify: " ++ c1 ++ " = " ++ c2
+          (TypAt _1, TypAt _2) → fail "XXX BUG: coalesce TypAt"
+          _                    →
+            fail $ "Could not unify: " ++ show lab1 ++ " = " ++ show lab2
         where
           (n1', α) `gets` (n2', lab') = do
             (γftv', τftv') ← assignTV α lab' (γftv, τftv)
@@ -588,23 +597,27 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
       -- ftvs appropriately
       assignTV α atom (γftv, τftv) = do
         writeTV α (atomTy atom)
-        return (assignFtvSet α atom γftv, assignFtvMap α atom τftv)
+        (,) <$> assignFtvSet α atom γftv <*> assignFtvMap α atom τftv
       -- Given two type variables, where α ← atom, update a set of free
       -- type variables accordingly
       assignFtvSet α atom set =
         if Set.member α set
           then case atom of
-            VarAt β → Set.insert β (Set.delete α set)
-            ConAt _ → Set.delete α set
-          else set
+            VarAt β → return $ Set.insert β set'
+            ConAt _ → return set'
+            TypAt τ → Set.union set' <$> ftvSet τ
+          else return set
+        where set' = Set.delete α set
       -- Given two type variables, where α ← atom, update a map of free
       -- type variables to variance lists accordingly
       assignFtvMap α atom vmap =
         case Map.lookup α vmap of
           Just vs → case atom of
-            VarAt β → Map.insertWith (+) β vs (Map.delete α vmap)
-            ConAt _ → Map.delete α vmap
-          Nothing → vmap
+            VarAt β → return $ Map.insertWith (+) β vs vmap'
+            ConAt _ → return vmap'
+            TypAt τ → Map.unionWith (+) vmap' . Map.map (* vs) <$> ftvV τ
+          Nothing → return vmap
+        where vmap' = Map.delete α vmap
       -- Coalesce and remove fully-generalizable components
       coalesceComponents value (g, γftv, τftv) = do
         extvs ← getExistentials (g, γftv, τftv)
@@ -646,33 +659,31 @@ newtype SkelMap tv m
       --   contains it, which is a set of related type variables and
       --   maybe a constructor applied to some type variables, which
       --   determines the shape of the skeleton.
-      unSkelMap   ∷ Map.Map tv (Skeleton tv (URef m))
+      unSkelMap   ∷ Map.Map tv (Skeleton tv m)
     }
-type Skeleton tv r = UF.Proxy r (Set.Set tv, Shape tv)
+type Skeleton tv m = UF.Proxy (URef m) (Set.Set tv, Shape tv m)
 
-data Shape tv
-  = ConShape Name [tv]
-  | RowShape Name tv tv
+data Shape tv m
+  = ConShape Name [Skeleton tv m]
+  | RowShape Name (Skeleton tv m) (Skeleton tv m)
   | NoShape
-  deriving Show
 
-type ExtSkels tv = [(tv, [tv], Shape tv)]
+type ExtSkels tv = [(tv, [tv], Maybe (Type tv))]
 
-instance (Tv tv, MonadU tv m) ⇒
-         Show (SkelMap tv m) where
-  show skm = concat $
-    [ "\n⋀ {" ++ show α ++ " ∈ " ++
-      concat (List.intersperse "≈" [ show (tvUniqueID β) | β ← βs ]) ++
-      case shape of
-        NoShape       → ""
-        ConShape c γs →
-          " ≈ " ++ unwords (c : [ show (tvUniqueID γ) | γ ← γs ])
-        RowShape n α β →
-          " ≈ [ " ++ n ++ ": " ++ show (tvUniqueID α) ++ " | "
-                  ++ show (tvUniqueID β) ++ " ]"
-      ++ "}"
-    | (α, βs, shape) ← List.sortBy (\(_,x,_) (_,y,_) → compare x y)
-                                   (extSkels skm) ]
+skeletonTV ∷ MonadU tv m ⇒ Skeleton tv m → m tv
+skeletonTV = Set.findMin . fst <$$> UF.desc
+
+shapeToType ∷ forall tv m. MonadU tv m ⇒
+              Shape tv m → Maybe (Type tv)
+shapeToType shape = unsafePerformU (shapeToTypeM shape ∷ m (Maybe (Type tv)))
+
+shapeToTypeM ∷ MonadU tv m ⇒ Shape tv m → m (Maybe (Type tv))
+shapeToTypeM shape = do
+  case shape of
+    ConShape n sks     → Just . ConTy n <$> mapM conv sks
+    RowShape n sk1 sk2 → Just <$$> RowTy n <$> conv sk1 <*> conv sk2
+    NoShape            → return Nothing
+  where conv = fvTy <$$> skeletonTV
 
 extSkels ∷ MonadU tv m ⇒ SkelMap tv m → ExtSkels tv
 extSkels = unsafePerformU . extSkelsM
@@ -683,13 +694,25 @@ extSkelsM ∷ MonadU tv m ⇒ SkelMap tv m → m (ExtSkels tv)
 extSkelsM = mapM each . Map.toList . unSkelMap
   where
     each (α, proxy) = do
-      (set, mshape) ← UF.desc proxy
-      return (α, Set.toList set, mshape)
+      (set, shape) ← UF.desc proxy
+      τ ← shapeToTypeM shape
+      return (α, Set.toList set, τ)
+
+instance (Tv tv, MonadU tv m) ⇒ Show (Shape tv m) where
+  showsPrec p = maybe (showChar '_') (showsPrec p) . shapeToType
+
+instance (Tv tv, MonadU tv m) ⇒ Show (SkelMap tv m) where
+  show skm = concat $
+    [ "\n⋀ {" ++ show α ++ " ∈ " ++
+      concat (List.intersperse "≈" [ show (tvUniqueID β) | β ← βs ]) ++
+        maybe "" ((" ≈ " ++) . show) mτ
+      ++ "}"
+    | (α, βs, mτ) ← List.sortBy (\(_,x,_) (_,y,_) → compare x y)
+                                (extSkels skm) ]
 
 -- | Build an internal subtype constraint from an external subtype
 --   constraint.
-skeletonize ∷ MonadU tv m ⇒
-              [(Type tv, Type tv)] → m (SkelMap tv m)
+skeletonize ∷ MonadU tv m ⇒ [(Type tv, Type tv)] → m (SkelMap tv m)
 skeletonize sc0 = do
   rskels ← newRef Map.empty
   let -- | Record that @τ1@ is a subtype of @τ2@, and do some
@@ -697,9 +720,11 @@ skeletonize sc0 = do
       relateTypes τ1 τ2 = do
         (_, skel1) ← registerType τ1
         (_, skel2) ← registerType τ2
-        UF.coalesce combiner skel1 skel2
+        relateSkels skel1 skel2
       -- | Relate two type variables in the same skeleton
       relateTVs α1 α2 = relateTypes (fvTy α1) (fvTy α2)
+      -- |
+      relateSkels = UF.coalesce combiner
       --
       -- Given a type, create a shape and skeleton for it, store them in
       -- the relevant data structures, and return the type variable that
@@ -707,14 +732,14 @@ skeletonize sc0 = do
       registerType τ = do
         case τ of
           ConTy c τs → do
-            αs ← mapM (fst <$$> registerType) τs
+            (αs, skels) ← unzip <$> mapM registerType τs
             α  ← tvOf (ConTy c (map fvTy αs))
-            newSkel α (ConShape c αs)
+            newSkel α (ConShape c skels)
           RowTy n τ1 τ2 → do
-            α1 ← fst <$> registerType τ1
-            α2 ← fst <$> registerType τ2
+            (α1, skel1) ← registerType τ1
+            (α2, skel2) ← registerType τ2
             α  ← tvOf (RowTy n (fvTy α1) (fvTy α2))
-            newSkel α (RowShape n α1 α2)
+            newSkel α (RowShape n skel1 skel2)
           VarTy (FreeVar α) → registerTV α
           _ → fail $ "BUG! skeletonize"
       --
@@ -745,29 +770,31 @@ skeletonize sc0 = do
           (NoShape, _)                    → return shape2
           (_, NoShape)                    → return shape1
           (ConShape c1 [], ConShape _ []) → return (ConShape c1 [])
-          (ConShape c1 βs1, ConShape c2 βs2)
-            | c1 == c2 && length βs1 == length βs2
+          (ConShape c1 sks1, ConShape c2 sks2)
+            | c1 == c2 && length sks1 == length sks2
                                          → do
             sequence_ [ unless (var ⊑ QInvariant) $
-                          relateTVs β1 β2
-                      | var ← getVariances c1 (length βs1)
-                      | β1  ← βs1
-                      | β2  ← βs2 ]
-            return (ConShape c1 βs1)
-          (RowShape n1 α1 β1, RowShape n2 α2 β2)
-            | n1 < n2   → mutate (n1, α1, β1) αs2
-            | n1 > n2   → mutate (n2, α2, β2) αs1
+                          relateSkels sk1 sk2
+                      | var ← getVariances c1 (length sks1)
+                      | sk1  ← sks1
+                      | sk2  ← sks2 ]
+            return (ConShape c1 sks1)
+          (RowShape n1 sk1 sk1', RowShape n2 sk2 sk2')
+            | n1 < n2   → mutate (n1, sk1, sk1') αs2
+            | n1 > n2   → mutate (n2, sk2, sk2') αs1
             | otherwise → do
-                relateTVs α1 α2
-                relateTVs β1 β2
-                return (RowShape n1 α1 β1)
+                relateSkels sk1 sk2
+                relateSkels sk1' sk2'
+                return (RowShape n1 sk1 sk1')
           _             → fail $
             "Could not unify " ++ show shape1 ++ " and " ++ show shape2
         trace ("combiner (end)", shape1, shape2, αs1, αs2)
         return (Set.union αs1 αs2, shape')
       --
       -- Permute rows to bring matching labels together.
-      mutate (la, α, α') βs = do
+      mutate (la, sk, sk') βs = do
+        α  ← skeletonTV sk
+        α' ← skeletonTV sk'
         sequence_
           [ do
               eτ ← readTV β
@@ -781,99 +808,98 @@ skeletonize sc0 = do
                   rewriteTV β (RowTy la (fvTy α) (fvTy δ'))
                 Right x → fail $ "BUG! bad skeleton: " ++ show x
           | β  ← Set.toList βs ]
-        return (RowShape la α α')
+        return (RowShape la sk sk')
       --
   mapM_ (uncurry relateTypes) sc0
   SkelMap <$> readRef rskels
 
 -- | Make sure an internal subtype constraint is consistent with a
---   finite model. Returns the type variables topologically sorted by
---   size (largest first), and a list of type variables to avoid
+--   finite model. Returns the skeletons topologically sorted by
+--   size (largest first), and a list of skeletons to avoid
 --   expanding because they are involved in (legal) cycles.
 occursCheck ∷ ∀ tv m. MonadU tv m ⇒
-              SkelMap tv m → m ([tv], [tv])
+              SkelMap tv m → m ([Skeleton tv m], [Skeleton tv m])
 occursCheck skm = do
-  let skels = Map.toList (unSkelMap skm)
-      gr0   = Gr.insNodes [ (tvUniqueID α, α) | (α, _) ← skels ] Gr.empty
-  gr  ← foldM addSkel gr0 skels
-  let scc = Gr.labScc (gr ∷ Gr tv Bool)
-  trace ("occursCheck", Gr.edges gr, scc)
+  gr ← foldM addSkel Gr.empty (Map.toList (unSkelMap skm))
+  let scc = Gr.labScc (gr ∷ Gr (Skeleton tv m) Bool)
+  trace ("occursCheck", Gr.edges gr, map (map fst) scc)
   mconcatMapM (checkSCC gr) scc
   where
-  addSkel gr (α, proxy) = do
-    (_, mshape) ← UF.desc proxy
-    case mshape of
+  addSkel gr (_, sk1) = do
+    (_, shape) ← UF.desc sk1
+    case shape of
       NoShape         → return gr
-      ConShape c βs   → foldM (assertGt False α) gr
-                          [ β
-                          | (β, v) ← zip βs (getVariances c (length βs))
+      ConShape c sks2 → foldM (assertGt False sk1) gr
+                          [ sk2
+                          | (sk2, v) ← zip sks2 (getVariances c (length sks2))
                           , not (v ⊑ QInvariant) ]
-      RowShape _ β β' → assertGt True α <-> β >=> assertGt False α <-> β' $ gr
-  assertGt ok α gr β = case Map.lookup β (unSkelMap skm) of
-    Nothing        → fail "BUG! occursCheck (1)"
-    Just proxy     → do
-      (βs, _) ← UF.desc proxy
-      return (foldr (addEdgeTo ok α) gr (Set.toList βs))
-  addEdgeTo ok α β = Gr.insEdge (tvUniqueID β, tvUniqueID α, ok)
-  checkSCC _  [(_,α)] = return ([α], [])
+      RowShape _ sk2 sk2' → do
+        gr ← assertGt True sk1 gr sk2
+        assertGt False sk1 gr sk2'
+  assertGt ok sk1 gr sk2 = do
+    (gr, node1) ← insertNew sk1 gr
+    (gr, node2) ← insertNew sk2 gr
+    return (Gr.insEdge (node1, node2, ok) gr)
+  insertNew skel gr = do
+    node ← tvUniqueID <$> skeletonTV skel
+    case Gr.lab gr node of
+      Just _  → return (gr, node)
+      Nothing → return (Gr.insNode (node, skel) gr, node)
+  checkSCC gr [(n,α)] | lookup n (Gr.lsuc gr n) == Nothing
+                      = return ([α], [])
   checkSCC gr lns     =
     let nodes = Set.fromList (map fst lns) in
      if null [ ()
              | (n, _)     ← lns
              , (n', True) ← Gr.lsuc gr n
              , n' `Set.member` nodes ]
-      then fail $ "Occurs check failed: " ++ show (map snd lns)
+      then fail $ "Occurs check failed: " ++ show (map fst lns)
       else return ([], map snd lns)
 
 -- | Expand all type variables to their full shape.
 expand ∷ MonadU tv m ⇒
          -- | the skeletons
          SkelMap tv m →
-         -- | variables in order of expansion
-         [tv] →
-         -- | variables not to expand
-         [tv] →
-         m (SkelMap tv m)
-expand skm0 αs0 μs0 = do
-  rskels ← newRef (unSkelMap skm0)
-  let noExpand   = Set.fromList μs0
-      expandTV α = do
+         -- | skeletons in order of expansion
+         [Skeleton tv m] →
+         -- | skeletons not to expand
+         [Skeleton tv m] →
+         m (SkelMap tv m, Set.Set tv)
+expand skm0 skels skipSkels = do
+  rskels   ← newRef (unSkelMap skm0)
+  noExpand ← Set.fromList <$> mapM skeletonTV skipSkels
+  let expandSkel skel = do
+        α ← skeletonTV skel
+        unless (α `Set.member` noExpand) $ do
+          (αs, shape) ← UF.desc skel
+          mapM_ (expandShape shape) (Set.toList αs)
+      expandShape shape α = do
         eτ ← readTV α
         case eτ of
           Right _ → return ()
-          Left α' → do
-            Just proxy ← Map.lookup α <$> readRef rskels
-            (αs, shape) ← UF.desc proxy
-            when (Set.null (αs `Set.intersection` noExpand)) $
-              case shape of
-                NoShape       → return ()
-                ConShape _ [] → return ()
-                ConShape c βs → do
-                  βs' ← replicateM (length βs) newTV
-                  writeTV α' (ConTy c (map fvTy βs'))
-                  sequence_
-                    [ do
-                        Just proxy   ← Map.lookup β <$> readRef rskels
-                        -- (γs, shape') ← UF.desc proxy
-                        -- UF.setDesc proxy (Set.insert β' γs, shape')
-                        modifyRef (Map.insert β' proxy) rskels
-                    | β  ← βs
-                    | β' ← βs' ]
-                  mapM_ (expandTV . fst) .
-                    filter (not . isQVariance . snd) $
-                      zip βs' (getVariances c (length βs'))
-                RowShape n β1 β2 → do
-                  β1' ← newTV
-                  β2' ← newTV
-                  writeTV α' (RowTy n (fvTy β1') (fvTy β2'))
-                  modifyRef (alias β1' β1 . alias β2' β2) rskels
-                  expandTV β1'
-                  expandTV β2'
-      alias α' α m | Just v ← Map.lookup α m = Map.insert α' v m
-                   | otherwise               = error "BUG! skeletonize (alias)"
-  mapM_ expandTV αs0
-  skels' ← readRef rskels
-  return skm0 { unSkelMap = skels' }
+          Left α' → case shape of
+            NoShape        → return ()
+            ConShape _ []  → return ()
+            ConShape c sks → do
+              βs' ← mapM newSkelTV sks
+              writeTV α' (ConTy c (map fvTy βs'))
+            RowShape n sk1 sk2 → do
+              β1 ← newSkelTV sk1
+              β2 ← newSkelTV sk2
+              writeTV α' (RowTy n (fvTy β1) (fvTy β2))
+      newSkelTV skel = do
+        β ← newTV
+        (αs, shape) ← UF.desc skel
+        UF.setDesc skel (Set.insert β αs, shape)
+        modifyRef (Map.insert β skel) rskels
+        return β
+      noExpandVars skels = Set.unions <$> sequence
+        [ fst <$> UF.desc (fromJust (Map.lookup α skels))
+        | α ← Set.toList noExpand ]
+  mapM_ expandSkel skels
+  skels'    ← readRef rskels
+  noExpand' ← noExpandVars skels'
+  return (skm0 { unSkelMap = skels' }, noExpand')
 
 {-
 
@@ -1283,15 +1309,16 @@ solveQualifiers value αs βs qc τ = do
   -- This is not okay: { 1 ↦ 3 4, 2 ↦ 1 }
   unsafeSubst state γqes = do
     sequence [ writeTV γ (toQualifierType qe) | (γ, qe) ← Map.toList γqes ]
-    let γmap = Map.map each γqes
-          where each (QE q γs) = QE q (γs `Set.intersection` sq_βs state)
-        vmap = Map.fromDistinctAscList
+    let vmap = Map.fromDistinctAscList
           [ (γ, qem'')
           | (γ, qem) ← Map.toAscList (sq_vmap state)
-          , let γmap' = γmap `Map.intersection` ftvPure qem
-                qem'  = foldr (uncurry qemSubst) qem (Map.toList γmap')
-                qem'' = QEMeet (filter (Set.notMember γ . qeQSet)
-                                       (unQEMeet qem')) ]
+          , let γqes' = γqes `Map.intersection` ftvPure qem
+                qem'  = foldr (uncurry qemSubst) qem (Map.toList γqes')
+                qem'' = QEMeet [ QE q (γs `Set.intersection` sq_βs state)
+                               | QE q γs ← unQEMeet qem'
+                               , Set.notMember γ γs ] ]
+        γmap = Map.map each γqes
+          where each (QE q γs) = QE q (γs `Set.intersection` sq_βs state)
     βlst ← sequence $ do
       (q0, βs0) ← sq_βlst state
       let γmap'     = γmap `Map.intersection` setToMap () βs0
@@ -1524,3 +1551,37 @@ OPTIMIZATIONS FROM SIMONET 2003
     A × B → 1
 -}
 
+{-
+("stdizeType",[(#40 -#40 #40 #199> #42)
+→
+#40 -#40 #40 #199> [ Nil: #35 ] -#40 #40 #199> #42],[(#40 -#40 #199> #42) → #40 -#40 #199> [ Nil: #35 ] -#40 #199> #42],fromList [(#35,A),(#40,L)])
+
+("new",200)
+
+("substPosInv",fromList [(#199,40⊔200)],SQState {sq_αs = fromList [#35,#40,#42,#199,#200], sq_βs = fromList [#199,#200], sq_τftv = fromList [(#35,Contravariant),(#40,Invariant),(#42,Invariant),(#199,QInvariant)], sq_βlst = [], sq_vmap = fromList [(#35,A),(#40,199)], sq_τ = [(#40 -#40 #199> #42) → #40 -#40 #199> [ Nil: #35 ] -#40 #199> #42]})
+
+("writeTV",(#199,Nothing),U #40 #200)
+
+("subst",fromList [(199=U #40 #200,40⊔200)],SQState {sq_αs = fromList [#35,#40,#42,#200], sq_βs = fromList [#200], sq_τftv = fromList [(#35,Contravariant),(#40,Invariant),(#42,Invariant),(#200,QInvariant)], sq_βlst = [], sq_vmap = fromList [(#35,A),(#40,200)], sq_τ = [(#40 -#40 199=U #40 #200> #42)
+→
+#40 -#40 199=U #40 #200> [ Nil: #35 ] -#40 199=U #40 #200> #42]})
+
+("stdizeType",[(#40 -#40 #40 #200> #42)
+→
+#40 -#40 #40 #200> [ Nil: #35 ] -#40 #40 #200> #42],[(#40 -#40 #200> #42) → #40 -#40 #200> [ Nil: #35 ] -#40 #200> #42],fromList [(#35,A),(#40,L)])
+
+("new",201)
+
+("substPosInv",fromList [(#200,40⊔201)],SQState {sq_αs = fromList [#35,#40,#42,#200,#201], sq_βs = fromList [#200,#201], sq_τftv = fromList [(#35,Contravariant),(#40,Invariant),(#42,Invariant),(#200,QInvariant)], sq_βlst = [], sq_vmap = fromList [(#35,A),(#40,200)], sq_τ = [(#40 -#40 #200> #42) → #40 -#40 #200> [ Nil: #35 ] -#40 #200> #42]})
+
+("writeTV",(#200,Nothing),U #40 #201)
+
+("subst",fromList [(200=U #40 #201,40⊔201)],SQState {sq_αs = fromList [#35,#40,#42,#201], sq_βs = fromList [#201], sq_τftv = fromList [(#35,Contravariant),(#40,Invariant),(#42,Invariant),(#201,QInvariant)], sq_βlst = [], sq_vmap = fromList [(#35,A),(#40,201)], sq_τ = [(#40 -#40 200=U #40 #201> #42)
+→
+#40 -#40 200=U #40 #201> [ Nil: #35 ] -#40 200=U #40 #201> #42]})
+
+("stdizeType",[(#40 -#40 #40 #201> #42)
+→
+#40 -#40 #40 #201> [ Nil: #35 ] -#40 #40 #201> #42],[(#40 -#40 #201> #42) → #40 -#40 #201> [ Nil: #35 ] -#40 #201> #42],fromList [(#35,A),(#40,L)])
+
+-}
