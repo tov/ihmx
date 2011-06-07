@@ -494,6 +494,19 @@ foldType fquant fbvar ffvar fcon frow frec t0 =
     , elt:_ ← drop j rib = Left elt
   look i j _             = Right (i, j)
 
+mkBvF   ∷ (Int → Int → Perhaps Name → r) →
+           Either (Int, Int) (Int, Int) → Perhaps Name → r
+mkBvF f = uncurry f . unEither
+
+mkQuaF
+  ∷ (Quant → [(Perhaps Name, QLit)] → r → r) →
+    (∀a. Quant → [(Perhaps Name, QLit)] → ([(Int, Int)] → (r → r) → a) → a)
+mkQuaF f q αs k = k [ (0, j) | j ← [0 .. length αs - 1] ] (f q αs)
+
+mkRecF ∷ (Perhaps Name → r → r) →
+         (∀a. Perhaps Name → ((Int, Int) → (r → r) → a) → a)
+mkRecF f pn k = k (0, 0) (f pn)
+
 -- | Get the qualifier of a type
 qualifier ∷ (Monad m, ?deref ∷ Deref m v) ⇒
             Type v → m (QExp v)
@@ -506,7 +519,7 @@ qualifier = foldType fquant fbvar ffvar fcon frow frec
   fcon n qes             = getQualifier n qes
   frow _ qe1 qe2         = getQualifier "*" [qe1, qe2]
   frec _ k               = k U bumpQExp
-  bumpQExp (QExp q vs) = QExp q (bumpVar (-1) <$> vs)
+  bumpQExp (QExp q vs)   = QExp q (bumpVar (-1) <$> vs)
 
 -- | Get something in the *form* of a qualifier without dereferencing
 pureQualifier ∷ Type v → QExp v
@@ -551,15 +564,16 @@ totalSubst _ _ _ = error "BUG! substsAll saw unexpected free tv"
 
 -- | Use the given function to substitute for the free variables
 --   of a type; allows changing the ftv representation.
-typeMapM ∷ Monad m ⇒ (a → m (Type b)) → Type a → m (Type b)
+typeMapM ∷ ∀ m a b. Monad m ⇒ (a → m (Type b)) → Type a → m (Type b)
 typeMapM f = foldTypeM (\q αs k → k (map (0,) [0..length αs - 1])
                                     (return <$> QuaTy q αs))
-                       (return <$$> uncurry bvTy . either id id)
+                       (return <$$> mkBvF bvTy)
                        f
                        (return <$$> ConTy)
                        (return <$$$> RowTy)
                        (\n k → k (0,0) (return <$> RecTy n))
              where ?deref = return . Left
+
 
 -- | Is the given type ground (type-variable and quantifier free)?
 isGroundType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
@@ -577,9 +591,10 @@ isClosedType = foldType (\_ _ k → k (repeat True) id)
 
 -- | Is the given type quantifier free?
 isMonoType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
-isMonoType = foldType (\_ _ k → k (repeat ()) (const False))
-                      (\_ _ → True) (\_ → True) (\_ → and) (\_ → (&&))
-                      (\_ k → k () id)
+isMonoType = foldType (mkQuaF (\_ _ _ → False))
+                      (mkBvF (\_ _ _ → True))
+                      (\_ → True) (\_ → and) (\_ → (&&))
+                      (mkRecF (\_ _ → False))
 
 -- | Is the given type (universal) prenex?
 --   (Precondition: the argument is standard)
@@ -1124,15 +1139,15 @@ class Ord v ⇒ Ftv a v | a → v where
 
 instance Ord v ⇒ Ftv (Type v) v where
   ftvTree = foldType
-             (\_ _ k → k (repeat ()) id)
-             (\_ _ → mempty)
+             (mkQuaF (\_ _ → id))
+             (mkBvF (\_ _ _ → mempty))
              FTSingle
              (\c trees → FTBranch
                  [ FTVariance (* var) tree
                  | tree ← trees
                  | var  ← getVariances c (length trees) ])
              (\_ t1 t2 → FTBranch [t1, t2])
-             (\_ k → k () id)
+             (mkRecF (\_ → id))
 
 instance Ftv a v ⇒ Ftv [a] v where
   ftvTree a = FTBranch `liftM` mapM ftvTree a

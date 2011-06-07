@@ -16,6 +16,7 @@ module Util (
   findLastIndex, listNth,
   allM, whenM, unlessM, foldr2, ordNub, concatMapM, mconcatMapM, foldM1,
   before,
+  unEither,
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
   (<$.>), (<$$.>), (<$$$.>), (<$$$$.>),
   (<->), (<-->), (<--->), (<---->), (<----->),
@@ -90,6 +91,9 @@ before m k = do
   return a
 
 infixl 8 `before`
+
+unEither ∷ Either a a → a
+unEither = either id id
 
 (<$$>) ∷ (Functor f, Functor g) ⇒ 
          (b → c) → g (f b) → g (f c)

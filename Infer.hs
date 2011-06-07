@@ -322,7 +322,8 @@ showInfer e = runU $ do
   return (τ', show c)
 
 stringifyType ∷ (MonadU s m, Show s) ⇒ Type s → m (Type String)
-stringifyType = foldType QuaTy (const bvTy) (fvTy . show) ConTy RowTy
+stringifyType = foldType (mkQuaF QuaTy) (mkBvF bvTy) (fvTy . show)
+                         ConTy RowTy (mkRecF RecTy)
   where ?deref = readTV
 
 {-

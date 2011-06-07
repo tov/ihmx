@@ -159,7 +159,10 @@ instance Derefable a m ⇒ Derefable [a] m where
 instance MonadU tv m ⇒ Derefable (Type tv) m where
   deref (VarTy (FreeVar α)) = derefTV α
   deref τ                   = return τ
-  derefAll = foldType QuaTy (const bvTy) fvTy ConTy RowTy
+  derefAll = foldType (mkQuaF QuaTy)
+                      (mkBvF bvTy)
+                      fvTy ConTy RowTy
+                      (mkRecF RecTy)
     where ?deref = readTV
 
 -- | Assert that a type variable is ununified
@@ -243,8 +246,8 @@ instance Ppr (TV s) where
   pprPrec p tv = Ppr.text (showsPrec p tv "")
 
 instance Show (TV s) where
-  showsPrec p tv = case (debug, unsafeReadTV tv) of
-    (True, Just t) → -- showsPrec p t
+  showsPrec _p tv = case (debug, unsafeReadTV tv) of
+    (True, Just t) → -- showsPrec _p t
                      shows (tvId tv) . showChar '=' .
                      showsPrec 2 t
     _              → showChar '#' . shows (tvId tv)
