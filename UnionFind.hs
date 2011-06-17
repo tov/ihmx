@@ -3,6 +3,7 @@
       FlexibleInstances,
       FunctionalDependencies,
       MultiParamTypeClasses,
+      TupleSections,
       UnicodeSyntax
     #-}
 {- | From Simonet's Dalton constraint solver -}
@@ -55,20 +56,29 @@ class (Monad m, Eq1 p) ⇒ UnionFind p m where
 
   -- | Join two proxies, using the given function to combine their
   --   descriptors.
-  coalesce ∷ (a → a → m a) → p a → p a → m ()
-  coalesce combine proxy1 proxy2 = unless (proxy1 `eq1` proxy2) $ do
+  coalesce ∷ (a → a → m (a, b)) → p a → p a → m (Maybe b)
+  coalesce combine proxy1 proxy2 = do
     proxy1' ← repr proxy1
     proxy2' ← repr proxy2
-    a1 ← desc proxy1'
-    a2 ← desc proxy2'
-    a' ← combine a1 a2
-    replace proxy1' (Right proxy2')
-    replace proxy2' (Left a')
+    if (proxy1' `eq1` proxy2')
+      then return Nothing
+      else do
+        a1      ← desc proxy1'
+        a2      ← desc proxy2'
+        (a', b) ← combine a1 a2
+        replace proxy1' (Right proxy2')
+        replace proxy2' (Left a')
+        return (Just b)
+
+  coalesce_ ∷ (a → a → m a) → p a → p a → m ()
+  coalesce_ combine proxy1 proxy2 = do
+    coalesce (liftM (,()) <$$> combine) proxy1 proxy2
+    return ()
 
   -- | Make the first proxy point to the second, keeping the second
   --   proxy's descriptor
   linkto ∷ p a → p a → m ()
-  linkto = coalesce (const return)
+  linkto = coalesce_ (const . return)
 
   -- | Is the given proxy object the representative of its set?
   isRepr ∷ p a → m Bool

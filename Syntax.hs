@@ -452,7 +452,7 @@ foldType ∷ ∀ m v r s. (Monad m, ?deref ∷ Deref m v) ⇒
            -- | For quantifiers
            (∀a. Quant → [(Perhaps Name, QLit)] → ([s] → (r → r) → a) → a) →
            -- | For bound variables
-           (Either s (Int, Int) → Perhaps Name → r) →
+           ((Int, Int) → Perhaps Name → Maybe s → r) →
            -- | For free variables
            (v → r) →
            -- | For constructor applications
@@ -471,7 +471,7 @@ foldType fquant fbvar ffvar fcon frow frec t0 =
     fquant q αs $ \ss f → f `liftM` CMR.local (ss:) (loop t)
   loop (VarTy (BoundVar i j n)) = do
     env ← CMR.ask
-    return (fbvar (look i j env) n)
+    return (fbvar (i, j) n (look i j env))
   loop (VarTy (FreeVar v))      = do
     mt ← ?deref v
     case mt of
@@ -491,12 +491,12 @@ foldType fquant fbvar ffvar fcon frow frec t0 =
   --
   look i j env
     | rib:_ ← drop i env
-    , elt:_ ← drop j rib = Left elt
-  look i j _             = Right (i, j)
+    , elt:_ ← drop j rib = Just elt
+  look _ _ _             = Nothing
 
 mkBvF   ∷ (Int → Int → Perhaps Name → r) →
-           Either (Int, Int) (Int, Int) → Perhaps Name → r
-mkBvF f = uncurry f . unEither
+          (Int, Int) → Perhaps Name → a → r
+mkBvF f (i, j) pn _ = f i j pn
 
 mkQuaF
   ∷ (Quant → [(Perhaps Name, QLit)] → r → r) →
@@ -513,8 +513,8 @@ qualifier ∷ (Monad m, ?deref ∷ Deref m v) ⇒
 qualifier = foldType fquant fbvar ffvar fcon frow frec
   where
   fquant _ αs k          = k (map snd αs) bumpQExp
-  fbvar (Left ql)     _  = qlitexp ql
-  fbvar (Right (i,j)) n  = qvarexp (BoundVar i j n)
+  fbvar _ _    (Just ql) = qlitexp ql
+  fbvar (i,j) n Nothing  = qvarexp (BoundVar i j n)
   ffvar                  = qvarexp . FreeVar
   fcon n qes             = getQualifier n qes
   frow _ qe1 qe2         = getQualifier "*" [qe1, qe2]
@@ -529,7 +529,7 @@ pureQualifier t = runIdentity (qualifier t) where ?deref = return . Left
 foldTypeM
   ∷ ∀m v r s. (Monad m, ?deref ∷ Deref m v) ⇒
     (∀a. Quant → [(Perhaps Name, QLit)] → ([s] → (r → m r) → a) → a) →
-    (Either s (Int, Int) → Perhaps Name → m r) →
+    ((Int, Int) → Perhaps Name → Maybe s → m r) →
     (v → m r) →
     (Name → [r] → m r) →
     (Name → r → r → m r) →
@@ -562,6 +562,7 @@ totalSubst (α:αs) (τ:τs) β
   | otherwise       = totalSubst αs τs β
 totalSubst _ _ _ = error "BUG! substsAll saw unexpected free tv"
 
+{-
 -- | Use the given function to substitute for the free variables
 --   of a type; allows changing the ftv representation.
 typeMapM ∷ ∀ m a b. Monad m ⇒ (a → m (Type b)) → Type a → m (Type b)
@@ -573,19 +574,20 @@ typeMapM f = foldTypeM (\q αs k → k (map (0,) [0..length αs - 1])
                        (return <$$$> RowTy)
                        (\n k → k (0,0) (return <$> RecTy n))
              where ?deref = return . Left
+-}
 
 
 -- | Is the given type ground (type-variable and quantifier free)?
 isGroundType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
 isGroundType = foldType (\_ _ k → k (repeat False) (const False))
-                        (const . either id (const False))
+                        (\_ _ → maybe False id)
                         (\_ → False) (\_ → and) (\_ → (&&))
                         (\_ k → k True id)
 
 -- | Is the given type closed? (ASSUMPTION: The type is locally closed)
 isClosedType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
 isClosedType = foldType (\_ _ k → k (repeat True) id)
-                        (const . either id (const False))
+                        (\_ _ → maybe False id)
                         (\_ → False) (\_ → and) (\_ → (&&))
                         (\_ k → k True id)
 
@@ -815,11 +817,13 @@ closeWithNames _   _ []  ρ = ρ
 closeWithNames pns q tvs ρ = standardize (QuaTy q pns' (closeTy 0 tvs ρ))
   where pns' = take (length tvs) (pns ++ repeat (Nope, L))
 
+{-
 -- | @substTy τ' α 't@ substitutes @τ'@ for free variable @α@ in @τ@.
 substTy ∷ Eq a ⇒ Type a → a → Type a → Type a
 substTy τ' α = runIdentity . typeMapM each where
   each β | α == β    = return τ'
          | otherwise = return (fvTy β)
+-}
 
 -- | Is the given type locally closed?  A type is locally closed
 --   if none of its bound variables point to quantifiers "outside" the

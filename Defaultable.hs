@@ -7,6 +7,7 @@ module Defaultable (
 ) where
 
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 class Defaultable a where
   getDefault ∷ a
@@ -20,3 +21,5 @@ instance (Defaultable ()) where
 instance Defaultable (Map.Map k a) where
   getDefault = Map.empty
 
+instance Defaultable (Set.Set a) where
+  getDefault = Set.empty

@@ -1021,6 +1021,10 @@ inferFnTests = T.test
       -: "∀ α:A. [ A: α | B: M ] → M"
   , "choose (`A ((λ_ _.X) : X -> X -R> X)) (`A ((λ_ _.X) : X -> X -A> X))"
       -: "∀ r. [ A: X → X -L> X | r ]"
+  -- Equirecursive types
+  , te "(botU : μa. M → [ A: a ]) N"
+  , "(botU : μa. M → [ A: a ]) M"
+      -: "[ A: μα. M → [ A: α ]"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"

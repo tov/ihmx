@@ -4,7 +4,8 @@
   #-}
 module Graph (
   ShowGraph(..),
-  trcnr, untransitive, transitiveReduce, nmLab, labelNode, labScc,
+  trcnr, untransitive, nmLab, labelNode, labScc,
+  pathScc, erdffWith, xpdffWith, xpdfWith,
   labComponents, labNodeEdges,
   module Data.Graph.Inductive.Basic,
   module Data.Graph.Inductive.Graph,
@@ -36,27 +37,14 @@ trcnr g = insEdges newEdges (insNodes lns empty) where
              , n'     ← reachable n g
              , n /= n' ]
 
--- | Compute the transitive reduction of a transitive graph.
+-- | Compute the transitive reduction of a transitive, acyclic graph.
 untransitive ∷ DynGraph gr ⇒ gr a b → gr a b
-untransitive g =
-  let redundant = [ (n1, n2)
-                  | (n1, n2) ← edges g
-                  , n'       ← suc g n1
-                  , n' /= n2
-                  , n' /= n1
-                  , n2 `elem` suc g n' ]
-   in delEdges redundant g
-
--- | Compute the transitive reduction of a graph.
-transitiveReduce ∷ DynGraph gr ⇒ gr a b → gr a b
-transitiveReduce g =
-  let gPlus     = trc g
-      redundant = [ (n1, n2)
-                  | (n1, n2) ← edges g
-                  , n'       ← suc g n1
-                  , n' /= n2
-                  , n2 `elem` suc gPlus n' ]
-   in delEdges redundant g
+untransitive g = foldl' eachEdge g (edges g) where
+  eachEdge g' (n1, n2) = foldl' eachSuc g' (suc g' n1) where
+    eachSuc g'' n' =
+      if n' /= n1 && n' /= n2 && n2 `elem` suc g'' n'
+        then delEdge (n1, n2) g''
+        else g''
 
 -- | Look up the node index of a node label
 nmLab ∷ Ord a ⇒ NM.NodeMap a → a → Node

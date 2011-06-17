@@ -9,6 +9,7 @@ module Util (
   module Control.Arrow,
   module Control.Applicative,
   module Control.Monad,
+  module Data.List,
   module Data.Monoid,
   module Data.Maybe,
   -- module Data.Foldable,
@@ -39,6 +40,7 @@ import Control.Applicative
 import Control.Monad 
   {- hiding ( forM, forM_, mapM, mapM_, msum,
               sequence, sequence_ ) -}
+import Data.List (foldl')
 import Data.Monoid
 import Data.Maybe
 -- import Data.Foldable
