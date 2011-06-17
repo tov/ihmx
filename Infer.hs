@@ -1024,7 +1024,16 @@ inferFnTests = T.test
   -- Equirecursive types
   , te "(botU : μa. M → [ A: a ]) N"
   , "(botU : μa. M → [ A: a ]) M"
-      -: "[ A: μα. M → [ A: α ]"
+      -: "[ A: μα. M → [ A: α ] ]"
+  , "let rec x = `A x in x"
+      -: "∀α:U. [ A: μβ. [ A: β | α ] | α ]"
+  , "let rec x = #B (`A x) in x"
+      -: "∀α β: U. [ A: μγ. [ A: γ | B: β | α ] | B: β | α ]"
+  , "λx. choose x (`A x)"
+      -: "∀γ: U. [ A: μα. [ A: α | γ ] | γ ] → [ A: μα. [ A: α | γ ] | γ ]"
+  , "λx. choose x (#B (`A x))"
+      -: "∀β γ: U. [ A: μα. [ A: α | B: β | γ ] | B: β | γ ] → \
+         \         [ A: μα. [ A: α | B: β | γ ] | B: β | γ ]"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"

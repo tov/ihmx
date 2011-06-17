@@ -762,13 +762,17 @@ instance (Tv tv, MonadU tv m) ⇒ Show (SkelMap tv m) where
     | (α, βs, mτ) ← List.sortBy (\(_,x,_) (_,y,_) → compare x y)
                                 (extSkels skm) ]
 
+data FoldWriterT m a =
+  FoldWriterT { unfoldWriterT ∷ WriterT [FoldWriterT m a] m a }
+
 -- | Build an internal subtype constraint from an external subtype
 --   constraint.
 skeletonize ∷ MonadU tv m ⇒ [(Type tv, Type tv)] → m (SkelMap tv m)
-skeletonize sc0 = flip runReaderT Set.empty $ do
+skeletonize sc0 = do
   rskels ← newRef Map.empty
   let -- | Record that @τ1@ is a subtype of @τ2@, and do some
       --   unification.
+      delay action = tell [FoldWriterT action]
       relateTypes τ1 τ2 = do
         (_, skel1) ← registerType τ1
         (_, skel2) ← registerType τ2
@@ -776,17 +780,7 @@ skeletonize sc0 = flip runReaderT Set.empty $ do
       -- | Relate two type variables in the same skeleton
       relateTVs α1 α2 = relateTypes (fvTy α1) (fvTy α2)
       -- |
-      relateSkels sk1 sk2 = do
-        α1   ← lift $ skeletonTV sk1
-        α2   ← lift $ skeletonTV sk2
-        seen ← ask
-        trace ("relateSkels", α1, α2, seen)
-        unless (Set.member (α1, α2) seen || Set.member (α2, α1) seen) $ do
-          local (Set.insert (α1, α2)) $ do
-            trace ("relateSkels {")
-            action ← UF.coalesce combiner sk1 sk2
-            trace ("} relateSkels")
-            maybe (return ()) id action
+      relateSkels = UF.coalesce_ combiner
       --
       -- Given a type, create a shape and skeleton for it, store them in
       -- the relevant data structures, and return the type variable that
@@ -826,32 +820,29 @@ skeletonize sc0 = flip runReaderT Set.empty $ do
         return (α, skel)
       --
       -- Combine two skeletons
-      noop = return ()
       combiner (αs1, shape1) (αs2, shape2) = do
-        (shape', action) ← case (shape1, shape2) of
-          (NoShape, _)                    → return (shape2, noop)
-          (_, NoShape)                    → return (shape1, noop)
-          (ConShape c1 [], ConShape _ []) → return (ConShape c1 [], noop)
+        shape' ← case (shape1, shape2) of
+          (NoShape, _)                    → return shape2
+          (_, NoShape)                    → return shape1
+          (ConShape c1 [], ConShape _ []) → return (ConShape c1 [])
           (ConShape c1 sks1, ConShape c2 sks2)
             | c1 == c2 && length sks1 == length sks2
                                          → do
-            return (ConShape c1 sks1,
-              sequence_ [ unless (var ⊑ QInvariant) $
-                            relateSkels sk1 sk2
-                        | var ← getVariances c1 (length sks1)
-                        | sk1  ← sks1
-                        | sk2  ← sks2 ])
-            {-
+            sequence_ [ unless (var ⊑ QInvariant) $
+                          delay (relateSkels sk1 sk2)
+                      | var ← getVariances c1 (length sks1)
+                      | sk1  ← sks1
+                      | sk2  ← sks2 ]
+            return (ConShape c1 sks1)
           (RowShape n1 sk1 sk1', RowShape n2 sk2 sk2')
             | n1 < n2   → mutate (n1, sk1, sk1') αs2
             | n1 > n2   → mutate (n2, sk2, sk2') αs1
             | otherwise → do
-                relateSkels sk1 sk2
-                relateSkels sk1' sk2'
+                delay (relateSkels sk1 sk2)
+                delay (relateSkels sk1' sk2')
                 return (RowShape n1 sk1 sk1')
           _             → fail $
             "Could not unify " ++ show shape1 ++ " and " ++ show shape2
-            -}
         return (Set.union αs1 αs2, shape')
       --
       -- Permute rows to bring matching labels together.
@@ -865,15 +856,19 @@ skeletonize sc0 = flip runReaderT Set.empty $ do
                 Left _  → return ()
                 Right (RowTy lb τ τ') → do
                   δ  ← newTV
-                  relateTypes τ' (RowTy la (fvTy α) (fvTy δ))
                   δ' ← tvOf (RowTy lb τ (fvTy δ))
-                  relateTVs α' δ'
+                  delay $ relateTypes τ' (RowTy la (fvTy α) (fvTy δ))
+                  delay $ relateTVs α' δ'
                   rewriteTV β (RowTy la (fvTy α) (fvTy δ'))
                 Right x → fail $ "BUG! bad skeleton: " ++ show x
           | β  ← Set.toList βs ]
         return (RowShape la sk sk')
       --
-  mapM_ (uncurry relateTypes) sc0
+  let loop []      = return ()
+      loop actions = do
+        actions' ← execWriterT (sequence_ actions)
+        loop (map unfoldWriterT actions')
+  loop (map (uncurry relateTypes) sc0)
   SkelMap <$> readRef rskels
 
 -- | Make sure an internal subtype constraint is consistent with a
