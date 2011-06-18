@@ -87,18 +87,14 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
                Bool → c → γ → Type r → m (Type r, c)
   gen value c0 γ τ = do
     (αs, qls, c) ← gen' value c0 γ τ
-    trace ("gen'->gen", αs, qls, τ)
-    σ            ← closeWithQuals qls AllQu αs <$> derefAll τ
-    trace ("gen", σ)
+    σ ← standardizeMus =<< closeWithQuals qls AllQu αs <$> derefAll τ
     return (σ, c)
   -- | Generalize a list of types together.
   genList    ∷ (MonadU r m, Ftv γ r) ⇒
                Bool → c → γ → [Type r] → m ([Type r], c)
   genList value c0 γ τs = do
     (αs, qls, c) ← gen' value c0 γ τs
-    trace ("gen'->genList", αs, qls, τs)
-    σs           ← mapM (closeWithQuals qls AllQu αs <$$> derefAll) τs
-    trace ("genList", σs)
+    σs ← mapM (standardizeMus <=< closeWithQuals qls AllQu αs <$$> derefAll) τs
     return (σs, c)
 
 infixr 4 ⋀
@@ -305,11 +301,11 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
     c            ← unrollRecs c
     trace ("gen (unrollRecs)", c)
     skm1         ← skeletonize c
-    trace ("gen (skeletonized)", skm1, c, τ)
+    trace ("gen (skeletonized)", skm1, (c, qc), τ)
     (expandSks, skipSks)
                  ← occursCheck skm1
     (_, noX)     ← expand skm1 expandSks skipSks
-    trace ("gen (expand)", noX, c, τ)
+    trace ("gen (expand)", noX, (c, qc), τ)
     (c, qc)      ← decompose noX (c, qc)
     γftv         ← ftvSet γ
     τftv         ← ftvV τ
@@ -376,11 +372,10 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
           loop c
         where
         doRWST m = snd <$> execRWST m () Set.empty
-        a1 ≤! a2 = trace ("<!", a1, a2) >> tell (Set.singleton (a1, a2), [], [])
-        τ1 ⊏! τ2 = trace ("[!", τ1, τ2) >> tell (Set.empty, [(τ1, τ2)], [])
-        τ1 ≤* τ2 = trace ("<*", τ1, τ2) >> tell (Set.empty, [], [(τ1, τ2)])
+        a1 ≤! a2 = tell (Set.singleton (a1, a2), [], [])
+        τ1 ⊏! τ2 = tell (Set.empty, [(τ1, τ2)], [])
+        τ1 ≤* τ2 = tell (Set.empty, [], [(τ1, τ2)])
         loop c' = do
-          trace ("loop", c')
           again ← lastT . snd <$> listen (mapM_ decompLe c')
           if null again
             then return ()

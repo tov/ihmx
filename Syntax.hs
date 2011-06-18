@@ -25,13 +25,13 @@ import Control.Monad
 import Control.Monad.Identity
 import Control.Monad.Reader     as CMR
 import Control.Monad.Writer     as CMW
+import Control.Monad.State      as CMS hiding (withState)
 import Control.Monad.RWS        as RWS
 import Control.Monad.ST (runST)
 import qualified Data.Char      as Char
 import qualified Data.List      as List
 import qualified Data.Map       as Map
 import qualified Data.Set       as Set
-import qualified Data.STRef     as ST
 import Text.Parsec hiding ((<|>), many, optional)
 import Text.Parsec.Token
 import qualified Text.PrettyPrint as Ppr
@@ -42,6 +42,7 @@ import qualified Test.HUnit as T
 import Util
 import Parsable
 import Ppr
+import MonadRef
 import qualified Stream
 
 ---
@@ -607,6 +608,102 @@ isPrenexType (VarTy (FreeVar r)) =
 isPrenexType τ                   = isMonoType τ
 
 ---
+--- Equality and normalization of equirecursive types.
+---
+
+newtype REC_TYPE a = REC_TYPE { unREC_TYPE ∷ Type a }
+
+instance Ord a ⇒ Eq (REC_TYPE a) where
+  a == b   = compare a b == EQ
+
+instance Ord a ⇒ Ord (REC_TYPE a) where
+  compare (REC_TYPE τ10) (REC_TYPE τ20) =
+    evalState (loop τ10 τ20) Set.empty where
+      thenCompareM m1 m2 = do
+        ord ← m1
+        case ord of
+          EQ → m2
+          _  → return ord
+      compareM a b = return (compare a b)
+      loop τ1 τ2 = do
+        seen ← get
+        if (Set.member (τ1, τ2) seen || Set.member (τ2, τ2) seen)
+          then return EQ
+          else do
+            put (Set.insert (τ1, τ2) seen)
+            case (τ1, τ2) of
+              (RecTy _ τ1', _)
+                → loop (openTy 0 [τ1] τ1') τ2
+              (_, RecTy _ τ2')
+                → loop τ1 (openTy 0 [τ2] τ2')
+              (QuaTy q1 qls1 τ1', QuaTy q2 qls2 τ2')
+                → compareM q1 q2 `thenCompareM`
+                  compareM qls1 qls2 `thenCompareM`
+                  loop τ1' τ2'
+              (QuaTy _ _ _, _)
+                → return LT
+              (VarTy _, QuaTy _ _ _)
+                → return GT
+              (VarTy v1, VarTy v2)
+                → return (v1 `compare` v2)
+              (VarTy _, _)
+                → return LT
+              (ConTy _ _, QuaTy _ _ _)
+                → return GT
+              (ConTy _ _, VarTy _)
+                → return GT
+              (ConTy n1 τs1, ConTy n2 τs2)
+                → foldl' thenCompareM (compareM n1 n2) (zipWith loop τs1 τs2)
+              (ConTy _ _, _)
+                → return LT
+              (RowTy _ _ _, QuaTy _ _ _)
+                → return GT
+              (RowTy _ _ _, VarTy _)
+                → return GT
+              (RowTy _ _ _, ConTy _ _)
+                → return GT
+              (RowTy n1 τ1f τ1r, RowTy n2 τ2f τ2r)
+                → compareM n1 n2 `thenCompareM`
+                  loop τ1f τ2f `thenCompareM`
+                  loop τ1r τ2r
+
+-- | Put all recursion in standard form.
+--   PRECONDITION: The type is in 'standardize' standard form
+standardizeMus ∷ ∀ a r m. (Ord a, MonadRef r m) ⇒ Type a → m (Type a)
+standardizeMus t00 = do
+  counter ← newRef 0
+  let loop g0 t0 = do
+        case Map.lookup (REC_TYPE t0) g0 of
+          Just (i, used') → do
+            writeRef used' True
+            return (fvTy i)
+          Nothing → do
+            i    ← gensym
+            used ← newRef False
+            let g = Map.insert (REC_TYPE t0) (i, used) g0
+            t0'  ← case t0 of
+              QuaTy u qls t → do
+                is ← mapM (const gensym) qls
+                t' ← loop g (openTy 0 (map fvTy is) t)
+                return (QuaTy u qls (closeTy 0 is t'))
+              ConTy n ts    → ConTy n `liftM` mapM (loop g) ts
+              VarTy _       → return t0
+              RowTy n t1 t2 → RowTy n `liftM` loop g t1 `ap` loop g t2
+              RecTy _ t1    → loop g0 (openTy 0 [t0] t1)
+            wasUsed ← readRef used
+            return $ if wasUsed
+              then RecTy Nope (closeTy 0 [i] t0')
+              else t0'
+      gensym  = do
+        i ← readRef counter
+        writeRef counter (i + 1)
+        return (Right i)
+      clean = fmap (either id (error "BUG! (standardizeMus)"))
+  gensym
+  t00' ← loop Map.empty (fmap Left t00)
+  return (clean t00')
+
+---
 --- Patterns
 ---
 
@@ -630,6 +727,7 @@ totalPatt ∷ Patt a → Bool
 totalPatt (VarPa _)         = True
 totalPatt WldPa             = True
 totalPatt (ConPa "Pair" πs) = all totalPatt πs
+totalPatt (ConPa "U" [])    = True
 totalPatt (ConPa _ _)       = False
 totalPatt (InjPa _ _)       = False
 totalPatt (AnnPa π _)       = totalPatt π
@@ -1272,12 +1370,12 @@ instance Ord v ⇒ Standardizable (Type v) v where
   standardizeQuals qm t00 = runST (loop 0 [] t00) where
     loop depth g t0 = case t0 of
       QuaTy u _ _ → do
-        rn ← ST.newSTRef []
+        rn ← newRef []
         let (qls, t) = unfoldQua u t0
             i        = length qls
             g'       = (depth + i, rn, False,) <$$> qls
         t' ← loop (depth + i) (g' ++ g) t
-        nl ← ST.readSTRef rn
+        nl ← readRef rn
         return $ case nl of
           [] → openTyN i (-1) [] t'
           _  → QuaTy u [ n | (_,n) ← nl ] (openTyN (i - 1) (i - 1) [] t')
@@ -1296,12 +1394,12 @@ instance Ord v ⇒ Standardizable (Type v) v where
         ext' ← loop depth g ext
         return (foldRow row' ext')
       RecTy pn _            → do
-        rn ← ST.newSTRef []
+        rn ← newRef []
         let (pns, t) = unfoldRec t0
             i        = length pns
             g'       = (depth + i, rn, True,) <$$> replicate i [L]
         t' ← loop (depth + i) (g' ++ g) t
-        nl ← ST.readSTRef rn
+        nl ← readRef rn
         return $
           if null nl
             then openTyN i (-1) [] t'
@@ -1312,19 +1410,19 @@ instance Ord v ⇒ Standardizable (Type v) v where
         | rib:_                    ← drop i g
         , (olddepth, r, rec, ql):_ ← drop j rib
                             → do
-          s  ← ST.readSTRef r
+          s  ← readRef r
           if rec
             then do
               case List.findIndex ((== (depth - i)) . fst . fst) s of
                 Just _  → return ()
-                Nothing → ST.writeSTRef r (s ++ [((depth - i, 0), (n, ql))])
+                Nothing → writeRef r (s ++ [((depth - i, 0), (n, ql))])
               return (BoundVar (depth - olddepth) 0 n, True)
             else do
               j' ← case List.findIndex ((== (depth - i, j)) . fst) s of
                 Just j' → return j'
                 Nothing → do
                   when (keep ql) $
-                    ST.writeSTRef r (s ++ [((depth - i, j), (n, ql))])
+                    writeRef r (s ++ [((depth - i, j), (n, ql))])
                   return (length s)
               return (BoundVar (depth - olddepth) j' n, keep ql)
         | otherwise   → return (v0, True)

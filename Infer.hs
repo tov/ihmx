@@ -1021,19 +1021,37 @@ inferFnTests = T.test
       -: "∀ α:A. [ A: α | B: M ] → M"
   , "choose (`A ((λ_ _.X) : X -> X -R> X)) (`A ((λ_ _.X) : X -> X -A> X))"
       -: "∀ r. [ A: X → X -L> X | r ]"
+  , "λx y. match x with `A U → y"
+      -: "∀ α. [ A: U ] → α → α"
+  , "λx y. match x with `A U → y | `B (U, U) → y"
+      -: "∀ α. [ A: U | B: U × U ] → α → α"
   -- Equirecursive types
   , te "(botU : μa. M → [ A: a ]) N"
   , "(botU : μa. M → [ A: a ]) M"
-      -: "[ A: μα. M → [ A: α ] ]"
+      -: "μβ. [ A: M → β ]"
   , "let rec x = `A x in x"
-      -: "∀α:U. [ A: μβ. [ A: β | α ] | α ]"
+      -: "∀γ:U. μα. [ A: α | γ ]"
   , "let rec x = #B (`A x) in x"
-      -: "∀α β: U. [ A: μγ. [ A: γ | B: β | α ] | B: β | α ]"
+      -: "∀β γ: U. μα. [ A: α | B: β | γ ]"
   , "λx. choose x (`A x)"
-      -: "∀γ: U. [ A: μα. [ A: α | γ ] | γ ] → [ A: μα. [ A: α | γ ] | γ ]"
+      -: "∀γ: U. (μα. [ A: α | γ ]) → μα. [ A: α | γ ]"
   , "λx. choose x (#B (`A x))"
-      -: "∀β γ: U. [ A: μα. [ A: α | B: β | γ ] | B: β | γ ] → \
-         \         [ A: μα. [ A: α | B: β | γ ] | B: β | γ ]"
+      -: "∀β γ: U. (μα. [ A: α | B: β | γ ]) → \
+         \         μα. [ A: α | B: β | γ ]"
+  , "let rec foldr = λf z xs.                   \
+    \  match xs with                            \
+    \  | `Cons (x, xs') → f x (foldr f z xs')   \
+    \  | `Nil U         → z                     \
+    \  in foldr                                 "
+      -: "∀ α, β:U. (α → β -L> β) → β →                 \
+         \          (μγ. [ Cons: α × γ | Nil: U ]) → β"
+  , "let rec foldl = λf z xs.                   \
+    \  match xs with                            \
+    \  | `Cons (x, xs') → foldl f (f x z) xs'   \
+    \  | `Nil U         → z                     \
+    \  in foldl                                 "
+      -: "∀ α, β:U. (α → β -L> β) → β →                 \
+         \          (μγ. [ Cons: α × γ | Nil: U ]) → β"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"
