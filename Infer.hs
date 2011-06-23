@@ -1043,15 +1043,15 @@ inferFnTests = T.test
     \  | `Cons (x, xs') → f x (foldr f z xs')   \
     \  | `Nil U         → z                     \
     \  in foldr                                 "
-      -: "∀ α, β:U. (α → β -L> β) → β →                 \
-         \          (μγ. [ Cons: α × γ | Nil: U ]) → β"
+      -: "∀ α β. (α → β -L> β) → β →                 \
+         \       (μγ. [ Cons: α × γ | Nil: U ]) -β> β"
   , "let rec foldl = λf z xs.                   \
     \  match xs with                            \
     \  | `Cons (x, xs') → foldl f (f x z) xs'   \
     \  | `Nil U         → z                     \
     \  in foldl                                 "
-      -: "∀ α, β:U. (α → β -L> β) → β →                 \
-         \          (μγ. [ Cons: α × γ | Nil: U ]) → β"
+      -: "∀ α β. (α → β -L> β) → β →                 \
+         \       (μγ. [ Cons: α × γ | Nil: U ]) -β> β"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"

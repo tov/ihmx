@@ -971,9 +971,10 @@ First rewrite as follows:
 
 (DECOMPOSE)
   γs₁ \ γs₂ = γ₁ ... γⱼ
-  βs = { γ ∈ γs₂ | γ is Q-variant }
-  ---------------------------------------------------------------------
-  q₁ γs₁ ⊑ q₂ γs₂  --->  q₁ \-\ q₂ ⊑ βs ⋀ γ₁ ⊑ q₁ βs ⋀ ... ⋀ γⱼ ⊑ q₁ βs
+  βs  = { γ ∈ γs₂ | γ is Q-variant }
+  βsᵢ = if γᵢ is Q-variant then γs₂ else βs
+  -----------------------------------------------------------------------
+  q₁ γs₁ ⊑ q₂ γs₂  --->  q₁ \-\ q₂ ⊑ βs ⋀ γ₁ ⊑ q₁ βs₁ ⋀ ... ⋀ γⱼ ⊑ q₁ βsᵢ
 
 (BOT-SAT)
   ---------------
@@ -1259,8 +1260,10 @@ solveQualifiers value αs βs qc τ = do
                return ((q', βs') :)
       let fvmap = if q2 == L
                     then id     -- (TOP-SAT)
-                    else Map.unionWith mappend
-                           (setToMap (qemSingleton (QE q2 βs')) γs')
+                    else Map.unionWith mappend (setToMapWith bound γs')
+          bound γ
+            | γ `Set.member` sq_βs state = qemSingleton (QE q2 γs2)
+            | otherwise                  = qemSingleton (QE q2 βs')
       return state {
                sq_βlst = fβlst (sq_βlst state),
                sq_vmap = fvmap (sq_vmap state)
@@ -1367,11 +1370,14 @@ solveQualifiers value αs βs qc τ = do
           | (γ, qem) ← Map.toAscList (sq_vmap state)
           , let γqes' = γqes `Map.intersection` ftvPure qem
                 qem'  = foldr (uncurry qemSubst) qem (Map.toList γqes')
-                qem'' = QEMeet [ QE q (γs `Set.intersection` sq_βs state)
+                qem'' = QEMeet [ mkQE γ q γs
                                | QE q γs ← unQEMeet qem'
                                , Set.notMember γ γs ] ]
-        γmap = Map.map each γqes
-          where each (QE q γs) = QE q (γs `Set.intersection` sq_βs state)
+        γmap = Map.mapWithKey each γqes
+          where each γ (QE q γs) = mkQE γ q γs
+        mkQE γ q γs = QE q $ if γ `Set.member` sq_βs state
+                               then γs
+                               else γs `Set.intersection` sq_βs state
     βlst ← sequence $ do
       (q0, βs0) ← sq_βlst state
       let γmap'     = γmap `Map.intersection` setToMap () βs0
@@ -1619,14 +1625,3 @@ data α t = S of α t | Z of α
 
 -}
 
-{-
-
-[(#1 → #1 -#1> #1, #0 -L> #20 -#21> #22),
- (#3 → [ A: #3 | #4 ], #0 -L> #5),
- (#20 -#21> #22, #5 -L> #6)]
-
-[([ A: #3 | #4 ], #22),
- ([ A: #3 | #4 ], #3),
- (#22, #6)]
-
--}
