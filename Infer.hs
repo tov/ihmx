@@ -64,6 +64,7 @@ module Infer (
 
 -- import qualified Data.List  as List
 import qualified Data.Map   as Map
+import qualified Data.Set   as Set
 import qualified Test.HUnit as T
 import Control.Monad.RWS    as RWS
 -- import Control.Monad.State  as CMS
@@ -74,14 +75,12 @@ import System.IO (stderr, hPutStrLn)
 import MonadU
 import Constraint
 import Syntax hiding (tests)
+import Env
 import Util
 
 ---
 --- Inference
 ---
-
-type Γ tv = [[Type tv]]
-type Δ tv = Map.Map Name (Type tv)
 
 -- | Infer the type of a term, given a type context
 infer0 ∷ forall m tv. (MonadU tv m, Show tv, Tv tv) ⇒
@@ -95,18 +94,15 @@ infer ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
         Δ tv → Γ tv → Term Empty → m (Type tv, c)
 infer δ γ e0 = case e0 of
   AbsTm π e                     → do
-    (δ', c1, τ1, τs) ← inferPatt δ π Nothing (countOccs e)
-    (τ2, c2)         ← infer δ' (τs:γ) e
-    -- qe               ← qvarexp . FreeVar <$> newTV
-    -- let cqe          = mconcat (map (⊏ qe) (termFreeTypes γ (AbsTm π e)))
+    (δ', c1, τ1, τs) ← inferPatt δ π Nothing (countOccsPatt π e)
+    (τ2, c2)         ← infer δ' (γ &+& π &:& τs) e
     qe               ← arrowQualifier γ (AbsTm π e)
-    let cqe          = (⊤)
-    return (arrTy τ1 qe τ2, c1 ⋀ c2 ⋀ cqe)
+    return (arrTy τ1 qe τ2, c1 ⋀ c2)
   LetTm π e1 e2                 → do
     (τ1, c1)         ← infer δ γ e1
-    (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1) (countOccs e2)
+    (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1) (countOccsPatt π e2)
     (τs', c')        ← genList (syntacticValue e1) (c1 ⋀ cπ) γ τs
-    (τ2, c2)         ← infer δ' (τs':γ) e2
+    (τ2, c2)         ← infer δ' (γ &+& π &:& τs') e2
     return (τ2, c' ⋀ c2)
   MatTm e1 bs                   → do
     (τ1, c1) ← infer δ γ e1
@@ -114,20 +110,21 @@ infer δ γ e0 = case e0 of
     return (τ2, c1 ⋀ c2)
   RecTm bs e2                   → do
     αs               ← replicateM (length bs) newTVTy
+    let ns           = map fst bs
+        γ'           = γ &+& ns &:& αs
     cs               ← sequence
       [ do
           unless (syntacticValue ei) $
-            fail "In let rec, binding not a syntactic value"
-          (τi, ci) ← infer δ (αs:γ) ei
+            fail $ "In let rec, binding for ‘" ++ ni ++
+                   "’ not a syntactic value"
+          (τi, ci) ← infer δ γ' ei
           return (ci ⋀ αi ≤≥ τi ⋀ αi ⊏ U)
-      | (_, ei) ← bs
-      | αi      ← αs ]
+      | (ni, ei) ← bs
+      | αi       ← αs ]
     (τs', c')        ← genList True (mconcat cs) γ αs
-    (τ2, c2)         ← infer δ (τs':γ) e2
+    (τ2, c2)         ← infer δ (γ &+& ns &:& τs') e2
     return (τ2, c' ⋀ c2)
-  VarTm (FreeVar ff)            → elimEmpty ff
-  VarTm (BoundVar i j _)        → do
-    inst (γ !! i !! j)
+  VarTm n                       → inst =<< γ &.& n
   ConTm n es                    → do
     (τs, cs)         ← unzip <$> mapM (infer δ γ) es
     return (ConTy n τs, mconcat cs)
@@ -157,37 +154,27 @@ inferMatch δ γ τ ((InjPa n πi, ei):bs) | totalPatt πi = do
   β               ← newTVTy
   mαr             ← extractLabel n <$> derefAll τ
   (α, r)          ← maybe ((,) <$> newTVTy <*> newTVTy) return mαr
-  (δ', ci, _, τs) ← inferPatt δ πi (Just α) (countOccs ei)
-  (τi, ci')       ← infer δ' (τs:γ) ei
+  (δ', ci, _, τs) ← inferPatt δ πi (Just α) (countOccsPatt πi ei)
+  (τi, ci')       ← infer δ' (γ &+& πi &:& τs) ei
   (τk, ck)        ← if null bs
                       then return (β, r ≤ endTy)
                       else inferMatch δ' γ r bs
-  let cτ = replicate (length τs) τ ⊏* ei
+  let cτ = mconcat (map (τ ⊏) (countOccsPatt πi ei))
          ⋀ if pattHasWild πi then τ ⊏ A else (⊤)
   trace ("inferMatch", τs, ei)
   return (β, ci ⋀ ci' ⋀ ck ⋀ cτ ⋀ τi ≤ β ⋀ τk ≤ β ⋀ τ ≤ RowTy n α r)
 inferMatch δ γ τ ((πi, ei):bs) = do
   β               ← newTVTy
-  (δ', ci, _, τs) ← inferPatt δ πi (Just τ) (countOccs ei)
-  (τi, ci')       ← infer δ' (τs:γ) ei
+  (δ', ci, _, τs) ← inferPatt δ πi (Just τ) (countOccsPatt πi ei)
+  (τi, ci')       ← infer δ' (γ &+& πi &:& τs) ei
   (τk, ck)        ← inferMatch δ' γ τ bs
   return (β, ci ⋀ ci' ⋀ ck ⋀ τi ≤ β ⋀ τk ≤ β)
-
-{-
-termFreeTypes ∷ Γ tv → Term a → [Type tv]
-termFreeTypes γ e =
-  [ σ
-  | (i, j) ← lfvTm e
-  , rib:_ ← [drop i γ]
-  , σ:_   ← [drop j rib] ]
--}
 
 arrowQualifier ∷ (MonadU tv m) ⇒ Γ tv → Term a → m (QExp tv)
 arrowQualifier γ e =
   qualifier (ConTy "U" [ σ
-                       | (i, j) ← lfvTm e
-                       , rib:_ ← [drop i γ]
-                       , σ:_   ← [drop j rib] ])
+                       | n ← Set.toList (termFv e)
+                       , σ ← γ &.& n ])
   where ?deref = readTV
 
 -- | Instantiate a prenex quantifier
@@ -317,7 +304,7 @@ check e = case showInfer (read e) of
 
 showInfer ∷ Term Empty → Either String (Type String, String)
 showInfer e = runU $ do
-  (τ, c) ← infer0 [elimEmpty <$$> γ0] e
+  (τ, c) ← infer0 (emptyΓ &+& Map.fromList γ0) e
   τ'     ← stringifyType τ
   return (τ', show c)
 

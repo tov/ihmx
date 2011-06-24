@@ -708,7 +708,7 @@ standardizeMus t00 = do
 ---
 
 data Patt a
-  = VarPa (Perhaps Name)
+  = VarPa Name
   | WldPa
   | ConPa Name [Patt a]
   | InjPa Name (Patt a)
@@ -739,6 +739,13 @@ pattHasWild (ConPa _ πs) = any pattHasWild πs
 pattHasWild (InjPa _ π)  = pattHasWild π
 pattHasWild (AnnPa π _)  = pattHasWild π
 
+pattBv ∷ Patt a → [Name]
+pattBv (VarPa n)    = [n]
+pattBv WldPa        = []
+pattBv (ConPa _ πs) = concatMap pattBv πs
+pattBv (InjPa _ π)  = pattBv π
+pattBv (AnnPa π _)  = pattBv π
+
 ---
 --- Terms
 ---
@@ -747,19 +754,13 @@ data Term a
   = AbsTm (Patt a) (Term a)
   | LetTm (Patt a) (Term a) (Term a)
   | MatTm (Term a) [(Patt a, Term a)]
-  | RecTm [(Perhaps Name, Term a)] (Term a)
-  | VarTm (Var a)
+  | RecTm [(Name, Term a)] (Term a)
+  | VarTm Name
   | ConTm Name [Term a]
   | LabTm Bool Name
   | AppTm (Term a) (Term a)
   | AnnTm (Term a) Annot
   deriving Functor
-
-bvTm ∷ Optional f => Int → Int → f Name → Term a
-bvTm i j n = VarTm (BoundVar i j (coerceOptional n))
-
-fvTm ∷ a → Term a
-fvTm  = VarTm . FreeVar
 
 syntacticValue ∷ Term a → Bool
 syntacticValue (AbsTm _ _)       = True
@@ -785,6 +786,21 @@ isAnnotated (ConTm _ _)      = False
 isAnnotated (LabTm _ _)      = False
 isAnnotated (AppTm _ _)      = False
 isAnnotated (AnnTm _ _)      = True
+
+termFv ∷ Term a → Set.Set Name
+termFv e0 = case e0 of
+  AbsTm π e      → mask π e
+  MatTm e bs     → Set.unions (termFv e : map (uncurry mask) bs)
+  LetTm π e1 e2  → termFv e1 `Set.union` mask π e2
+  RecTm bs e2    → Set.unions (termFv e2 : map (termFv . snd) bs)
+                     Set.\\ Set.fromList (map fst bs)
+  VarTm n        → Set.singleton n
+  ConTm _ es     → Set.unions (map termFv es)
+  LabTm _ _      → Set.empty
+  AppTm e1 e2    → termFv e1 `Set.union` termFv e2
+  AnnTm e _      → termFv e
+  where
+  mask π e = termFv e Set.\\ Set.fromList (pattBv π)
 
 ---
 --- Initial environment
@@ -845,8 +861,8 @@ isAnnotated (AnnTm _ _)      = True
       , ("cast",        "∀ α β. α → β")
       ]
 
-γ0 ∷ [Type Empty]
-γ0  = map (read . snd) γ0'
+γ0 ∷ [(Name, Type a)]
+γ0 = second (elimEmptyF . read) <$> γ0'
 
 ---
 --- Locally nameless operations
@@ -962,67 +978,6 @@ contractiveTy = loop 0 where
   loop k (RowTy _ _ t2)           = loop k t2 -- don't check field
   loop k (RecTy _ t)              = loop (k + 1) t
 
--- | Rename the variables at rib level k, where we adjust the rib levels
---   in the new names as we traverse under binders.
-renameTm ∷ Int → [Var a] → Term a → Term a
-renameTm k vs e0 = case e0 of
-  AbsTm π e     → AbsTm π (next e)
-  LetTm π e1 e2 → LetTm π (loop e1) (next e2)
-  MatTm e1 bs   → MatTm (loop e1) [ (π, next e) | (π,e) ← bs ]
-  RecTm bs e2   → RecTm [ (pn, next e) | (pn,e) ← bs ] (next e2)
-  VarTm var     → VarTm $ case var of
-    BoundVar i j name
-      | i > k         → BoundVar i j name
-      | i == k, Just v ← listNth j vs
-                      → bumpVar k v
-    _                 → var
-  ConTm n vs    → ConTm n (map loop vs)
-  LabTm b n     → LabTm b n
-  AppTm e1 e2   → AppTm (loop e1) (loop e2)
-  AnnTm e annot → AnnTm (loop e) annot
-  where next = renameTm (k + 1) vs
-        loop = renameTm k vs
-
--- | Like 'openTyN', but for terms.
-openTm ∷ Int → [Term a] → Term a → Term a
-openTm k es e0 = case e0 of
-  AbsTm π e     → AbsTm π (next e)
-  LetTm π e1 e2 → LetTm π (loop e1) (next e2)
-  MatTm e1 bs   → MatTm (loop e1) [ (π, next e) | (π,e) ← bs ]
-  RecTm bs e2   → RecTm [ (pn, next e) | (pn,e) ← bs ] (next e2)
-  VarTm var     → case var of
-    BoundVar i j name
-      | i > k         → VarTm (BoundVar i j name)
-      | i == k, Just e ← listNth j es
-                      → e
-    _                 → VarTm var
-  ConTm n es    → ConTm n (map loop es)
-  LabTm b n     → LabTm b n
-  AppTm e1 e2   → AppTm (loop e1) (loop e2)
-  AnnTm e annot → AnnTm (loop e) annot
-  where next = openTm (k + 1) es
-        loop = openTm k es
-
--- | Find the "locally-free" variables in a term -- that is, the bound
---   variables that point beyond the term.
-lfvTm ∷ Term a → [(Int, Int)]
-lfvTm = Set.toList . lfvTmK 0 where
-  lfvTmK k e0 = case e0 of
-    AbsTm _ e     → next e
-    LetTm _ e1 e2 → loop e1 `Set.union` next e2
-    MatTm e1 bs   → loop e1 `Set.union` Set.unions (map (next . snd) bs)
-    RecTm bs e2   → Set.unions (map (next . snd) bs) `Set.union` next e2
-    VarTm var     → case var of
-      BoundVar i j _
-        | i >= k  → Set.singleton (i - k, j)
-      _           → Set.empty
-    ConTm _ es    → Set.unions (map loop es)
-    LabTm _ _     → Set.empty
-    AppTm e1 e2   → loop e1 `Set.union` loop e2
-    AnnTm e _     → loop e
-    where next = lfvTmK (k + 1)
-          loop = lfvTmK k
-
 ---
 --- Occurrence analysis
 ---
@@ -1123,21 +1078,32 @@ instance Num Occurrence where
     z' ← occToInts o'
     return (fromInteger (toInteger (z * z')))
 
-{-
-countOccs ∷ Eq a ⇒ a → Term a → Occurrence
-countOccs x = loop where
-  loop (AbsTm _ e)     = loop e
-  loop (LetTm _ e1 e2) = loop e1 + loop e2
-  loop (MatTm e1 bs)   = loop e1 + bigJoin (map (loop . snd) bs)
-  loop (RecTm bs e2)   = loop e2 + sum (map (loop . snd) bs)
-  loop (VarTm (FreeVar x'))
-    | x == x'          = 1
-  loop (VarTm _)       = 0
-  loop (ConTm _ es)    = sum (map loop es)
-  loop (AppTm e1 e2)   = loop e1 + loop e2
-  loop (AnnTm e _)     = loop e
--}
+countOccsPatt ∷ Patt a → Term a → [Occurrence]
+countOccsPatt π e = map (flip countOccs e) (pattBv π)
 
+countOccs ∷ Name → Term a → Occurrence
+countOccs x = loop where
+  loop (AbsTm π e)
+    | x `elem` pattBv π   = 0
+    | otherwise           = loop e
+  loop (LetTm π e1 e2)
+    | x `elem` pattBv π   = loop e1
+    | otherwise           = loop e1 + loop e2
+  loop (MatTm e1 bs)      = loop e1 + bigJoin [ loop ei
+                                              | (πi, ei) ← bs
+                                              , x `notElem` pattBv πi ]
+  loop (RecTm bs e2)
+    | x `elem` map fst bs = 0
+    | otherwise           = loop e2 + sum (map (loop . snd) bs)
+  loop (VarTm x')
+    | x == x'             = 1
+    | otherwise           = 0
+  loop (ConTm _ es)       = sum (map loop es)
+  loop (LabTm _ _)        = 0
+  loop (AppTm e1 e2)      = loop e1 + loop e2
+  loop (AnnTm e _)        = loop e
+
+{-
 -- | Count the occurrences of the variables of rib 0
 countOccs ∷ Term Empty → [Occurrence]
 countOccs = Stream.toList . loop . openTm 0 (map fvTm [0..]) . elimEmptyF
@@ -1154,6 +1120,7 @@ countOccs = Stream.toList . loop . openTm 0 (map fvTm [0..]) . elimEmptyF
   loop (AnnTm e _)         = loop e
   --
   δ j = fmap (\j' → if j == j' then 1 else 0) (Stream.iterate succ 0)
+-}
 
 ---
 --- Free type variables
@@ -1253,6 +1220,9 @@ instance Ord v ⇒ Ftv (Type v) v where
 
 instance Ftv a v ⇒ Ftv [a] v where
   ftvTree a = FTBranch `liftM` mapM ftvTree a
+
+instance Ftv a v ⇒ Ftv (Map.Map k a) v where
+  ftvTree = ftvTree . Map.elems
 
 instance (Ftv a v, Ftv b v) ⇒ Ftv (a,b) v where
   ftvTree (a,b) = liftM2 mappend (ftvTree a) (ftvTree b)
@@ -1603,10 +1573,10 @@ parseTypeArrow tyvarp typep = flip arrTy <$> choice
       QExp <$> option U parseQLit <*> many tyvarp
   ]
 
--- To parse a pattern. Produces the pattern (which is nameless) and
+-- To parse a pattern. Produces the pattern and
 -- the list of names bound by the patern.
-parsePatt ∷ Int → P (Patt a, [Name])
-parsePatt p = withState [] $ (,) <$> level p <*> getState where
+parsePatt ∷ Int → P (Patt a)
+parsePatt p = withState [] (level p) where
   level 0 = do
               π ← level 1
               option π $ do
@@ -1627,95 +1597,72 @@ parsePatt p = withState [] $ (,) <$> level p <*> getState where
     if name `elem` names
       then unexpected ("repeated variable in pattern: " ++ name)
       else putState (names++[name])
-    return (Here name)
+    return name
 
 -- | To parse a closed term.
 instance Parsable (Term a) where
-  genParser  = withState [] $ do
-    whiteSpace tok
-    (e, free) ← parseTerm (map fst γ0')
-    case free of
-      [] → return e
-      _  → fail ("Open term: " ++ show free)
+  genParser  = parseTerm
 
 -- | To parse a (potentially open) term. Free variables are handled as
 --   in 'parseType'.
-parseTerm ∷ [Name] → P (Term a, [Name])
-parseTerm γ0 = liftM2 (,) (level0 [γ0]) getState where
-  level0 γ = do
+parseTerm ∷ P (Term a)
+parseTerm = level0 where
+  level0   = do
                reserved tok "match"
-               e1 ← level0 γ
+               e1 ← level0
                reserved tok "with"
                optional (reservedOp tok "|")
                bs ← flip sepBy1 (reservedOp tok "|") $ do
-                 (π, names) ← parsePatt 0
+                 π ← parsePatt 0
                  parseArrow
-                 e ← level0 (names : γ)
+                 e ← level0
                  return (π, e)
                return (MatTm e1 bs)
          <|> do
                reserved tok "let"
                choice
-                [ do
-                    reserved tok "rec"
-                    parseLetRec level0 γ
-                , do
-                    (π, names) ← parsePatt 0
-                    reservedOp tok "="
-                    e1 ← level0 γ
-                    reserved tok "in"
-                    e2 ← level0 (names : γ)
-                    return (LetTm π e1 e2)
+                [ reserved tok "rec" *>
+                  (RecTm
+                    <$> sepBy1
+                          ((,) <$> lowerIdentifier
+                               <*  reservedOp tok "="
+                               <*> level0)
+                          (reserved tok "and")
+                    <*  reserved tok "in"
+                    <*> level0)
+                , LetTm
+                    <$> parsePatt 0
+                    <*  reservedOp tok "="
+                    <*> level0
+                    <*  reserved tok "in"
+                    <*> level0
                 ]
          <|> do
                reservedOp tok "\\" <|> reservedOp tok "λ"
-               (πs, names) ← unzip <$> many1 (parsePatt 3)
+               πs ← many1 (parsePatt 3)
                dot tok
-               e ← level0 (reverse names ++ γ)
+               e ← level0
                return (foldr AbsTm e πs)
-         <|> level1 γ
-  level1 γ = do
-               e ← level2 γ
+         <|> level1
+  level1   = do
+               e ← level2
                option e $ do
                  reservedOp tok ":"
                  AnnTm e <$> genParser
-  level2 γ = ConTm <$> upperIdentifier <*> many (level3 γ)
-         <|> chainl1 (level3 γ) (return AppTm)
-  level3 γ = do
-               v ← lowerIdentifier
-               VarTm <$> findVar v γ
+  level2   = ConTm <$> upperIdentifier <*> many level3
+         <|> chainl1 level3 (return AppTm)
+  level3   = VarTm <$> lowerIdentifier
          <|> do
                con ← upperIdentifier
                return (ConTm con [])
          <|> LabTm <$> rowInjMark <*> upperIdentifier
-         <|> parens tok (tuple γ)
-  tuple γ  = chainl1 (level0 γ)
+         <|> parens tok tuple
+  tuple    = chainl1 level0
                      ((\e1 e2 → ConTm "Pair" [e1, e2]) <$ comma tok)
 
 rowInjMark ∷ P Bool
 rowInjMark = (True  <$ char '`')
          <|> (False <$ char '#')
-
-parseLetRec ∷ ([[Name]] → P (Term a)) → [[Name]] → P (Term a)
-parseLetRec term γ = do
-  freeVars ← getState
-  putState []
-  bs ← flip sepBy1 (reserved tok "and") $ do
-    x ← lowerIdentifier
-    reservedOp tok "="
-    e ← term []
-    return (x, e)
-  reserved tok "in"
-  e2       ← term []
-  recVars  ← getState
-  putState freeVars
-  let names = map fst bs
-  unless (ordNub names == names) $
-    fail "Repeated bound variable name in let rec"
-  let γ'     = names : γ
-  vars' ← mapM (flip findVar γ') recVars
-  let adjust = renameTm 0 vars'
-  return (RecTm (map (Here *** adjust) bs) (adjust e2))
 
 instance Read Annot where
   readsPrec _ = readsPrecFromParser
@@ -1886,105 +1833,75 @@ pprQExp arrowStyle p g (ConTy q   vs) = case pureQualifier (ConTy q vs)
   -}
 
 -- | To pretty-print a pattern and return the list of names of
---   the bound variables.  (Avoiding the given list of names.)
-pprPatt ∷ Ppr a ⇒ Int → [Name] → Patt a → (Ppr.Doc, [Name])
-pprPatt p0 avoid0 π0 = evalRWS (loop p0 π0) () avoid0 where
-  loop _ (VarPa pn)   = Ppr.text <$> getName pn
-  loop _ WldPa        = return (Ppr.char '_')
-  loop _ (ConPa c []) = return (Ppr.text c)
-  loop p (ConPa c πs) = do
-    docs ← mapM (loop 2) πs
-    return $
-      parensIf (p > 1) $
-        Ppr.sep (Ppr.text c : docs)
-  loop p (InjPa c π)  = do
-    doc ← loop 1 π
-    return $
-      parensIf (p > 1) $
-        Ppr.char '`' Ppr.<> Ppr.text c Ppr.<+> doc
-  loop p (AnnPa π annot) = do
-    πdoc ← loop 1 π
-    return $
-      parensIf (p > 0) $
-        Ppr.hang πdoc 2 (Ppr.char ':' Ppr.<+> ppr annot)
-  getName pn = do
-    avoid ← get
-    let name = freshName pn avoid varNames
-    put (name:avoid)
-    tell [name]
-    return name
-
--- | Given a pretty-printing precedence, a list of names to avoid, and
---   a list of patterns, pretty-print the patterns and return a list
---   of lists of their bound names.
-pprPatts ∷ Ppr a ⇒ Int → [Name] → [Patt a] → ([Ppr.Doc], [[Name]])
-pprPatts _ _     []     = ([], [])
-pprPatts p avoid (π:πs) =
-  let (doc, names)   = pprPatt p avoid π
-      (docs, names') = pprPatts p (names++avoid) πs
-   in (doc:docs, names:names')
+--   the bound variables.
+pprPatt ∷ Int → Patt a → Ppr.Doc
+pprPatt = loop where
+  loop _ (VarPa n)    = Ppr.text n
+  loop _ WldPa        = Ppr.char '_'
+  loop _ (ConPa c []) = Ppr.text c
+  loop p (ConPa c πs) =
+    parensIf (p > 1) $
+      Ppr.sep (Ppr.text c : map (loop 2) πs)
+  loop p (InjPa c π)  =
+    parensIf (p > 1) $
+      Ppr.char '`' Ppr.<> Ppr.text c Ppr.<+> loop 1 π
+  loop p (AnnPa π annot) =
+    parensIf (p > 0) $
+      Ppr.hang (loop 1 π) 2 (Ppr.char ':' Ppr.<+> ppr annot)
 
 -- | To pretty-print a closed term.
-instance Ppr a ⇒ Ppr (Term a) where
-  ppr = pprTerm []
+instance Ppr (Term a) where
+  ppr = pprTerm
 
 -- | To pretty-print a term, given a name environment.
-pprTerm ∷ Ppr a ⇒ [[Name]] → Term a → Ppr.Doc
+pprTerm ∷ Term a → Ppr.Doc
 pprTerm  = loop 0 where
-  loop p g e0 = case e0 of
+  loop p e0 = case e0 of
     AnnTm e annot       → parensIf (p > 1) $
-      Ppr.fsep [ loop 1 g e, Ppr.text ":", ppr annot ]
+      Ppr.fsep [ loop 1 e, Ppr.text ":", ppr annot ]
     AbsTm _ _           →
       let (πs, e)        = unfoldAbs e0
-          (πdocs, names) = pprPatts 3 (concat g) πs
        in parensIf (p > 0) $
             Ppr.hang
               (Ppr.char 'λ'
-                 Ppr.<> Ppr.fsep πdocs
+                 Ppr.<> Ppr.fsep (map (pprPatt 3) πs)
                  Ppr.<> Ppr.char '.')
               2
-              (loop 0 (reverse names ++ g) e)
+              (loop 0 e)
     LetTm π e1 e2       →
-      let (πdoc, names) = pprPatt 0 (concat g) π
-       in parensIf (p > 0) $
-            Ppr.hang
-              (Ppr.text "let" Ppr.<+> πdoc Ppr.<+> Ppr.char '=' Ppr.<+>
-               loop 0 g e1)
-              1
-              (Ppr.text "in" Ppr.<+> loop 0 (names : g) e2)
+      parensIf (p > 0) $
+        Ppr.hang
+          (Ppr.text "let" Ppr.<+> pprPatt 0 π Ppr.<+> Ppr.char '=' Ppr.<+>
+           loop 0 e1)
+          1
+          (Ppr.text "in" Ppr.<+> loop 0 e2)
     MatTm e1 bs         →
       parensIf (p > 0) . Ppr.vcat $
-        Ppr.text "match" Ppr.<+> loop 0 g e1 Ppr.<+> Ppr.text "with" :
-        [ let (πdoc, names) = pprPatt 0 (concat g) πi
-           in Ppr.hang
-                (Ppr.char '|' Ppr.<+> πdoc Ppr.<+> Ppr.char '→')
-                4
-                (loop 0 (names : g) ei)
+        Ppr.text "match" Ppr.<+> loop 0 e1 Ppr.<+> Ppr.text "with" :
+        [ Ppr.hang
+            (Ppr.char '|' Ppr.<+> pprPatt 0 πi Ppr.<+> Ppr.char '→')
+            4
+            (loop 0 ei)
         | (πi, ei) ← bs ]
     RecTm bs e2         →
       parensIf (p > 0) $
-        let names           = foldr each [] bs
-            each (pn,_) ns' = freshName pn (ns' ++ concat g) varNames : ns'
-         in Ppr.text "let" Ppr.<+>
-            Ppr.vcat
-              [ Ppr.text kw Ppr.<+>
-                Ppr.hang
-                  (Ppr.text ni Ppr.<+> Ppr.char '=')
-                  2
-                  (loop 0 (names : g) ei)
-              | ni      ← names
-              | (_,ei)  ← bs
-              | kw      ← "rec" : repeat "and" ]
-            Ppr.$$ Ppr.text " in" Ppr.<+> loop 0 (names : g) e2
-    VarTm (BoundVar ix jx (coerceOptional → n)) →
-      Ppr.text $ maybe "?" id $ (listNth jx <=< listNth ix $ g) `mplus` n
-    VarTm (FreeVar name)   → ppr name
+        Ppr.text "let" Ppr.<+>
+        Ppr.vcat
+          [ Ppr.text kw Ppr.<+>
+            Ppr.hang
+              (Ppr.text ni Ppr.<+> Ppr.char '=')
+              2
+              (loop 0 ei)
+          | (ni,ei)  ← bs
+          | kw       ← "rec" : repeat "and" ]
+        Ppr.$$ Ppr.text " in" Ppr.<+> loop 0 e2
+    VarTm name          → Ppr.text name
     ConTm name es       → parensIf (p > 2 && not (null es)) $
-      Ppr.sep (Ppr.text name : map (loop 3 g) es)
+      Ppr.sep (Ppr.text name : map (loop 3) es)
     LabTm inj name     →
       Ppr.char (if inj then '`' else '#') Ppr.<> Ppr.text name
     AppTm e1 e2         → parensIf (p > 2) $
-      Ppr.sep [loop 2 g e1, loop 3 g e2]
+      Ppr.sep [loop 2 e1, loop 3 e2]
 
 instance Show Annot where
   show = Ppr.render . ppr

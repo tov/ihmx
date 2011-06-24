@@ -72,10 +72,6 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
     Omnivariant    → (⊤)
   -- | A qualifier subsumption constraint
   (⊏)        ∷ (Qualifier q1 r, Qualifier q2 r) ⇒ q1 → q2 → c
-  -- | Constrain a list of types against the occurrences of the rib-0
-  --   variables of a term
-  (⊏*)       ∷ Qualifier q r ⇒ [q] → Term Empty → c
-  τs ⊏* e    = mconcat (zipWith (⊏) τs (countOccs e))
   --
   -- | Figure out which variables to generalize in a piece of syntax
   gen'       ∷ (MonadU r m, Ftv γ r, Ftv a r,
@@ -98,7 +94,7 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
     return (σs, c)
 
 infixr 4 ⋀
-infix  5 ≤, ≥, ≤≥, ⊏, ⊏*
+infix  5 ≤, ≥, ≤≥, ⊏
 
 -- | We reduce constraints to inequalities on atoms, which are either
 --   type variables or nullary type constructors.
