@@ -54,12 +54,15 @@ import MonadRef
 ---
 
 -- | A class for type variables and unification.
---   Minimal definition: @newTV@, @writeTV_@, @readTV_@,
+--   Minimal definition: @newFlavTV@, @writeTV_@, @readTV_@,
 --   @hasChanged@, @setChanged@, @unsafePerformU#, and @unsafeIOToU@
 class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
       MonadU tv m | m → tv where
-  -- | Allocate a new, empty type variable
+  -- | Allocate a new, empty type variable constant
+  newFlavTV ∷ Flavor → m tv
+  -- | Allocate a new, empty (unifiable) type variable
   newTV     ∷ m tv
+  newTV     = newFlavTV Universal
   -- | Write a type into a type variable. Not meant to be used
   --   directly by client.
   writeTV_  ∷ tv → Type tv → m ()
@@ -226,10 +229,18 @@ infixr 1 >=>!
 data TV r
   = UnsafeReadRef r ⇒ TV {
       tvId     ∷ !Int,
-      tvRef    ∷ !(r (Maybe (Type (TV r))))
+      tvRep    ∷ !(TVRep r)
     }
 
-instance Tv (TV r) where tvUniqueID = tvId
+data TVRep r
+  = UniFl !(r (Maybe (Type (TV r))))
+  | SkoFl
+
+
+instance Tv (TV r) where
+  tvUniqueID = tvId
+  tvFlavor TV { tvRep = UniFl _ } = Universal
+  tvFlavor TV { tvRep = SkoFl }   = Skolem
 
 -- | For type inference, we use types with free type variables
 --   represented by a 'TV', where the parameter gives the represention
@@ -250,7 +261,7 @@ instance Show (TV s) where
     (True, Just t) → showsPrec _p t
                      -- shows (tvId tv) . showChar '=' .
                      -- showsPrec 2 t
-    _              → showChar '#' . shows (tvId tv)
+    _              → showChar (flavorSigil (tvFlavor tv)) . shows (tvId tv)
 
 instance Ftv (TV s) (TV s) where
   ftvTree = ftvTree . fvTy
@@ -288,16 +299,19 @@ instance MonadRef s m ⇒ MonadRef s (UT s m) where
   unsafeIOToRef = UT . unsafeIOToRef
 
 instance (Functor m, MonadRef s m) ⇒ MonadU (TV s) (UT s m) where
-  newTV = do
+  newFlavTV flavor = do
     uts ← UT get
     let i = utsGensym uts
     UT $ put uts { utsGensym = succ i }
-    trace ("new", i)
-    r ← lift $ newRef Nothing
-    return (TV i r)
+    trace ("new", flavor, i)
+    TV i <$> case flavor of
+      Universal → lift $ UniFl <$> newRef Nothing
+      Skolem    → return SkoFl
   --
-  writeTV_ TV { tvRef = r } t = lift (writeRef r (Just t))
-  readTV_ TV { tvRef = r } = UT (readRef r)
+  writeTV_ TV { tvRep = UniFl r } t = lift (writeRef r (Just t))
+  writeTV_ TV { tvRep = SkoFl }   _ = fail "BUG! writeTV_ got skolem"
+  readTV_ TV { tvRep = UniFl r } = UT (readRef r)
+  readTV_ TV { tvRep = SkoFl }   = return Nothing
   --
   hasChanged   = UT $ gets utsChanged
   putChanged b = UT $ modify $ \uts → uts { utsChanged = b }
@@ -323,9 +337,9 @@ runU m = runST (runErrorT (runUT m))
 ---
 
 instance (MonadU tv m, Monoid w) ⇒ MonadU tv (CMW.WriterT w m) where
-  newTV    = lift newTV
-  writeTV_ = lift <$$> writeTV_
-  readTV_  = lift <$> readTV_
+  newFlavTV = lift <$> newFlavTV
+  writeTV_  = lift <$$> writeTV_
+  readTV_   = lift <$> readTV_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> liftM fst <$> CMW.runWriterT
@@ -333,9 +347,9 @@ instance (MonadU tv m, Monoid w) ⇒ MonadU tv (CMW.WriterT w m) where
   type URef (WriterT w m) = URef m
 
 instance (MonadU tv m, Defaultable s) ⇒ MonadU tv (CMS.StateT s m) where
-  newTV    = lift newTV
-  writeTV_ = lift <$$> writeTV_
-  readTV_  = lift <$> readTV_
+  newFlavTV = lift <$> newFlavTV
+  writeTV_  = lift <$$> writeTV_
+  readTV_   = lift <$> readTV_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> flip CMS.evalStateT getDefault
@@ -343,9 +357,9 @@ instance (MonadU tv m, Defaultable s) ⇒ MonadU tv (CMS.StateT s m) where
   type URef (CMS.StateT s m) = URef m
 
 instance (MonadU tv m, Defaultable r) ⇒ MonadU tv (CMR.ReaderT r m) where
-  newTV    = lift newTV
-  writeTV_ = lift <$$> writeTV_
-  readTV_  = lift <$> readTV_
+  newFlavTV = lift <$> newFlavTV
+  writeTV_  = lift <$$> writeTV_
+  readTV_   = lift <$> readTV_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> flip CMR.runReaderT getDefault
@@ -354,9 +368,9 @@ instance (MonadU tv m, Defaultable r) ⇒ MonadU tv (CMR.ReaderT r m) where
 
 instance (MonadU tv m, Defaultable r, Monoid w, Defaultable s) ⇒
          MonadU tv (RWS.RWST r w s m) where
-  newTV    = lift newTV
-  writeTV_ = lift <$$> writeTV_
-  readTV_  = lift <$> readTV_
+  newFlavTV = lift <$> newFlavTV
+  writeTV_  = lift <$$> writeTV_
+  readTV_   = lift <$> readTV_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> liftM fst <$>
@@ -370,7 +384,8 @@ instance (MonadU tv m, Defaultable r, Monoid w, Defaultable s) ⇒
 
 -- | Super sketchy!
 unsafeReadTV ∷ TV s → Maybe (TypeR s)
-unsafeReadTV TV { tvRef = r } = unsafeReadRef r
+unsafeReadTV TV { tvRep = UniFl r } = unsafeReadRef r
+unsafeReadTV TV { tvRep = SkoFl }      = error "BUG! unsafeReadTV got skolem"
 
 debug ∷ Bool
 debug = False

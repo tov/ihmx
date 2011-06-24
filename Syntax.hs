@@ -1269,6 +1269,17 @@ instance (Ftv a v, Ftv b v) ⇒ Ftv (Either a b) v where
 -- | A class for type variables (which are free in themselves).
 class    (Ftv v v, Show v, Ppr v) ⇒ Tv v where
   tvUniqueID ∷ v → Int
+  tvFlavor   ∷ v → Flavor
+
+data Flavor
+  = Universal
+  | Skolem
+  deriving (Eq, Ord, Show)
+
+-- | Shorthand for indicating a flavor
+flavorSigil ∷ Flavor → Char
+flavorSigil Universal = '#'
+flavorSigil Skolem    = '$'
 
 ---
 --- Unfolds for syntax

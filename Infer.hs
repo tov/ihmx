@@ -1052,6 +1052,15 @@ inferFnTests = T.test
     \  in foldl                                 "
       -: "∀ α β. (α → β -L> β) → β →                 \
          \       (μγ. [ Cons: α × γ | Nil: U ]) -β> β"
+  , "botU : μγ. [ Cons: U × γ | Nil: U ]"
+      -: "μγ. [ Cons: U × γ | Nil: U ]"
+  , "botU : (μγ. [ Cons: A × γ | Nil: U ]) → Z"
+      -: "(μγ. [ Cons: A × γ | Nil: U ]) → Z"
+  , "(botU : (μγ. [ Cons: A × γ | Nil: U ]) → Z) \
+    \(botU : μγ. [ Cons: U × γ | Nil: U ])"
+      -: "Z"
+  , te "(botU : (μγ. [ Cons: U × γ | Nil: U ]) → Z) \
+       \(botU : μγ. [ Cons: A × γ | Nil: U ])"
   {-
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"
