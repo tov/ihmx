@@ -387,6 +387,20 @@ bumpVar k (BoundVar i j n) = BoundVar (i + k) j n
 bumpVar _ v                = v
 
 ---
+--- Kinds
+---
+
+-- | Kinds are used internally to track which type variables carry
+--   actual type information and which merely represent qualifiers.
+data Kind
+  = QualKd
+  | TypeKd
+  deriving (Eq, Ord, Enum, Bounded, Show)
+
+varianceToKind ∷ Variance → Kind
+varianceToKind var = if isQVariance var then QualKd else TypeKd
+
+---
 --- Representation of types and type annotations
 ---
 
@@ -978,6 +992,26 @@ contractiveTy = loop 0 where
   loop k (RowTy _ _ t2)           = loop k t2 -- don't check field
   loop k (RecTy _ t)              = loop (k + 1) t
 
+-- | Find the kinds of the rib 0 type variables in an opened type, where
+--   the given 'Int' is the width of the rib.
+inferKindsTy ∷ Type a → [Kind]
+inferKindsTy = varianceToKind <$$> loop 0 where
+  loop k (QuaTy _ _ t)            = loop (k + 1) t
+  loop k (VarTy (BoundVar i j _))
+    | i == k                      = replicate j 0 ++ 1 : repeat 0
+    | otherwise                   = repeat 0
+  loop _ (VarTy (FreeVar _))      = repeat 0
+  loop k (ConTy c ts)             =
+    foldr (zipWith (+)) (repeat 0)
+      [ let t' = if isQVariance var
+                   then toQualifierType (pureQualifier t)
+                   else t
+         in map (* var) (loop k t')
+      | var ← getVariances c (length ts)
+      | t   ← ts ]
+  loop k (RowTy _ t1 t2)          = zipWith (+) (loop k t1) (loop k t2)
+  loop k (RecTy _ t)              = loop (k + 1) t
+
 ---
 --- Occurrence analysis
 ---
@@ -1236,9 +1270,44 @@ instance Ftv a v ⇒ Ftv (Maybe a) v where
 instance (Ftv a v, Ftv b v) ⇒ Ftv (Either a b) v where
   ftvTree = either ftvTree ftvTree
 
+-- The free type variables in annotations, patterns, and terms give
+-- the free names that are shared between annotations.
+instance Ftv Annot Name where
+  ftvTree (Annot _ τ)  = ftvTree τ
+
+instance Ftv (Patt Empty) Name where
+  ftvTree (VarPa _)        = return mempty
+  ftvTree WldPa            = return mempty
+  ftvTree (ConPa _ πs)     = ftvTree πs
+  ftvTree (InjPa _ π)      = ftvTree π
+  ftvTree (AnnPa π annot)  = ftvTree (π, annot)
+
+instance Ftv (Term Empty) Name where
+  ftvTree e0 = case e0 of
+    AbsTm π e      → ftvTree (π, e)
+    MatTm e bs     → ftvTree (e, bs)
+    LetTm π e1 e2  → ftvTree (π, e1, e2)
+    RecTm bs e2    → ftvTree (map snd bs, e2)
+    VarTm _        → return mempty
+    ConTm _ es     → ftvTree es
+    LabTm _ _      → return mempty
+    AppTm e1 e2    → ftvTree (e1, e2)
+    AnnTm e annot  → ftvTree (e, annot)
+
 -- | A class for type variables (which are free in themselves).
 class    (Ftv v v, Show v, Ppr v) ⇒ Tv v where
   tvUniqueID ∷ v → Int
+  tvKind     ∷ v → Kind
+
+---
+--- Some-quantified type variable names in annotations
+---
+
+class AnnotNames a where
+  annotNames ∷ a → Set.Set Name
+
+instance AnnotNames a ⇒ AnnotNames [a] where
+  annotNames = Set.unions . map annotNames
 
 ---
 --- Unfolds for syntax

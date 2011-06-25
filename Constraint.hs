@@ -930,14 +930,15 @@ expand skm0 skels skipSkels = do
             NoShape        → return ()
             ConShape _ []  → return ()
             ConShape c sks → do
-              βs' ← mapM newSkelTV sks
+              let kinds = map varianceToKind (getVariances c (length sks))
+              βs' ← zipWithM newSkelTV sks kinds
               writeTV α' (ConTy c (map fvTy βs'))
             RowShape n sk1 sk2 → do
-              β1 ← newSkelTV sk1
-              β2 ← newSkelTV sk2
+              β1 ← newSkelTV sk1 TypeKd
+              β2 ← newSkelTV sk2 TypeKd
               writeTV α' (RowTy n (fvTy β1) (fvTy β2))
-      newSkelTV skel = do
-        β ← newTV
+      newSkelTV skel kind = do
+        β ← newTVKind kind
         (αs, shape) ← UF.desc skel
         UF.setDesc skel (Set.insert β αs, shape)
         modifyRef (Map.insert β skel) rskels
@@ -1323,7 +1324,7 @@ solveQualifiers value αs βs qc τ = do
                  Map.filter (== QInvariant) (sq_τftv state)
     (δ's, inv) ← first Set.fromDistinctAscList . unzip <$> sequence
       [ do
-          δ' ← newTV
+          δ' ← newTVKind QualKd
           return (δ', (δ, QE q (Set.insert δ' βs)))
       | (δ, qe@(QE q βs)) ← Map.toAscList inv
       , qe /= minBound ]
@@ -1413,7 +1414,7 @@ solveQualifiers value αs βs qc τ = do
               Map.fromDistinctAscList <$> sequence
                 [ do
                     βs ← case var of
-                      QInvariant → Set.singleton <$> newTV
+                      QInvariant → Set.singleton <$> newTVKind QualKd
                       _          → return Set.empty
                     -- warn $ "\nSAT: substituting " ++ show (QE q βs) ++
                     --        " for type variable " ++ show δ

@@ -56,12 +56,16 @@ import MonadRef
 ---
 
 -- | A class for type variables and unification.
---   Minimal definition: @newTV@, @writeTV_@, @readTV_@,
+--   Minimal definition: @newTV@, @writeTV_@, @readTV_@, @setTVRank_@,
+--   @getTVRank_@,
 --   @hasChanged@, @setChanged@, @unsafePerformU#, and @unsafeIOToU@
 class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
       MonadU tv m | m → tv where
+  -- | Allocate a new, empty type variable with the given kind
+  newTVKind ∷ Kind → m tv
   -- | Allocate a new, empty type variable
   newTV     ∷ m tv
+  newTV     = newTVKind TypeKd
   -- | Write a type into a type variable. Not meant to be used
   --   directly by client.
   writeTV_  ∷ tv → Type tv → m ()
@@ -137,15 +141,25 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
   -- | Compute the free type variables in a type
   ftv       ∷ Ftv a tv ⇒ a → m [tv]
   ftv       = ftvM where ?deref = readTV
-  -- | Find out the rank of a type variable
+  -- | Find out the rank of a type variable. Not meant to be used
+  --   directly.
+  getTVRank_  ∷ tv → m (Maybe Rank)
+  -- | Set the rank of a type variable. Not meant to be used
+  --   directly.
+  setTVRank_  ∷ Rank → tv → m ()
+  -- | Find out the rank of a type variable.
   getTVRank   ∷ tv → m Rank
-  -- | Find out the rank of a type variable
-  setTVRank   ∷ Rank → tv → m ()
+  getTVRank tv =
+    getTVRank_ tv >>=
+    maybe (fail "BUG! (getTVRank) substituted tyvar has no rank")
+          return
   -- | Lower the rank of a type variable
+  {-
   lowerTVRank ∷ Rank → tv → m ()
   lowerTVRank r tv = do
     r0 ← getTVRank tv
-    when (r < r0) (setTVRank r tv)
+    when (r < r0) (setTVRank_ r tv)
+    -}
   -- | Has the unification state changed?
   hasChanged ∷ m Bool
   -- | Set whether the unification state has changed
@@ -237,11 +251,13 @@ infixr 1 >=>!
 data TV r
   = UnsafeReadRef r ⇒ TV {
       tvId     ∷ !Int,
-      tvRef    ∷ !(r (Maybe (Type (TV r)))),
-      tvRank   ∷ !(r Rank)
+      tvRef    ∷ !(r (Either Rank (Type (TV r)))),
+      tvKind_  ∷ !Kind
     }
 
-instance Tv (TV r) where tvUniqueID = tvId
+instance Tv (TV r) where
+  tvUniqueID = tvId
+  tvKind     = tvKind_
 
 -- | For type inference, we use types with free type variables
 --   represented by a 'TV', where the parameter gives the represention
@@ -300,20 +316,19 @@ instance MonadRef s m ⇒ MonadRef s (UT s m) where
   unsafeIOToRef = UT . unsafeIOToRef
 
 instance (Functor m, MonadRef s m) ⇒ MonadU (TV s) (UT s m) where
-  newTV = do
+  newTVKind k = do
     uts ← UT get
     let i = utsGensym uts
     UT $ put uts { utsGensym = succ i }
     trace ("new", i)
-    ref  ← lift $ newRef Nothing
-    rank ← lift $ newRef Rank.infinity
-    return (TV i ref rank)
+    ref ← lift $ newRef (Left Rank.infinity)
+    return (TV i ref k)
   --
-  writeTV_ TV { tvRef = r } t = lift (writeRef r (Just t))
-  readTV_ TV { tvRef = r } = UT (readRef r)
+  writeTV_ TV { tvRef = r } t = lift (writeRef r (Right t))
+  readTV_ TV { tvRef = r } = (const Nothing ||| Just) <$> UT (readRef r)
   --
-  getTVRank tv     = UT (readRef (tvRank tv))
-  setTVRank r tv   = UT (writeRef (tvRank tv) r)
+  getTVRank_ tv    = (Just ||| const Nothing) <$> UT (readRef (tvRef tv))
+  setTVRank_ r tv  = UT (writeRef (tvRef tv) (Left r))
   --
   hasChanged   = UT $ gets utsChanged
   putChanged b = UT $ modify $ \uts → uts { utsChanged = b }
@@ -339,11 +354,11 @@ runU m = runST (runErrorT (runUT m))
 ---
 
 instance (MonadU tv m, Monoid w) ⇒ MonadU tv (CMW.WriterT w m) where
-  newTV    = lift newTV
+  newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
-  getTVRank  = lift <$> getTVRank
-  setTVRank  = lift <$$> setTVRank
+  getTVRank_ = lift <$> getTVRank_
+  setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> liftM fst <$> CMW.runWriterT
@@ -351,11 +366,11 @@ instance (MonadU tv m, Monoid w) ⇒ MonadU tv (CMW.WriterT w m) where
   type URef (WriterT w m) = URef m
 
 instance (MonadU tv m, Defaultable s) ⇒ MonadU tv (CMS.StateT s m) where
-  newTV    = lift newTV
+  newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
-  getTVRank  = lift <$> getTVRank
-  setTVRank  = lift <$$> setTVRank
+  getTVRank_ = lift <$> getTVRank_
+  setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> flip CMS.evalStateT getDefault
@@ -363,11 +378,11 @@ instance (MonadU tv m, Defaultable s) ⇒ MonadU tv (CMS.StateT s m) where
   type URef (CMS.StateT s m) = URef m
 
 instance (MonadU tv m, Defaultable r) ⇒ MonadU tv (CMR.ReaderT r m) where
-  newTV    = lift newTV
+  newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
-  getTVRank  = lift <$> getTVRank
-  setTVRank  = lift <$$> setTVRank
+  getTVRank_ = lift <$> getTVRank_
+  setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> flip CMR.runReaderT getDefault
@@ -376,11 +391,11 @@ instance (MonadU tv m, Defaultable r) ⇒ MonadU tv (CMR.ReaderT r m) where
 
 instance (MonadU tv m, Defaultable r, Monoid w, Defaultable s) ⇒
          MonadU tv (RWS.RWST r w s m) where
-  newTV    = lift newTV
+  newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
-  getTVRank  = lift <$> getTVRank
-  setTVRank  = lift <$$> setTVRank
+  getTVRank_ = lift <$> getTVRank_
+  setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> liftM fst <$>
@@ -394,7 +409,7 @@ instance (MonadU tv m, Defaultable r, Monoid w, Defaultable s) ⇒
 
 -- | Super sketchy!
 unsafeReadTV ∷ TV s → Maybe (TypeR s)
-unsafeReadTV TV { tvRef = r } = unsafeReadRef r
+unsafeReadTV TV { tvRef = r } = (const Nothing ||| Just) (unsafeReadRef r)
 
 debug ∷ Bool
 debug = False
