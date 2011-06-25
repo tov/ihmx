@@ -16,6 +16,8 @@
 module MonadU (
   -- * Unification monad
   MonadU(..), Derefable(..), isUnifiableTV,
+  -- ** Rank management
+  lowerRank,
   -- ** Change monitoriing
   setChanged, withChanged, monitorChange, whileChanging, iterChanging,
   (>=>!),
@@ -39,6 +41,7 @@ import Control.Monad.State  as CMS
 import Control.Monad.Writer as CMW
 import Control.Monad.Reader as CMR
 import Control.Monad.RWS    as RWS
+import qualified Data.Set   as Set
 import Data.STRef
 import Data.IORef
 import qualified Text.PrettyPrint as Ppr
@@ -126,7 +129,10 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
     (α', mτα) ← rootTV α
     trace ("writeTV", (α', mτα), τ)
     case mτα of
-      Nothing → writeTV_ α' τ
+      Nothing → do
+        Just rank ← getTVRank_ α'
+        lowerRank rank τ
+        writeTV_ α' τ
       Just _  → fail "BUG! writeTV: Tried to overwrite type variable"
   -- | Write a type into a type variable, even if it's not empty.
   rewriteTV   ∷ tv → Type tv → m ()
@@ -154,12 +160,10 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
     maybe (fail "BUG! (getTVRank) substituted tyvar has no rank")
           return
   -- | Lower the rank of a type variable
-  {-
   lowerTVRank ∷ Rank → tv → m ()
   lowerTVRank r tv = do
     r0 ← getTVRank tv
     when (r < r0) (setTVRank_ r tv)
-    -}
   -- | Has the unification state changed?
   hasChanged ∷ m Bool
   -- | Set whether the unification state has changed
@@ -189,6 +193,11 @@ instance MonadU tv m ⇒ Derefable (Type tv) m where
                       fvTy ConTy RowTy
                       (mkRecF RecTy)
     where ?deref = readTV
+
+-- | Lower the rank of all the type variables in a given type
+lowerRank ∷ (MonadU tv m, Ftv a tv) ⇒ Rank → a → m ()
+lowerRank rank τ = ftvSet τ >>= mapM_ (lowerTVRank rank) . Set.toList
+  where ?deref = readTV
 
 -- | Assert that a type variable is ununified
 isUnifiableTV ∷ MonadU tv m ⇒ tv → m Bool

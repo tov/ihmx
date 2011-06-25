@@ -77,6 +77,7 @@ import Constraint
 import Syntax hiding (tests)
 import Env
 import Util
+import qualified Rank
 
 ---
 --- Inference
@@ -100,14 +101,16 @@ infer ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
 infer δ γ e0 = case e0 of
   AbsTm π e                     → do
     (δ', c1, τ1, τs) ← inferPatt δ π Nothing (countOccsPatt π e)
-    (τ2, c2)         ← infer δ' (γ &+& π &:& τs) e
+    γ'               ← γ &+&! π &:& τs
+    (τ2, c2)         ← infer δ' γ' e
     qe               ← arrowQualifier γ (AbsTm π e)
     return (arrTy τ1 qe τ2, c1 ⋀ c2)
   LetTm π e1 e2                 → do
     (τ1, c1)         ← infer δ γ e1
     (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1) (countOccsPatt π e2)
     (τs', c')        ← genList (syntacticValue e1) (c1 ⋀ cπ) γ τs
-    (τ2, c2)         ← infer δ' (γ &+& π &:& τs') e2
+    γ'               ← γ &+&! π &:& τs'
+    (τ2, c2)         ← infer δ' γ' e2
     return (τ2, c' ⋀ c2)
   MatTm e1 bs                   → do
     (τ1, c1) ← infer δ γ e1
@@ -116,7 +119,7 @@ infer δ γ e0 = case e0 of
   RecTm bs e2                   → do
     αs               ← replicateM (length bs) newTVTy
     let ns           = map fst bs
-        γ'           = γ &+& ns &:& αs
+    γ'               ← γ &+&! ns &:& αs
     cs               ← sequence
       [ do
           unless (syntacticValue ei) $
@@ -127,7 +130,8 @@ infer δ γ e0 = case e0 of
       | (ni, ei) ← bs
       | αi       ← αs ]
     (τs', c')        ← genList True (mconcat cs) γ αs
-    (τ2, c2)         ← infer δ (γ &+& ns &:& τs') e2
+    γ'               ← γ &+&! ns &:& τs'
+    (τ2, c2)         ← infer δ γ' e2
     return (τ2, c' ⋀ c2)
   VarTm n                       → inst =<< γ &.& n
   ConTm n es                    → do
@@ -160,7 +164,8 @@ inferMatch δ γ τ ((InjPa n πi, ei):bs) | totalPatt πi = do
   mαr             ← extractLabel n <$> derefAll τ
   (α, r)          ← maybe ((,) <$> newTVTy <*> newTVTy) return mαr
   (δ', ci, _, τs) ← inferPatt δ πi (Just α) (countOccsPatt πi ei)
-  (τi, ci')       ← infer δ' (γ &+& πi &:& τs) ei
+  γ'              ← γ &+&! πi &:& τs
+  (τi, ci')       ← infer δ' γ' ei
   (τk, ck)        ← if null bs
                       then return (β, r ≤ endTy)
                       else inferMatch δ' γ r bs
@@ -171,9 +176,18 @@ inferMatch δ γ τ ((InjPa n πi, ei):bs) | totalPatt πi = do
 inferMatch δ γ τ ((πi, ei):bs) = do
   β               ← newTVTy
   (δ', ci, _, τs) ← inferPatt δ πi (Just τ) (countOccsPatt πi ei)
-  (τi, ci')       ← infer δ' (γ &+& πi &:& τs) ei
+  γ'              ← γ &+&! πi &:& τs
+  (τi, ci')       ← infer δ' γ' ei
   (τk, ck)        ← inferMatch δ' γ τ bs
   return (β, ci ⋀ ci' ⋀ ck ⋀ τi ≤ β ⋀ τk ≤ β)
+
+-- | Extend the environment and update the ranks of the type variables
+(&+&!) ∷ MonadU tv m ⇒ Γ tv → Map.Map Name (Type tv) → m (Γ tv)
+γ &+&! m = do
+  lowerRank (Rank.inc (rankΓ γ)) (Map.elems m)
+  return (bumpΓ γ &+& m)
+
+infixl 2 &+&!
 
 arrowQualifier ∷ (MonadU tv m) ⇒ Γ tv → Term a → m (QExp tv)
 arrowQualifier γ e =
