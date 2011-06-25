@@ -44,6 +44,8 @@ import Data.IORef
 import qualified Text.PrettyPrint as Ppr
 import System.IO (hPutStrLn, stderr)
 
+import qualified Rank
+import Rank (Rank)
 import Syntax
 import Ppr
 import Util
@@ -135,6 +137,15 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
   -- | Compute the free type variables in a type
   ftv       ∷ Ftv a tv ⇒ a → m [tv]
   ftv       = ftvM where ?deref = readTV
+  -- | Find out the rank of a type variable
+  getTVRank   ∷ tv → m Rank
+  -- | Find out the rank of a type variable
+  setTVRank   ∷ Rank → tv → m ()
+  -- | Lower the rank of a type variable
+  lowerTVRank ∷ Rank → tv → m ()
+  lowerTVRank r tv = do
+    r0 ← getTVRank tv
+    when (r < r0) (setTVRank r tv)
   -- | Has the unification state changed?
   hasChanged ∷ m Bool
   -- | Set whether the unification state has changed
@@ -226,7 +237,8 @@ infixr 1 >=>!
 data TV r
   = UnsafeReadRef r ⇒ TV {
       tvId     ∷ !Int,
-      tvRef    ∷ !(r (Maybe (Type (TV r))))
+      tvRef    ∷ !(r (Maybe (Type (TV r)))),
+      tvRank   ∷ !(r Rank)
     }
 
 instance Tv (TV r) where tvUniqueID = tvId
@@ -293,11 +305,15 @@ instance (Functor m, MonadRef s m) ⇒ MonadU (TV s) (UT s m) where
     let i = utsGensym uts
     UT $ put uts { utsGensym = succ i }
     trace ("new", i)
-    r ← lift $ newRef Nothing
-    return (TV i r)
+    ref  ← lift $ newRef Nothing
+    rank ← lift $ newRef Rank.infinity
+    return (TV i ref rank)
   --
   writeTV_ TV { tvRef = r } t = lift (writeRef r (Just t))
   readTV_ TV { tvRef = r } = UT (readRef r)
+  --
+  getTVRank tv     = UT (readRef (tvRank tv))
+  setTVRank r tv   = UT (writeRef (tvRank tv) r)
   --
   hasChanged   = UT $ gets utsChanged
   putChanged b = UT $ modify $ \uts → uts { utsChanged = b }
@@ -326,6 +342,8 @@ instance (MonadU tv m, Monoid w) ⇒ MonadU tv (CMW.WriterT w m) where
   newTV    = lift newTV
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
+  getTVRank  = lift <$> getTVRank
+  setTVRank  = lift <$$> setTVRank
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> liftM fst <$> CMW.runWriterT
@@ -336,6 +354,8 @@ instance (MonadU tv m, Defaultable s) ⇒ MonadU tv (CMS.StateT s m) where
   newTV    = lift newTV
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
+  getTVRank  = lift <$> getTVRank
+  setTVRank  = lift <$$> setTVRank
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> flip CMS.evalStateT getDefault
@@ -346,6 +366,8 @@ instance (MonadU tv m, Defaultable r) ⇒ MonadU tv (CMR.ReaderT r m) where
   newTV    = lift newTV
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
+  getTVRank  = lift <$> getTVRank
+  setTVRank  = lift <$$> setTVRank
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> flip CMR.runReaderT getDefault
@@ -357,6 +379,8 @@ instance (MonadU tv m, Defaultable r, Monoid w, Defaultable s) ⇒
   newTV    = lift newTV
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
+  getTVRank  = lift <$> getTVRank
+  setTVRank  = lift <$$> setTVRank
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> liftM fst <$>

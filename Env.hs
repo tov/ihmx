@@ -13,6 +13,7 @@ module Env (
 
 import Util
 import Syntax
+import qualified Rank
 
 import Data.Map as M
 
@@ -20,13 +21,13 @@ type Δ tv = Map Name (Type tv)
 
 data Γ tv
   = Γ {
-      rankΓ ∷ !Int,
+      rankΓ ∷ !Rank.Rank,
       mapΓ  ∷ !(Map Name (Type tv))
     }
   deriving (Show, Functor)
 
 emptyΓ ∷ Γ tv
-emptyΓ = Γ 0 M.empty
+emptyΓ = Γ Rank.zero M.empty
 
 infix  3 &:&
 infixl 2 &+&
@@ -47,7 +48,7 @@ instance MakeEnvMap (Patt a) tv [Type tv] where
 γ &+& m2 = γ { mapΓ = m2 `M.union` mapΓ γ } -- left biased union
 
 bumpΓ ∷ Γ tv → Γ tv
-bumpΓ γ = γ { rankΓ = rankΓ γ + 1 }
+bumpΓ γ = γ { rankΓ = Rank.inc (rankΓ γ) }
 
 (&.&) ∷ Monad m ⇒ Γ tv → Name → m (Type tv)
 Γ { mapΓ = m } &.& n = case M.lookup n m of
