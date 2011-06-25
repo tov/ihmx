@@ -1299,6 +1299,9 @@ class    (Ftv v v, Show v, Ppr v) ⇒ Tv v where
   tvUniqueID ∷ v → Int
   tvKind     ∷ v → Kind
 
+tvKindIs ∷ Tv v ⇒ Kind → v → Bool
+tvKindIs kind v = tvKind v == kind
+
 ---
 --- Some-quantified type variable names in annotations
 ---

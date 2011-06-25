@@ -275,9 +275,9 @@ instance Ppr (TV s) where
 
 instance Show (TV s) where
   showsPrec _p tv = case (debug, unsafeReadTV tv) of
-    (True, Just t) → showsPrec _p t
-                     -- shows (tvId tv) . showChar '=' .
-                     -- showsPrec 2 t
+    (True, Just t) → -- showsPrec _p t
+                     shows (tvId tv) . showChar '=' .
+                     showsPrec 2 t
     _              → showChar '#' . shows (tvId tv)
 
 instance Ftv (TV s) (TV s) where

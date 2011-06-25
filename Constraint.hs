@@ -334,10 +334,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
     qcftv        ← Map.map (const QInvariant) <$> ftvV qc
     let αs       = Map.keysSet $
                      (τftv `Map.union` qcftv) Map.\\ cγftv
-        βs       = Map.keysSet $
-                     Map.filter isQVariance $
-                       Map.unionsWith (⊔) [cγftv, qcftv, τftv]
-    (qc, αqs, τ) ← solveQualifiers value αs βs qc τ
+    (qc, αqs, τ) ← solveQualifiers value αs qc τ
     let c        = reconstruct g qc
     trace ("gen (finished)", αqs, τ, c)
     trace (Here ())
@@ -1167,7 +1164,6 @@ instance Ord tv ⇒ Monoid (QEMeet tv) where
 data SQState a tv
   = SQState {
       sq_αs    ∷ !(Set.Set tv),
-      sq_βs    ∷ !(Set.Set tv),
       sq_τftv  ∷ !(VarMap tv),
       sq_βlst  ∷ ![(QLit, Set.Set tv)],
       sq_vmap  ∷ !(Map.Map tv (QEMeet tv)),
@@ -1181,11 +1177,11 @@ data SQState a tv
 --   haven't guessed how to satisfy them yet.)
 solveQualifiers
   ∷ (MonadU tv m, Derefable a m, Standardizable a tv, Ftv a tv, Show a) ⇒
-    Bool → Set.Set tv → Set.Set tv → [(Type tv, Type tv)] →
+    Bool → Set.Set tv → [(Type tv, Type tv)] →
     a → m ([(Type tv, Type tv)], [(tv, QLit)], a)
-solveQualifiers value αs βs qc τ = do
+solveQualifiers value αs qc τ = do
   let ?deref = readTV
-  trace ("solveQ (init)", αs, βs, qc)
+  trace ("solveQ (init)", αs, qc)
   -- Clean up the constraint, standardize types to qualifier form, and
   -- deal with trivial stuff right away:
   qc             ← stdize qc
@@ -1194,7 +1190,6 @@ solveQualifiers value αs βs qc τ = do
   τftv           ← ftvV τ
   state          ← decompose qc SQState {
                      sq_αs   = αs,
-                     sq_βs   = βs,
                      sq_τftv = τftv,
                      sq_βlst = [],
                      sq_vmap = Map.empty,
@@ -1225,10 +1220,8 @@ solveQualifiers value αs βs qc τ = do
   -- inequalities along the way.
   stdize qc = foldM each [] qc where
     each qc' (τl, τh) = do
-      QExp q1 γs1 ← qualifier τl
-      QExp q2 γs2 ← qualifier τh
-      let qe1 = QE q1 $ Set.fromList (fromVar <$> γs1)
-          qe2 = QE q2 $ Set.fromList (fromVar <$> γs2)
+      qe1 ← makeQE τl
+      qe2 ← makeQE τh
       if qe1 ⊑ qe2
         then return qc'
         else return ((qe1, qe2) : qc')
@@ -1244,7 +1237,7 @@ solveQualifiers value αs βs qc τ = do
   decompose qc state0 = foldM each state0 qc where
     each state (QE q1 γs1, QE q2 γs2) = do
       let γs' = γs1 Set.\\ γs2
-          βs' = γs2 `Set.intersection` sq_βs state
+          βs' = Set.filter (tvKindIs QualKd) γs2
       fβlst ← case q1 \-\ q2 of
         -- (BOT-SAT)
         U  →   return id
@@ -1259,8 +1252,8 @@ solveQualifiers value αs βs qc τ = do
                     then id     -- (TOP-SAT)
                     else Map.unionWith mappend (setToMapWith bound γs')
           bound γ
-            | γ `Set.member` sq_βs state = qemSingleton (QE q2 γs2)
-            | otherwise                  = qemSingleton (QE q2 βs')
+            | tvKindIs QualKd γ = qemSingleton (QE q2 γs2)
+            | otherwise         = qemSingleton (QE q2 βs')
       return state {
                sq_βlst = fβlst (sq_βlst state),
                sq_vmap = fvmap (sq_vmap state)
@@ -1284,9 +1277,9 @@ solveQualifiers value αs βs qc τ = do
     subst "forceU" state $
       Map.fromDistinctAscList
       [ (β, minBound)
-      | (β, QEMeet [QE U βs]) ← Map.toAscList
-           (sq_vmap state `Map.intersection` setToMap () (sq_βs state))
-      , Set.null βs ]
+      | (β, QEMeet [QE U γs]) ← Map.toAscList (sq_vmap state)
+      , tvKindIs QualKd β
+      , Set.null γs ]
   --
   -- Replace Q- or 0 variables by a single upper bound, if they have only
   -- one (SUBST-NEG), or by L if they have none (SUBST-NEG-TOP).  If
@@ -1313,7 +1306,7 @@ solveQualifiers value αs βs qc τ = do
         add _  (QE _ βs)
           = Map.union (setToMap Nothing βs)
         lbs0 = setToMap (Just minBound)
-                        (sq_αs state `Set.intersection` sq_βs state)
+                        (Set.filter (tvKindIs QualKd) (sq_αs state))
                  Map.\\ sq_vmap state
         lbs1 = Map.foldrWithKey each lbs0 (sq_vmap state) where
           each γ (QEMeet qem) = foldr (add (QE U (Set.singleton γ))) <-> qem
@@ -1330,8 +1323,7 @@ solveQualifiers value αs βs qc τ = do
       , qe /= minBound ]
     subst "substPosInv"
           state {
-            sq_αs = sq_αs state `Set.union` δ's,
-            sq_βs = sq_βs state `Set.union` δ's
+            sq_αs = sq_αs state `Set.union` δ's
           }
           (pos `Map.union` Map.fromDistinctAscList inv)
   --
@@ -1344,8 +1336,8 @@ solveQualifiers value αs βs qc τ = do
     let sanitize _    []  []
           = fail $ "BUG! (subst)" ++ who ++
                    " attempt impossible substitution: " ++ show γqes0
-        sanitize _    (acc:_) [] -- XXX one at a time
-          = unsafeSubst state (Map.fromDistinctAscList (return acc))
+        sanitize _    acc []
+          = unsafeSubst state (Map.fromDistinctAscList (reverse acc))
         sanitize seen acc ((γ, QE q γs):rest)
           | Set.member γ (Set.union seen γs)
           = sanitize seen acc rest
@@ -1362,40 +1354,26 @@ solveQualifiers value αs βs qc τ = do
   -- This is not okay: { 1 ↦ 3 4, 2 ↦ 1 }
   unsafeSubst state γqes = do
     sequence [ writeTV γ (toQualifierType qe) | (γ, qe) ← Map.toList γqes ]
-    let vmap = Map.fromDistinctAscList
-          [ (γ, qem'')
-          | (γ, qem) ← Map.toAscList (sq_vmap state)
-          , let γqes' = γqes `Map.intersection` ftvPure qem
-                qem'  = foldr (uncurry qemSubst) qem (Map.toList γqes')
-                qem'' = QEMeet [ mkQE γ q γs
-                               | QE q γs ← unQEMeet qem'
-                               , Set.notMember γ γs ] ]
-        γmap = Map.mapWithKey each γqes
-          where each γ (QE q γs) = mkQE γ q γs
-        mkQE γ q γs = QE q $ if γ `Set.member` sq_βs state
-                               then γs
-                               else γs `Set.intersection` sq_βs state
-    βlst ← sequence $ do
-      (q0, βs0) ← sq_βlst state
-      let γmap'     = γmap `Map.intersection` setToMap () βs0
-          QE q' βs' = bigJoin (Map.elems γmap')
-          q''       = q0 \-\ q'
-          βs''      = (βs0 Set.\\ Map.keysSet γmap') `Set.union` βs'
-      guard (q'' /= U)
-      return $ if Set.null βs''
-        then fail $ "Qualifier error: " ++ show q'' ++ " /⊑ U."
-        else return (q'', βs'')
-    state ← decompose
-      [ (qe, qe')
-      | (qe, qem) ← Map.elems (Map.intersectionWith (,) γmap vmap)
-      , qe'       ← unQEMeet qem ]
+    let γset          = Map.keysSet γqes
+        unchanged set = Set.null (γset `Set.intersection` set)
+        (βlst, βlst') = List.partition (unchanged . snd) (sq_βlst state)
+        (vmap, vmap') = Map.partitionWithKey
+                          (curry (unchanged . Map.keysSet . ftvPure))
+                          (sq_vmap state)
+    ineqs ← stdize $
+      [ (toQualifierType ql, toQualifierType (QE U βs))
+      | (ql, βs) ← βlst' ]
+        ++
+      [ (fvTy γ, toQualifierType qe)
+      | (γ, qem) ← Map.toList vmap'
+      , qe       ← unQEMeet qem ]
+    state ← decompose ineqs
       state {
-        sq_αs   = sq_αs state Set.\\ Map.keysSet γmap,
-        sq_βs   = sq_βs state Set.\\ Map.keysSet γmap,
+        sq_αs   = sq_αs state Set.\\ γset,
         sq_τftv = Map.foldrWithKey (\γ (QE _ γs) → substMap γ γs)
                                    (sq_τftv state) γqes,
         sq_βlst = βlst,
-        sq_vmap = vmap Map.\\ γmap
+        sq_vmap = vmap
       }
     trace ("subst", γqes, state)
     return state
@@ -1405,7 +1383,7 @@ solveQualifiers value αs βs qc τ = do
   runSat state doIt = do
     let formula = toSat state
         sols    = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
-        δs      = sq_αs state `Set.intersection` sq_βs state
+        δs      = Set.filter (tvKindIs QualKd) (sq_αs state)
     trace ("runSat", formula, sols)
     case sols of
       []  → fail "Qualifier constraints unsatisfiable"
@@ -1432,7 +1410,7 @@ solveQualifiers value αs βs qc τ = do
         (πa vm (FreeVar α) ==> πa vm (q,αs))
       | (α, QEMeet qes) ← Map.toList (sq_vmap state)
       , QE q αs         ← qes
-      , α `Set.member` βs ]
+      , tvKindIs QualKd α ]
     where
       p ==> q = SAT.Not p SAT.:||: q
       vm = sq_τftv state
@@ -1461,6 +1439,10 @@ solveQualifiers value αs βs qc τ = do
       | (q, βs) ← sq_βlst state ]
     where
     clean (q, βs) = toQualifierType (q, βs Set.\\ sq_αs state)
+  --
+  makeQE q = do
+    QExp ql γs ← qualifier (toQualifierType q)
+    return (QE ql (Set.fromList (fromVar <$> γs)))
   --
   fromVar (FreeVar α) = α
   fromVar _           = error "BUG! solveQualifiers got bound tyvar"
