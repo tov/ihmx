@@ -43,6 +43,7 @@ import MonadU
 import MonadRef
 import Util
 import Ppr
+import Rank (Rank)
 import qualified UnionFind as UF
 
 ---
@@ -74,22 +75,22 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
   (⊏)        ∷ (Qualifier q1 r, Qualifier q2 r) ⇒ q1 → q2 → c
   --
   -- | Figure out which variables to generalize in a piece of syntax
-  gen'       ∷ (MonadU r m, Ftv γ r, Ftv a r,
+  gen'       ∷ (MonadU r m, Ftv a r,
                 Derefable a m, Standardizable a r, Show a) ⇒
-               Bool → c → γ → a → m ([r], [QLit], c)
+               Bool → c → Rank → a → m ([r], [QLit], c)
   -- | Generalize a type under a constraint and environment,
   --   given whether the the value restriction is satisfied or not
-  gen        ∷ (MonadU r m, Ftv γ r) ⇒
-               Bool → c → γ → Type r → m (Type r, c)
-  gen value c0 γ τ = do
-    (αs, qls, c) ← gen' value c0 γ τ
+  gen        ∷ MonadU r m ⇒
+               Bool → c → Rank → Type r → m (Type r, c)
+  gen value c0 γrank τ = do
+    (αs, qls, c) ← gen' value c0 γrank τ
     σ ← standardizeMus =<< closeWithQuals qls AllQu αs <$> derefAll τ
     return (σ, c)
   -- | Generalize a list of types together.
-  genList    ∷ (MonadU r m, Ftv γ r) ⇒
-               Bool → c → γ → [Type r] → m ([Type r], c)
-  genList value c0 γ τs = do
-    (αs, qls, c) ← gen' value c0 γ τs
+  genList    ∷ MonadU r m ⇒
+               Bool → c → Rank → [Type r] → m ([Type r], c)
+  genList value c0 γrank τs = do
+    (αs, qls, c) ← gen' value c0 γrank τs
     σs ← mapM (standardizeMus <=< closeWithQuals qls AllQu αs <$$> derefAll) τs
     return (σs, c)
 
@@ -291,9 +292,9 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
   -- 12. reconstruct: turn the graph back into a constraint
   --
   -- 13. generalize: candidates that are not free in the constraint
-  gen' value (SC c qc) γ τ = do
+  gen' value (SC c qc) γrank τ = do
     let ?deref = readTV
-    trace ("gen (begin)", SC c qc, τ)
+    trace ("gen (begin)", SC c qc, γrank, τ)
     c            ← unrollRecs c
     trace ("gen (unrollRecs)", c)
     skm1         ← skeletonize c
@@ -303,37 +304,34 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
     (_, noX)     ← expand skm1 expandSks skipSks
     trace ("gen (expand)", noX, (c, qc), τ)
     (c, qc)      ← decompose noX (c, qc)
-    γftv         ← ftvSet γ
     τftv         ← ftvV τ
-    trace ("gen (decompose)", (c, qc), γftv, τftv, τ)
+    trace ("gen (decompose)", (c, qc), τftv, τ)
     let (nm, g) = buildGraph (Set.toList c) τftv
-    trace ("gen (buildGraph)", Gr.ShowGraph g, γftv, τftv, τ)
-    (g, γftv, τftv)
-                 ← coalesceSCCs (g, γftv, τftv)
-    trace ("gen (scc)", Gr.ShowGraph g, γftv, τftv, τ)
-    (g, γftv, τftv)
-                 ← satisfyTycons nm (g, γftv, τftv)
-    trace ("gen (tycons)", Gr.ShowGraph g, γftv, τftv, τ)
-    g            ← eliminateExistentials True nm (g, γftv, τftv)
-    trace ("gen (existentials 1)", Gr.ShowGraph g, γftv, τftv, τ)
+    trace ("gen (buildGraph)", Gr.ShowGraph g, τftv, τ)
+    (g, τftv)   ← coalesceSCCs (g, τftv)
+    trace ("gen (scc)", Gr.ShowGraph g, τftv, τ)
+    (g, τftv)   ← satisfyTycons nm (g, τftv)
+    trace ("gen (tycons)", Gr.ShowGraph g, τftv, τ)
+    g            ← eliminateExistentials True nm (g, γrank, τftv)
+    trace ("gen (existentials 1)", Gr.ShowGraph g, τftv, τ)
     g            ← return (removeRedundant nm g)
-    trace ("gen (redundant)", Gr.ShowGraph g, γftv, τftv, τ)
-    g            ← eliminateExistentials False nm (g, γftv, τftv)
-    trace ("gen (existentials 2)", Gr.ShowGraph g, γftv, τftv, τ)
-    (g, γftv, τftv)
-                 ← polarizedReduce nm (g, γftv, τftv)
-    trace ("gen (polarized)", Gr.ShowGraph g, γftv, τftv, τ)
-    g            ← eliminateExistentials False nm (g, γftv, τftv)
-    trace ("gen (existentials 3)", Gr.ShowGraph g, γftv, τftv, τ)
+    trace ("gen (redundant)", Gr.ShowGraph g, τftv, τ)
+    g            ← eliminateExistentials False nm (g, γrank, τftv)
+    trace ("gen (existentials 2)", Gr.ShowGraph g, τftv, τ)
+    (g, τftv)    ← polarizedReduce nm (g, τftv)
+    trace ("gen (polarized)", Gr.ShowGraph g, τftv, τ)
+    g            ← eliminateExistentials False nm (g, γrank, τftv)
+    trace ("gen (existentials 3)", Gr.ShowGraph g, τftv, τ)
     -- Guessing starts here
-    (g, γftv, τftv)
-                 ← coalesceComponents value (g, γftv, τftv)
-    trace ("gen (components)", Gr.ShowGraph g, γftv, τftv, τ)
+    (g, τftv)    ← coalesceComponents value (g, γrank, τftv)
+    trace ("gen (components)", Gr.ShowGraph g, τftv, τ)
     -- Guessing ends here
-    cγftv        ← ftvV (map snd (Gr.labNodes g), γ)
-    qcftv        ← Map.map (const QInvariant) <$> ftvV qc
-    let αs       = Map.keysSet $
-                     (τftv `Map.union` qcftv) Map.\\ cγftv
+    cftv         ← ftvSet (map snd (Gr.labNodes g))
+    qcftv        ← ftvSet qc
+    αs           ← Set.fromDistinctAscList <$$>
+                     removeByRank γrank <$>
+                       Set.toAscList $
+                         (qcftv `Set.union` Map.keysSet τftv) Set.\\ cftv
     (qc, αqs, τ) ← solveQualifiers value αs qc τ
     let c        = reconstruct g qc
     trace ("gen (finished)", αqs, τ, c)
@@ -479,16 +477,16 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
       --
       -- Make sure the graph is satisfiable and figure out anything that
       -- is implied by the transitive closure of type constructors
-      satisfyTycons nm (g0, γftv0, τftv0) =
-        satisfyTycons' (Gr.trcnr g0, γftv0, τftv0)
+      satisfyTycons nm (g0, τftv0) =
+        satisfyTycons' (Gr.trcnr g0, τftv0)
         where
-        satisfyTycons' = iterChanging $ \(g, γftv, τftv) →
-          foldM each (g, γftv, τftv) (Gr.labNodes g)
-        each (g, γftv, τftv) (n, VarAt α) = do
+        satisfyTycons' = iterChanging $ \(g, τftv) →
+          foldM each (g, τftv) (Gr.labNodes g)
+        each (g, τftv) (n, VarAt α) = do
           let assign c = do
-                (γftv, τftv) ← assignTV α (ConAt c) (γftv, τftv)
+                τftv ← assignTV α (ConAt c) τftv
                 let n' = Gr.nmLab nm (ConAt c)
-                return (assignNode n n' g, γftv, τftv)
+                return (assignNode n n' g, τftv)
               lbs = [ c | Just (ConAt c) ← map (Gr.lab g) (Gr.pre g n)]
               ubs = [ c | Just (ConAt c) ← map (Gr.lab g) (Gr.suc g n)]
           glb ← case lbs of
@@ -511,25 +509,25 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
                   Just ub | ub `notElem` ubs
                     → NM.insMapEdgeM (VarAt α, ConAt ub, ())
                   _ → return ()
-              return (g, γftv, τftv)
-        each (g, γftv, τftv) (n, ConAt c1) = do
+              return (g, τftv)
+        each (g, τftv) (n, ConAt c1) = do
           g ← NM.execNodeMapT nm g $ sequence_
             [ if c1 `tyConLe` c2
                 then return ()
                 else fail $ "Cannot unify: " ++ c1 ++ " ≤ " ++ c2
             | Just (ConAt c2) ← map (Gr.lab g) (Gr.suc g n)]
-          return (g, γftv, τftv)
+          return (g, τftv)
       --
       -- Eliminate existentially-quantified type variables from the
       -- constraint
-      eliminateExistentials trans nm (g, γftv, τftv) = do
-        extvs ← getExistentials (g, γftv, τftv)
+      eliminateExistentials trans nm (g, γrank, τftv) = do
+        extvs ← getExistentials (g, γrank, τftv)
         trace ("existentials are:", extvs)
         return (Set.fold (eliminateNode trans nm) g extvs)
       -- Get the existential type variables
-      getExistentials (g, γftv, τftv) = do
-        let cftv = Set.fromList [ α | (_, VarAt α) ← Gr.labNodes g ]
-        return (cftv Set.\\ (γftv `Set.union` Map.keysSet τftv))
+      getExistentials (g, γrank, τftv) = do
+        cftv ← removeByRank γrank [ α | (_, VarAt α) ← Gr.labNodes g ]
+        return (Set.fromList cftv Set.\\ Map.keysSet τftv)
       -- Remove a node unless it is necessary to associate some of its
       -- neighbors -- in particular, a node with multiple predecessors
       -- but no successor (or dually, multiple successors but no
@@ -563,9 +561,9 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
       --    predecessors and negative type variables that share all
       --    their successors.
       polarizedReduce nm = iterChanging $ \state → do
-        foldM tryRemove state (findPolar (prj3 state))
+        foldM tryRemove state (findPolar (snd state))
           where
-          tryRemove state@(g,_,_) (n, α, var) = do
+          tryRemove state@(g,_) (n, α, var) = do
             let ln = (n, VarAt α)
             mτ ← readTV α
             case (mτ, Gr.gelem n g) of
@@ -585,7 +583,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
           findPolar τftv = [ (Gr.nmLab nm (VarAt α), α, var)
                            | (α, var) ← Map.toList τftv
                            , var == 1 || var == -1 ]
-          siblings state@(g,_,τftv) (lnode@(n,_), var)
+          siblings state@(g,τftv) (lnode@(n,_), var)
                    pres (gpre, gsuc) = do
             lnodes ← liftM ordNub . runListT $ do
               pre ← ListT (return pres)
@@ -610,23 +608,23 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
       coalesceList _      [] = fail "BUG! coalesceList got []"
       -- Assign n2 to n1, updating the graph, type variables, and ftvs,
       -- and return whichever node survives
-      coalesce (n1, lab1) (n2, lab2) (g, γftv, τftv) = do
+      coalesce (n1, lab1) (n2, lab2) (g, τftv) = do
         case (lab1, lab2) of
           (VarAt α,  _)        → (n1, α) `gets` (n2, lab2)
           (_,        VarAt α)  → (n2, α) `gets` (n1, lab1)
           (ConAt c1, ConAt c2)
             | c1 == c2         →
-            return ((n2, lab2), (assignNode n1 n2 g, γftv, τftv))
+            return ((n2, lab2), (assignNode n1 n2 g, τftv))
           _                    →
             fail $ "Could not unify: " ++ show lab1 ++ " = " ++ show lab2
         where
           (n1', α) `gets` (n2', lab') = do
             ftv2 ← ftvSet lab'
             if α `Set.member` ftv2
-              then return ((n2', lab'), (g, γftv, τftv))
+              then return ((n2', lab'), (g, τftv))
               else do
-                (γftv', τftv') ← assignTV α lab' (γftv, τftv)
-                return ((n2', lab'), (assignNode n1' n2' g, γftv', τftv'))
+                τftv' ← assignTV α lab' τftv
+                return ((n2', lab'), (assignNode n1' n2' g, τftv'))
       -- Update the graph to remove node n1, assigning all of its
       -- neighbors to n2
       assignNode n1 n2 g =
@@ -637,18 +635,9 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
         Gr.delNode n1 g
       -- Update the type variables to assign atom2 to α1, updating the
       -- ftvs appropriately
-      assignTV α atom (γftv, τftv) = do
+      assignTV α atom τftv = do
         writeTV α (atomTy atom)
-        (,) <$> assignFtvSet α atom γftv <*> assignFtvMap α atom τftv
-      -- Given two type variables, where α ← atom, update a set of free
-      -- type variables accordingly
-      assignFtvSet α atom set =
-        if Set.member α set
-          then case atom of
-            VarAt β → return $ Set.insert β set'
-            ConAt _ → return set'
-          else return set
-        where set' = Set.delete α set
+        assignFtvMap α atom τftv
       -- Given two type variables, where α ← atom, update a map of free
       -- type variables to variance lists accordingly
       assignFtvMap α atom vmap =
@@ -659,27 +648,35 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
           Nothing → return vmap
         where vmap' = Map.delete α vmap
       -- Coalesce and remove fully-generalizable components
-      coalesceComponents value (g, γftv, τftv) = do
-        extvs ← getExistentials (g, γftv, τftv)
-        let candidates = Set.mapMonotonic VarAt $
-                           extvs `Set.union` genCandidates value τftv γftv
+      coalesceComponents value (g, γrank, τftv) = do
+        extvs  ← getExistentials (g, γrank, τftv)
+        τcands ← genCandidates value τftv γrank
+        let candidates = Set.mapMonotonic VarAt $ extvs `Set.union` τcands
             each state component@(_:_)
               | all (`Set.member` candidates) (map snd component)
               = do
-                  ((node, _), (g', γftv', τftv'))
+                  ((node, _), (g', τftv'))
                     ← coalesceList state component
-                  return (Gr.delNode node g', γftv', τftv')
+                  return (Gr.delNode node g', τftv')
             each state _
               = return state
-        foldM each (g, γftv, τftv) (Gr.labComponents g)
+        foldM each (g, τftv) (Gr.labComponents g)
       -- Find the generalization candidates, which are free in τ but
       -- not in γ (restricted further if not a value)
-      genCandidates value τftv γftv =
-        Map.keysSet (restrict τftv) Set.\\ γftv
+      genCandidates value τftv γrank =
+        Set.fromDistinctAscList <$>
+          removeByRank γrank (map fst (Map.toAscList (restrict τftv)))
           where
           restrict = if value
                        then id
-                       else Map.filter (`elem` [-1, 1])
+                       else Map.filter (`elem` [1, -1, 2, -2])
+      -- Remove type variables from a list if their rank indicates that
+      -- they're in the environment
+      removeByRank γrank = filterM keep
+        where
+          keep α = do
+            rank ← getTVRank α
+            return (rank > γrank)
       -- Reconstruct a constraint from the remaining graph
       reconstruct g qc =
         SC {

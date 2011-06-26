@@ -93,7 +93,7 @@ inferTm γ e = do
         return (name, fvTy α)
     | (name, var) ← Map.toAscList (ftvPure e) ]
   (τ, c)  ← infer δ0 γ e
-  gen (syntacticValue e) c γ τ
+  gen (syntacticValue e) c (rankΓ γ) τ
 
 -- | To infer a type and constraint for a term
 infer ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
@@ -108,7 +108,7 @@ infer δ γ e0 = case e0 of
   LetTm π e1 e2                 → do
     (τ1, c1)         ← infer δ γ e1
     (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1) (countOccsPatt π e2)
-    (τs', c')        ← genList (syntacticValue e1) (c1 ⋀ cπ) γ τs
+    (τs', c')        ← genList (syntacticValue e1) (c1 ⋀ cπ) (rankΓ γ) τs
     γ'               ← γ &+&! π &:& τs'
     (τ2, c2)         ← infer δ' γ' e2
     return (τ2, c' ⋀ c2)
@@ -129,7 +129,7 @@ infer δ γ e0 = case e0 of
           return (ci ⋀ αi ≤≥ τi ⋀ αi ⊏ U)
       | (ni, ei) ← bs
       | αi       ← αs ]
-    (τs', c')        ← genList True (mconcat cs) γ αs
+    (τs', c')        ← genList True (mconcat cs) (rankΓ γ) αs
     γ'               ← γ &+&! ns &:& τs'
     (τ2, c2)         ← infer δ γ' e2
     return (τ2, c' ⋀ c2)

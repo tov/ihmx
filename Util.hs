@@ -43,8 +43,6 @@ import Control.Monad
 import Data.List (foldl')
 import Data.Monoid
 import Data.Maybe
--- import Data.Foldable
--- import Data.Traversable
 
 import qualified Data.Set as Set
 
