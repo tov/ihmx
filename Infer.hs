@@ -84,112 +84,116 @@ import qualified Rank
 ---
 
 -- | Infer the type of a term, given a type context
-inferTm ∷ forall m tv. (MonadU tv m, Show tv, Tv tv) ⇒
-         Γ tv → Term Empty → m (Type tv, SubtypeConstraint tv)
+inferTm ∷ (MonadU tv r m, Show tv, Tv tv) ⇒
+          Γ tv → Term Empty → m (Type tv, String)
 inferTm γ e = do
   δ0 ← Map.fromDistinctAscList <$> sequence
     [ do
         α ← newTVKind (varianceToKind var)
         return (name, fvTy α)
     | (name, var) ← Map.toAscList (ftvPure e) ]
-  (τ, c)  ← infer δ0 γ e
-  gen (syntacticValue e) c (rankΓ γ) τ
+  runConstraintT $ do
+    τ ← infer δ0 γ e
+    σ ← generalize (syntacticValue e) (rankΓ γ) τ
+    c ← showConstraint
+    return (σ, c)
 
 -- | To infer a type and constraint for a term
-infer ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
-        Δ tv → Γ tv → Term Empty → m (Type tv, c)
+infer ∷ MonadC tv r m ⇒ Δ tv → Γ tv → Term Empty → m (Type tv)
 infer δ γ e0 = case e0 of
   AbsTm π e                     → do
-    (δ', c1, τ1, τs) ← inferPatt δ π Nothing (countOccsPatt π e)
+    (δ', τ1, τs)     ← inferPatt δ π Nothing (countOccsPatt π e)
     γ'               ← γ &+&! π &:& τs
-    (τ2, c2)         ← infer δ' γ' e
+    τ2               ← infer δ' γ' e
     qe               ← arrowQualifier γ (AbsTm π e)
-    return (arrTy τ1 qe τ2, c1 ⋀ c2)
+    return (arrTy τ1 qe τ2)
   LetTm π e1 e2                 → do
-    (τ1, c1)         ← infer δ γ e1
-    (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1) (countOccsPatt π e2)
-    (τs', c')        ← genList (syntacticValue e1) (c1 ⋀ cπ) (rankΓ γ) τs
+    τ1               ← infer δ γ e1
+    (δ', _, τs)      ← inferPatt δ π (Just τ1) (countOccsPatt π e2)
+    τs'              ← generalizeList (syntacticValue e1) (rankΓ γ) τs
     γ'               ← γ &+&! π &:& τs'
-    (τ2, c2)         ← infer δ' γ' e2
-    return (τ2, c' ⋀ c2)
+    infer δ' γ' e2
   MatTm e1 bs                   → do
-    (τ1, c1) ← infer δ γ e1
-    (τ2, c2) ← inferMatch δ γ τ1 bs
-    return (τ2, c1 ⋀ c2)
+    τ1               ← infer δ γ e1
+    inferMatch δ γ τ1 bs
   RecTm bs e2                   → do
     αs               ← replicateM (length bs) newTVTy
     let ns           = map fst bs
     γ'               ← γ &+&! ns &:& αs
-    cs               ← sequence
+    sequence_
       [ do
           unless (syntacticValue ei) $
             fail $ "In let rec, binding for ‘" ++ ni ++
                    "’ not a syntactic value"
-          (τi, ci) ← infer δ γ' ei
-          return (ci ⋀ αi ≤≥ τi ⋀ αi ⊏ U)
+          τi ← infer δ γ' ei
+          αi =: τi
+          αi ⊏: U
       | (ni, ei) ← bs
       | αi       ← αs ]
-    (τs', c')        ← genList True (mconcat cs) (rankΓ γ) αs
+    τs'              ← generalizeList True (rankΓ γ) αs
     γ'               ← γ &+&! ns &:& τs'
-    (τ2, c2)         ← infer δ γ' e2
-    return (τ2, c' ⋀ c2)
+    infer δ γ' e2
   VarTm n                       → inst =<< γ &.& n
   ConTm n es                    → do
-    (τs, cs)         ← unzip <$> mapM (infer δ γ) es
-    return (ConTy n τs, mconcat cs)
+    τs               ← mapM (infer δ γ) es
+    return (ConTy n τs)
   LabTm b n                     → do
     let (n1, n2, j1, j2) = if b then ("α","r",0,1) else ("r","α",1,0)
     inst $ QuaTy AllQu [(Here n1, L), (Here n2, L)] $
              arrTy (bvTy 0 0 (Here n1)) (qlitexp U) $
                RowTy n (bvTy 0 j1 (Here "α")) (bvTy 0 j2 (Here "r"))
   AppTm e1 e2                   → do
-    (τ1, c1)         ← infer δ γ e1
-    (τ2, c2)         ← infer δ γ e2
+    τ1               ← infer δ γ e1
+    τ2               ← infer δ γ e2
     α                ← newTVTy
-    return (α, c1 ⋀ c2 ⋀ τ1 ≤ arrTy τ2 (qlitexp L) α)
+    τ1 <: arrTy τ2 (qlitexp L) α
+    return α
   AnnTm e annot                 → do
     (δ', τ', _)      ← instAnnot δ annot
-    (τ, c)           ← infer δ' γ e
-    return (τ', c ⋀ τ ≤ τ')
+    τ                ← infer δ' γ e
+    τ <: τ'
+    return τ'
 
 -- | To infer a type and constraint for a match form
-inferMatch ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
+inferMatch ∷ MonadC tv r m ⇒
              Δ tv → Γ tv → Type tv → [(Patt Empty, Term Empty)] →
-             m (Type tv, c)
-inferMatch _ _ _ [] = do
-  β ← newTVTy
-  return (β, (⊤))
+             m (Type tv)
+inferMatch _ _ _ [] = newTVTy
 inferMatch δ γ τ ((InjPa n πi, ei):bs) | totalPatt πi = do
   β               ← newTVTy
   mαr             ← extractLabel n <$> derefAll τ
   (α, r)          ← maybe ((,) <$> newTVTy <*> newTVTy) return mαr
-  (δ', ci, _, τs) ← inferPatt δ πi (Just α) (countOccsPatt πi ei)
+  (δ', _, τs)     ← inferPatt δ πi (Just α) (countOccsPatt πi ei)
   γ'              ← γ &+&! πi &:& τs
-  (τi, ci')       ← infer δ' γ' ei
-  (τk, ck)        ← if null bs
-                      then return (β, r ≤ endTy)
+  τi              ← infer δ' γ' ei
+  τk              ← if null bs
+                      then do r <: endTy; return β
                       else inferMatch δ' γ r bs
-  let cτ = mconcat (map (τ ⊏) (countOccsPatt πi ei))
-         ⋀ if pattHasWild πi then τ ⊏ A else (⊤)
-  trace ("inferMatch", τs, ei)
-  return (β, ci ⋀ ci' ⋀ ck ⋀ cτ ⋀ τi ≤ β ⋀ τk ≤ β ⋀ τ ≤ RowTy n α r)
+  mapM_ (τ ⊏:) (countOccsPatt πi ei)
+  when (pattHasWild πi) (τ ⊏: A)
+  τi <: β
+  τk <: β
+  τ  <: RowTy n α r
+  return β
 inferMatch δ γ τ ((πi, ei):bs) = do
   β               ← newTVTy
-  (δ', ci, _, τs) ← inferPatt δ πi (Just τ) (countOccsPatt πi ei)
+  (δ', _, τs)     ← inferPatt δ πi (Just τ) (countOccsPatt πi ei)
   γ'              ← γ &+&! πi &:& τs
-  (τi, ci')       ← infer δ' γ' ei
-  (τk, ck)        ← inferMatch δ' γ τ bs
-  return (β, ci ⋀ ci' ⋀ ck ⋀ τi ≤ β ⋀ τk ≤ β)
+  τi              ← infer δ' γ' ei
+  τk              ← inferMatch δ' γ τ bs
+  τi <: β
+  τk <: β
+  return β
 
 -- | Extend the environment and update the ranks of the type variables
-(&+&!) ∷ MonadU tv m ⇒ Γ tv → Map.Map Name (Type tv) → m (Γ tv)
+(&+&!) ∷ MonadU tv r m ⇒ Γ tv → Map.Map Name (Type tv) → m (Γ tv)
 γ &+&! m = do
   lowerRank (Rank.inc (rankΓ γ)) (Map.elems m)
   return (bumpΓ γ &+& m)
 
 infixl 2 &+&!
 
-arrowQualifier ∷ (MonadU tv m) ⇒ Γ tv → Term a → m (QExp tv)
+arrowQualifier ∷ MonadU tv r m ⇒ Γ tv → Term a → m (QExp tv)
 arrowQualifier γ e =
   qualifier (ConTy "U" [ σ
                        | n ← Set.toList (termFv e)
@@ -197,46 +201,48 @@ arrowQualifier γ e =
   where ?deref = readTV
 
 -- | Instantiate a prenex quantifier
-inst ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
-       Type tv → m (Type tv, c)
+inst ∷ MonadC tv r m ⇒ Type tv → m (Type tv)
 inst σ0 = do
   σ      ← deref σ0
-  (τ, c) ← case σ of
+  τ      ← case σ of
     QuaTy AllQu nqs τ → do
-      (αs, cs) ← unzip <$> sequence
+      αs ← sequence
         [ do
             α ← fvTy <$> newTVKind kind
-            return (α, α ⊏ q)
+            α ⊏: q
+            return α
         | (_, q) ← nqs
         | kind   ← inferKindsTy τ ]
-      return (openTy 0 αs τ, mconcat cs)
-    τ → return (τ, (⊤))
-  trace ("inst", σ, τ, c)
-  return (τ, c)
+      return (openTy 0 αs τ)
+    τ → return τ
+  trace ("inst", σ, τ)
+  return τ
 
 -- | Given a type variable environment, a pattern, optionally an
 --   expected type, and a list of how each bound variable will be used,
 --   and compute an updated type variable environment, a constraint,
 --   a type for the whole pattern, and a type for each variable bound by
 --   the pattern.
-inferPatt ∷ (MonadU tv m, Constraint c tv) ⇒
-           Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
-           m (Δ tv, c, Type tv, [Type tv])
+inferPatt ∷ MonadC tv r m ⇒
+            Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
+            m (Δ tv, Type tv, [Type tv])
 inferPatt δ0 π0 mτ0 occs = do
-  (σ, δ, (c, τs)) ← runRWST (loop π0 mτ0) () δ0
-  let c' = mconcat (zipWith (⊏) τs occs)
-         ⋀ σ ⊏ bigJoin (take (length τs) occs)
-         ⋀ if pattHasWild π0 then σ ⊏ A else (⊤)
-  return (δ, c ⋀ c', σ, τs)
+  (σ, δ, τs) ← runRWST (loop π0 mτ0) () δ0
+  zipWithM (⊏:) τs occs
+  σ ⊏: bigJoin (take (length τs) occs)
+  when (pattHasWild π0) (σ ⊏: A)
+  return (δ, σ, τs)
   where
-  bind τ      = do tell ((⊤), [τ]); return τ
+  bind τ      = do tell [τ]; return τ
+  {-
   constrain c = tell (c, [])
+  -}
   loop (VarPa _)       mτ = do
     α ← maybe newTVTy return mτ
     bind α
   loop WldPa           mτ = do
     α ← maybe newTVTy return mτ
-    constrain (α ⊏ A)
+    α ⊏: A
     return α
   loop (ConPa name πs) mτ = do
     case mτ of
@@ -251,7 +257,7 @@ inferPatt δ0 π0 mτ0 occs = do
               | τi ← τs ]
           _ → do
             τ' ← ConTy name <$> sequence [ loop πi Nothing | πi ← πs ]
-            constrain (τ ≤ τ')
+            τ <: τ'
             return τ
   loop (InjPa name π)  mτ = do
     case mτ of
@@ -265,7 +271,7 @@ inferPatt δ0 π0 mτ0 occs = do
             return τ'
           _ → do
             τ' ← RowTy name <$> loop π Nothing <*> newTVTy
-            constrain (τ ≤ τ')
+            τ <: τ'
             return τ
   loop (AnnPa π annot) mτ = do
     δ ← get
@@ -274,7 +280,7 @@ inferPatt δ0 π0 mτ0 occs = do
     τ ← loop π (Just τ')
     case mτ of
       Just τ'' → do
-        constrain (τ'' ≤ τ)
+        τ'' <: τ
         return τ''
       Nothing  → return τ
 
@@ -283,9 +289,8 @@ inferPatt δ0 π0 mτ0 occs = do
 --   some-bound names in the annotation and update the environment
 --   accordingly. Return the annotation instantiated to a type and the
 --   list of new universal tyvars.
-instAnnot ∷ MonadU tv m ⇒
-            Δ tv → Annot →
-            m (Δ tv, Type tv, [Type tv])
+instAnnot ∷ MonadU tv r m ⇒
+            Δ tv → Annot → m (Δ tv, Type tv, [Type tv])
 instAnnot δ (Annot names σ0) = do
   αs ← mapM eachName names
   let δ' = foldr2 insert δ names αs
@@ -330,7 +335,7 @@ showInfer e = runU $ do
   τ'     ← stringifyType τ
   return (τ', show c)
 
-stringifyType ∷ (MonadU s m, Show s) ⇒ Type s → m (Type String)
+stringifyType ∷ MonadU tv r m ⇒ Type tv → m (Type String)
 stringifyType = foldType (mkQuaF QuaTy) (mkBvF bvTy) (fvTy . show)
                          ConTy RowTy (mkRecF RecTy)
   where ?deref = readTV

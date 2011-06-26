@@ -3,12 +3,15 @@
     FlexibleContexts,
     FlexibleInstances,
     FunctionalDependencies,
+    GeneralizedNewtypeDeriving,
     ImplicitParams,
     KindSignatures,
     MultiParamTypeClasses,
     ParallelListComp,
     ScopedTypeVariables,
     TupleSections,
+    TypeFamilies,
+    UndecidableInstances,
     UnicodeSyntax,
     ViewPatterns
   #-}
@@ -47,10 +50,121 @@ import Rank (Rank)
 import qualified UnionFind as UF
 
 ---
+--- A constraint-solving monad
+---
+
+class MonadU tv r m ⇒ MonadC tv r m | m → tv r where
+  -- | Subtype and equality constraints
+  (<:), (=:)    ∷ Type tv → Type tv → m ()
+  -- | Subqualifier constraint
+  (⊏:)          ∷ (Qualifier q1 tv, Qualifier q2 tv) ⇒ q1 → q2 → m ()
+  -- | Constrain by the given variance
+  rel           ∷ Variance → Type tv → Type tv → m ()
+  rel v τ τ' = case v of
+    Covariant      → τ <: τ'
+    Contravariant  → τ' <: τ
+    Invariant      → τ =: τ'
+    QCovariant     → τ ⊏: τ'
+    QContravariant → τ' ⊏: τ
+    QInvariant     → τ ⊏: τ' >> τ' ⊏: τ
+    Omnivariant    → return ()
+  -- | Figure out which variables to generalize in a piece of syntax
+  generalize'   ∷ Bool → Rank → Type tv → m ([tv], [QLit])
+  -- | Generalize a type under a constraint and environment,
+  --   given whether the the value restriction is satisfied or not
+  generalize    ∷ Bool → Rank → Type tv → m (Type tv)
+  generalize value γrank τ = do
+    (αs, qls) ← generalize' value γrank τ
+    standardizeMus =<< closeWithQuals qls AllQu αs <$> derefAll τ
+  -- | Generalize a list of types together.
+  generalizeList ∷ Bool → Rank → [Type tv] → m [Type tv]
+  generalizeList value γrank τs = do
+    (αs, qls) ← generalize' value γrank (tupleTy τs)
+    mapM (standardizeMus <=< closeWithQuals qls AllQu αs <$$> derefAll) τs
+  -- | Saves the constraint in an action that, when run, restores the
+  --   saved constraint
+  saveConstraint ∷ m (m ())
+  -- | Return a string representation of the constraint
+  showConstraint ∷ m String
+
+infix 5 <:, =:, ⊏:
+
+newtype ConstraintT tv (r ∷ * → *) m a
+  = ConstraintT { unConstraintT_ ∷ StateT (SubtypeConstraint tv) m a }
+  deriving (Functor, Applicative, Monad, MonadTrans)
+
+runConstraintT ∷ MonadU tv r m ⇒ ConstraintT tv r m a → m a
+runConstraintT m = evalStateT (unConstraintT_ m) (⊤)
+
+instance MonadRef r m ⇒ MonadRef r (ConstraintT tv r m) where
+  newRef        = lift <$> newRef
+  readRef       = lift <$> readRef
+  writeRef      = lift <$$> writeRef
+  unsafeIOToRef = lift <$> unsafeIOToRef
+
+instance MonadU tv r m ⇒ MonadU tv r (ConstraintT tv r m) where
+  newTVKind     = lift <$> newTVKind
+  writeTV_      = lift <$$> writeTV_
+  readTV_       = lift <$> readTV_
+  getTVRank_    = lift <$> getTVRank_
+  setTVRank_    = lift <$$> setTVRank_
+  hasChanged    = lift hasChanged
+  putChanged    = lift <$> putChanged
+  unsafePerformU= error "No MonadU.unsafePerformU for ConstraintT"
+  unsafeIOToU   = lift <$> unsafeIOToU
+
+instance MonadU tv r m ⇒ MonadC tv r (ConstraintT tv r m) where
+  τ <: τ' = ConstraintT (modify (⋀ τ ≤ τ'))
+  τ =: τ' = ConstraintT (modify (⋀ τ ≤≥ τ'))
+  τ ⊏: τ' = ConstraintT (modify (⋀ τ ⊏ τ'))
+  generalize' value γrank τ = ConstraintT $ do
+    c ← get
+    (αs, qls, c') ← lift (gen' value c γrank τ)
+    put c'
+    return (αs, qls)
+  saveConstraint = do
+    c ← ConstraintT get
+    return (ConstraintT (put c))
+  showConstraint = show <$> ConstraintT get
+
+instance (MonadC tv s m, Monoid w) ⇒ MonadC tv s (WriterT w m) where
+  (<:) = lift <$$> (<:)
+  (=:) = lift <$$> (=:)
+  (⊏:) = lift <$$> (⊏:)
+  generalize'    = lift <$$$> generalize'
+  saveConstraint = lift <$> lift saveConstraint
+  showConstraint = lift showConstraint
+
+instance (MonadC tv r m, Defaultable s) ⇒ MonadC tv r (StateT s m) where
+  (<:) = lift <$$> (<:)
+  (=:) = lift <$$> (=:)
+  (⊏:) = lift <$$> (⊏:)
+  generalize'    = lift <$$$> generalize'
+  saveConstraint = lift <$> lift saveConstraint
+  showConstraint = lift showConstraint
+
+instance (MonadC tv p m, Defaultable r) ⇒ MonadC tv p (ReaderT r m) where
+  (<:) = lift <$$> (<:)
+  (=:) = lift <$$> (=:)
+  (⊏:) = lift <$$> (⊏:)
+  generalize'    = lift <$$$> generalize'
+  saveConstraint = lift <$> lift saveConstraint
+  showConstraint = lift showConstraint
+
+instance (MonadC tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
+         MonadC tv p (RWST r w s m) where
+  (<:) = lift <$$> (<:)
+  (=:) = lift <$$> (=:)
+  (⊏:) = lift <$$> (⊏:)
+  generalize'    = lift <$$$> generalize'
+  saveConstraint = lift <$> lift saveConstraint
+  showConstraint = lift showConstraint
+
+---
 --- Abstract constraints
 ---
 
-class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
+class (Ftv c tv, Monoid c) ⇒ Constraint c tv | c → tv where
   -- | The trivial constraint
   (⊤)        ∷ c
   (⊤)        = mempty
@@ -58,11 +172,11 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
   (⋀)        ∷ c → c → c
   (⋀)        = mappend
   -- | A subtype constraint
-  (≤), (≥), (≤≥) ∷ Type r → Type r → c
+  (≤), (≥), (≤≥) ∷ Type tv → Type tv → c
   τ1 ≥ τ2        = τ2 ≤ τ1
   τ1 ≤≥ τ2       = τ1 ≤ τ2 ⋀ τ2 ≤ τ1
   -- | A subtype constraint in the given variance
-  relate     ∷ Variance → Type r → Type r → c
+  relate     ∷ Variance → Type tv → Type tv → c
   relate v τ τ' = case v of
     Covariant      → τ ≤ τ'
     Contravariant  → τ ≥ τ'
@@ -72,25 +186,24 @@ class (Ftv c r, Monoid c) ⇒ Constraint c r | c → r where
     QInvariant     → τ ⊏ τ' ⋀ τ' ⊏ τ
     Omnivariant    → (⊤)
   -- | A qualifier subsumption constraint
-  (⊏)        ∷ (Qualifier q1 r, Qualifier q2 r) ⇒ q1 → q2 → c
+  (⊏)        ∷ (Qualifier q1 tv, Qualifier q2 tv) ⇒ q1 → q2 → c
   --
   -- | Figure out which variables to generalize in a piece of syntax
-  gen'       ∷ (MonadU r m, Ftv a r,
-                Derefable a m, Standardizable a r, Show a) ⇒
-               Bool → c → Rank → a → m ([r], [QLit], c)
+  gen'       ∷ MonadU tv r m ⇒
+               Bool → c → Rank → Type tv → m ([tv], [QLit], c)
   -- | Generalize a type under a constraint and environment,
   --   given whether the the value restriction is satisfied or not
-  gen        ∷ MonadU r m ⇒
-               Bool → c → Rank → Type r → m (Type r, c)
+  gen        ∷ MonadU tv r m ⇒
+               Bool → c → Rank → Type tv → m (Type tv, c)
   gen value c0 γrank τ = do
     (αs, qls, c) ← gen' value c0 γrank τ
     σ ← standardizeMus =<< closeWithQuals qls AllQu αs <$> derefAll τ
     return (σ, c)
   -- | Generalize a list of types together.
-  genList    ∷ MonadU r m ⇒
-               Bool → c → Rank → [Type r] → m ([Type r], c)
+  genList    ∷ MonadU tv r m ⇒
+               Bool → c → Rank → [Type tv] → m ([Type tv], c)
   genList value c0 γrank τs = do
-    (αs, qls, c) ← gen' value c0 γrank τs
+    (αs, qls, c) ← gen' value c0 γrank (tupleTy τs)
     σs ← mapM (standardizeMus <=< closeWithQuals qls AllQu αs <$$> derefAll) τs
     return (σs, c)
 
@@ -374,6 +487,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
         unexpanded α =
           fail $ "BUG! gen (decompose) saw unexpanded tv: " ++ show α
         substRec α τ = do
+          let ?deref = readTV
           βs ← lift (ftvSet τ)
           let τ' = if α `Set.member` βs
                 then RecTy Nope (closeTy 0 [α] τ)
@@ -619,6 +733,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
             fail $ "Could not unify: " ++ show lab1 ++ " = " ++ show lab2
         where
           (n1', α) `gets` (n2', lab') = do
+            let ?deref = readTV
             ftv2 ← ftvSet lab'
             if α `Set.member` ftv2
               then return ((n2', lab'), (g, τftv))
@@ -690,31 +805,31 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
 
 -- | A representation of equivalence classes of same-sized type
 --   variables and their shapes.
-newtype SkelMap tv m
+newtype SkelMap tv r m
   = SkelMap {
       -- | Associates each type variable with the “skeleton” that
       --   contains it, which is a set of related type variables and
       --   maybe a constructor applied to some type variables, which
       --   determines the shape of the skeleton.
-      unSkelMap   ∷ Map.Map tv (Skeleton tv m)
+      unSkelMap   ∷ Map.Map tv (Skeleton tv r m)
     }
-type Skeleton tv m = UF.Proxy (URef m) (Set.Set tv, Shape tv m)
+type Skeleton tv r (m ∷ * → *) = UF.Proxy r (Set.Set tv, Shape tv r m)
 
-data Shape tv m
-  = ConShape Name [Skeleton tv m]
-  | RowShape Name (Skeleton tv m) (Skeleton tv m)
+data Shape tv r (m ∷ * → *)
+  = ConShape Name [Skeleton tv r m]
+  | RowShape Name (Skeleton tv r m) (Skeleton tv r m)
   | NoShape
 
 type ExtSkels tv = [(tv, [tv], Maybe (Type tv))]
 
-skeletonTV ∷ MonadU tv m ⇒ Skeleton tv m → m tv
+skeletonTV ∷ MonadU tv r m ⇒ Skeleton tv r m → m tv
 skeletonTV = Set.findMin . fst <$$> UF.desc
 
-shapeToType ∷ forall tv m. MonadU tv m ⇒
-              Shape tv m → Maybe (Type tv)
+shapeToType ∷ forall tv r m. MonadU tv r m ⇒
+              Shape tv r m → Maybe (Type tv)
 shapeToType shape = unsafePerformU (shapeToTypeM shape ∷ m (Maybe (Type tv)))
 
-shapeToTypeM ∷ MonadU tv m ⇒ Shape tv m → m (Maybe (Type tv))
+shapeToTypeM ∷ MonadU tv r m ⇒ Shape tv r m → m (Maybe (Type tv))
 shapeToTypeM shape = do
   case shape of
     ConShape n sks     → Just . ConTy n <$> mapM conv sks
@@ -722,12 +837,12 @@ shapeToTypeM shape = do
     NoShape            → return Nothing
   where conv = fvTy <$$> skeletonTV
 
-extSkels ∷ MonadU tv m ⇒ SkelMap tv m → ExtSkels tv
+extSkels ∷ MonadU tv r m ⇒ SkelMap tv r m → ExtSkels tv
 extSkels = unsafePerformU . extSkelsM
 
 -- | Produce a showable representation of an skeletonized subtype
 --   constraint
-extSkelsM ∷ MonadU tv m ⇒ SkelMap tv m → m (ExtSkels tv)
+extSkelsM ∷ MonadU tv r m ⇒ SkelMap tv r m → m (ExtSkels tv)
 extSkelsM = mapM each . Map.toList . unSkelMap
   where
     each (α, proxy) = do
@@ -735,10 +850,10 @@ extSkelsM = mapM each . Map.toList . unSkelMap
       τ ← shapeToTypeM shape
       return (α, Set.toList set, τ)
 
-instance (Tv tv, MonadU tv m) ⇒ Show (Shape tv m) where
+instance (Tv tv, MonadU tv r m) ⇒ Show (Shape tv r m) where
   showsPrec p = maybe (showChar '_') (showsPrec p) . shapeToType
 
-instance (Tv tv, MonadU tv m) ⇒ Show (SkelMap tv m) where
+instance (Tv tv, MonadU tv r m) ⇒ Show (SkelMap tv r m) where
   show skm = concat $
     [ "\n⋀ {" ++ show α ++ " ∈ " ++
       concat (List.intersperse "≈" [ show (tvUniqueID β) | β ← βs ]) ++
@@ -752,7 +867,7 @@ data FoldWriterT m a =
 
 -- | Build an internal subtype constraint from an external subtype
 --   constraint.
-skeletonize ∷ MonadU tv m ⇒ [(Type tv, Type tv)] → m (SkelMap tv m)
+skeletonize ∷ MonadU tv r m ⇒ [(Type tv, Type tv)] → m (SkelMap tv r m)
 skeletonize sc0 = do
   rskels ← newRef Map.empty
   let -- | Record that @τ1@ is a subtype of @τ2@, and do some
@@ -860,11 +975,11 @@ skeletonize sc0 = do
 --   finite model. Returns the skeletons topologically sorted by
 --   size (largest first), and a list of skeletons to avoid
 --   expanding because they are involved in (legal) cycles.
-occursCheck ∷ ∀ tv m. MonadU tv m ⇒
-              SkelMap tv m → m ([Skeleton tv m], [Skeleton tv m])
+occursCheck ∷ ∀ tv r m. MonadU tv r m ⇒
+              SkelMap tv r m → m ([Skeleton tv r m], [Skeleton tv r m])
 occursCheck skm = do
   gr ← foldM addSkel Gr.empty (Map.toList (unSkelMap skm))
-  let scc = Gr.labScc (gr ∷ Gr (Skeleton tv m) Bool)
+  let scc = Gr.labScc (gr ∷ Gr (Skeleton tv r m) Bool)
   trace ("occursCheck", List.nub (Gr.edges gr), map (map fst) scc)
   mconcatMapM (checkSCC gr) scc
   where
@@ -900,14 +1015,14 @@ occursCheck skm = do
       else return ([], map snd lns)
 
 -- | Expand all type variables to their full shape.
-expand ∷ MonadU tv m ⇒
+expand ∷ MonadU tv r m ⇒
          -- | the skeletons
-         SkelMap tv m →
+         SkelMap tv r m →
          -- | skeletons in order of expansion
-         [Skeleton tv m] →
+         [Skeleton tv r m] →
          -- | skeletons not to expand
-         [Skeleton tv m] →
-         m (SkelMap tv m, Set.Set tv)
+         [Skeleton tv r m] →
+         m (SkelMap tv r m, Set.Set tv)
 expand skm0 skels skipSkels = do
   rskels   ← newRef (unSkelMap skm0)
   noExpand ← Set.fromList <$> mapM skeletonTV skipSkels
@@ -1173,9 +1288,9 @@ data SQState a tv
 --   any remaining inequalities (which must be satisfiable, but we
 --   haven't guessed how to satisfy them yet.)
 solveQualifiers
-  ∷ (MonadU tv m, Derefable a m, Standardizable a tv, Ftv a tv, Show a) ⇒
+  ∷ MonadU tv r m ⇒
     Bool → Set.Set tv → [(Type tv, Type tv)] →
-    a → m ([(Type tv, Type tv)], [(tv, QLit)], a)
+    Type tv → m ([(Type tv, Type tv)], [(tv, QLit)], Type tv)
 solveQualifiers value αs qc τ = do
   let ?deref = readTV
   trace ("solveQ (init)", αs, qc)
@@ -1258,11 +1373,12 @@ solveQualifiers value αs qc τ = do
   --
   -- Standardize the qualifiers in the type
   stdizeType state = do
-    τ    ← derefAll (sq_τ state)
+    τ    ← derefAll τ
     let meet = bigMeet . map qeQLit . filter (Set.null . qeQSet) . unQEMeet
         qm   = Map.map meet (sq_vmap state)
         τ'   = standardizeQuals qm τ
     trace ("stdizeType", τ, τ', qm)
+    let ?deref = readTV
     τftv ← ftvV τ'
     return state {
              sq_τ    = τ',
@@ -1438,6 +1554,7 @@ solveQualifiers value αs qc τ = do
     clean (q, βs) = toQualifierType (q, βs Set.\\ sq_αs state)
   --
   makeQE q = do
+    let ?deref = readTV
     QExp ql γs ← qualifier (toQualifierType q)
     return (QE ql (Set.fromList (fromVar <$> γs)))
   --

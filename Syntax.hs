@@ -443,6 +443,10 @@ arrTy t1 qe t2 = ConTy "->" [t1, unQExp qe, t2]
 pairTy ∷ Type a → Type a → Type a
 pairTy t1 t2 = ConTy "Pair" [t1, t2]
 
+tupleTy ∷ [Type a] → Type a
+tupleTy []     = ConTy "U" []
+tupleTy (τ:τs) = foldl pairTy τ τs
+
 endTy  ∷ Type a
 endTy  = ConTy "end" []
 

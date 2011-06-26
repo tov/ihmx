@@ -62,8 +62,8 @@ import MonadRef
 --   Minimal definition: @newTV@, @writeTV_@, @readTV_@, @setTVRank_@,
 --   @getTVRank_@,
 --   @hasChanged@, @setChanged@, @unsafePerformU#, and @unsafeIOToU@
-class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
-      MonadU tv m | m → tv where
+class (Functor m, Applicative m, Monad m, Tv tv, MonadRef r m) ⇒
+      MonadU tv r m | m → tv r where
   -- | Allocate a new, empty type variable with the given kind
   newTVKind ∷ Kind → m tv
   -- | Allocate a new, empty type variable
@@ -171,10 +171,8 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef (URef m) m) ⇒
   -- | Unsafe operations:
   unsafePerformU ∷ m a → a
   unsafeIOToU    ∷ IO a → m a
-  -- | Arbitrary references inside the unification monad
-  type URef m ∷ * → *
 
-class Monad m ⇒ Derefable a m | a → m where
+class Monad m ⇒ Derefable a m where
   -- | Fully dereference a sequence of TV indirections, with path
   --   compression
   deref    ∷ a → m a
@@ -185,7 +183,7 @@ instance Derefable a m ⇒ Derefable [a] m where
   deref    = mapM deref
   derefAll = mapM derefAll
 
-instance MonadU tv m ⇒ Derefable (Type tv) m where
+instance MonadU tv r m ⇒ Derefable (Type tv) m where
   deref (VarTy (FreeVar α)) = derefTV α
   deref τ                   = return τ
   derefAll = foldType (mkQuaF QuaTy)
@@ -195,20 +193,20 @@ instance MonadU tv m ⇒ Derefable (Type tv) m where
     where ?deref = readTV
 
 -- | Lower the rank of all the type variables in a given type
-lowerRank ∷ (MonadU tv m, Ftv a tv) ⇒ Rank → a → m ()
+lowerRank ∷ (MonadU tv r m, Ftv a tv) ⇒ Rank → a → m ()
 lowerRank rank τ = ftvSet τ >>= mapM_ (lowerTVRank rank) . Set.toList
   where ?deref = readTV
 
 -- | Assert that a type variable is ununified
-isUnifiableTV ∷ MonadU tv m ⇒ tv → m Bool
+isUnifiableTV ∷ MonadU tv r m ⇒ tv → m Bool
 isUnifiableTV α = either (const True) (const False) <$> readTV α
 
 -- | Record that the state has changed
-setChanged ∷ MonadU tv m ⇒ m ()
+setChanged ∷ MonadU tv r m ⇒ m ()
 setChanged = putChanged True
 
 -- | Run a computation with a different changed status
-withChanged ∷ MonadU tv m ⇒ Bool → m a → m a
+withChanged ∷ MonadU tv r m ⇒ Bool → m a → m a
 withChanged b m = do
   b0 ← hasChanged
   putChanged b
@@ -217,7 +215,7 @@ withChanged b m = do
   return r
 
 -- | Run a computation with starting with unchanged
-monitorChange ∷ MonadU tv m ⇒ m a → m (a, Bool)
+monitorChange ∷ MonadU tv r m ⇒ m a → m (a, Bool)
 monitorChange m = do
   b0 ← hasChanged
   putChanged False
@@ -227,21 +225,21 @@ monitorChange m = do
   return (r, b)
 
 -- | Iterate a computation until it stops changing
-whileChanging ∷ MonadU tv m ⇒ m a → m a
+whileChanging ∷ MonadU tv r m ⇒ m a → m a
 whileChanging m = do
   (r, b) ← monitorChange m
   if b
     then whileChanging m
     else return r
 
-iterChanging ∷ MonadU tv m ⇒ (a → m a) → a → m a
+iterChanging ∷ MonadU tv r m ⇒ (a → m a) → a → m a
 iterChanging f z = do
   (z', b) ← monitorChange (f z)
   if b
     then iterChanging f z'
     else return z'
 
-(>=>!) ∷ MonadU tv m ⇒ (a → m a) → (a → m a) → a → m a
+(>=>!) ∷ MonadU tv r m ⇒ (a → m a) → (a → m a) → a → m a
 (>=>!) m n z = do
   (z', changed) ← monitorChange (m z)
   if changed
@@ -324,7 +322,7 @@ instance MonadRef s m ⇒ MonadRef s (UT s m) where
   writeRef      = UT <$$> writeRef
   unsafeIOToRef = UT . unsafeIOToRef
 
-instance (Functor m, MonadRef s m) ⇒ MonadU (TV s) (UT s m) where
+instance (Functor m, MonadRef s m) ⇒ MonadU (TV s) s (UT s m) where
   newTVKind k = do
     uts ← UT get
     let i = utsGensym uts
@@ -344,8 +342,6 @@ instance (Functor m, MonadRef s m) ⇒ MonadU (TV s) (UT s m) where
   --
   unsafePerformU = unsafePerformRef . unUT
   unsafeIOToU    = lift . unsafeIOToRef
-  --
-  type URef (UT s m) = s
 
 instance Defaultable UTState where
   getDefault = error "BUG! getDefault[UTState]: can't gensym here"
@@ -362,7 +358,7 @@ runU m = runST (runErrorT (runUT m))
 --- More instances
 ---
 
-instance (MonadU tv m, Monoid w) ⇒ MonadU tv (CMW.WriterT w m) where
+instance (MonadU tv s m, Monoid w) ⇒ MonadU tv s (CMW.WriterT w m) where
   newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
@@ -372,9 +368,8 @@ instance (MonadU tv m, Monoid w) ⇒ MonadU tv (CMW.WriterT w m) where
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> liftM fst <$> CMW.runWriterT
   unsafeIOToU    = lift <$> unsafeIOToU
-  type URef (WriterT w m) = URef m
 
-instance (MonadU tv m, Defaultable s) ⇒ MonadU tv (CMS.StateT s m) where
+instance (MonadU tv r m, Defaultable s) ⇒ MonadU tv r (CMS.StateT s m) where
   newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
@@ -384,9 +379,8 @@ instance (MonadU tv m, Defaultable s) ⇒ MonadU tv (CMS.StateT s m) where
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> flip CMS.evalStateT getDefault
   unsafeIOToU    = lift <$> unsafeIOToU
-  type URef (CMS.StateT s m) = URef m
 
-instance (MonadU tv m, Defaultable r) ⇒ MonadU tv (CMR.ReaderT r m) where
+instance (MonadU tv p m, Defaultable r) ⇒ MonadU tv p (CMR.ReaderT r m) where
   newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
@@ -396,10 +390,9 @@ instance (MonadU tv m, Defaultable r) ⇒ MonadU tv (CMR.ReaderT r m) where
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> flip CMR.runReaderT getDefault
   unsafeIOToU    = lift <$> unsafeIOToU
-  type URef (CMR.ReaderT r m) = URef m
 
-instance (MonadU tv m, Defaultable r, Monoid w, Defaultable s) ⇒
-         MonadU tv (RWS.RWST r w s m) where
+instance (MonadU tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
+         MonadU tv p (RWS.RWST r w s m) where
   newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
@@ -410,7 +403,6 @@ instance (MonadU tv m, Defaultable r, Monoid w, Defaultable s) ⇒
   unsafePerformU = unsafePerformU <$> liftM fst <$>
                    \m → RWS.evalRWST m getDefault getDefault
   unsafeIOToU    = lift <$> unsafeIOToU
-  type URef (RWS.RWST r w s m) = URef m
 
 ---
 --- Debugging
@@ -423,10 +415,10 @@ unsafeReadTV TV { tvRef = r } = (const Nothing ||| Just) (unsafeReadRef r)
 debug ∷ Bool
 debug = False
 
-warn ∷ MonadU r m ⇒ String → m ()
+warn ∷ MonadU tv r m ⇒ String → m ()
 warn = unsafeIOToU . hPutStrLn stderr
 
-trace ∷ (MonadU r m, Show a) ⇒ a → m ()
+trace ∷ (MonadU tv r m, Show a) ⇒ a → m ()
 trace = if debug
           then unsafeIOToU . print
           else const (return ())
