@@ -41,7 +41,6 @@ import Control.Monad.State  as CMS
 import Control.Monad.Writer as CMW
 import Control.Monad.Reader as CMR
 import Control.Monad.RWS    as RWS
-import qualified Data.Set   as Set
 import Data.STRef
 import Data.IORef
 import qualified Text.PrettyPrint as Ppr
@@ -132,9 +131,6 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef r m) ⇒
   -- | Allocate a new type variable and wrap it in a type
   newTVTy   ∷ m (Type tv)
   newTVTy   = liftM fvTy newTV
-  -- | Compute the free type variables in a type
-  ftv       ∷ Ftv a tv ⇒ a → m [tv]
-  ftv       = ftvM where ?deref = readTV
   -- | Find out the rank of a type variable. Not meant to be used
   --   directly.
   getTVRank_  ∷ tv → m (Maybe Rank)
@@ -182,7 +178,7 @@ instance MonadU tv r m ⇒ Derefable (Type tv) m where
 
 -- | Lower the rank of all the type variables in a given type
 lowerRank ∷ (MonadU tv r m, Ftv a tv) ⇒ Rank → a → m ()
-lowerRank rank τ = ftvSet τ >>= mapM_ (lowerTVRank rank) . Set.toList
+lowerRank rank τ = ftvList τ >>= mapM_ (lowerTVRank rank)
   where ?deref = readTV
 
 -- | Assert that a type variable is ununified
@@ -270,9 +266,9 @@ instance Ppr (TV s) where
 
 instance Show (TV s) where
   showsPrec _p tv = case (debug, unsafeReadTV tv) of
-    (True, Just t) → -- showsPrec _p t
-                     shows (tvId tv) . showChar '=' .
-                     showsPrec 2 t
+    (True, Just t) → showsPrec _p t
+                     -- shows (tvId tv) . showChar '=' .
+                     -- showsPrec 2 t
     _              → showChar '#' . shows (tvId tv)
 
 instance Ftv (TV s) (TV s) where

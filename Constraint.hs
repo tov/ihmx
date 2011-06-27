@@ -32,6 +32,7 @@ import Control.Monad.List
 import qualified Data.List  as List
 import qualified Data.Map   as Map
 import qualified Data.Set   as Set
+import qualified Text.PrettyPrint as Ppr
 
 -- From fgs:
 import Data.Graph.Inductive.PatriciaTree (Gr)
@@ -198,11 +199,15 @@ esEquivsUpdate ∷ (ProxyMap tv r → ProxyMap tv r) →
 esEquivsUpdate f es = es { esEquivs = f (esEquivs es) }
 
 instance Tv tv ⇒ Show (EagerState tv r) where
-  showsPrec _ es = showString "EagerState { esGraph = "
-                 . shows (Gr.ShowGraph (esGraph es))
-                 . showString ", esQuals = "
-                 . shows (esQuals es)
-                 . showString " }"
+  showsPrec _ es
+    | null (Gr.edges (esGraph es)) && null (esQuals es)
+        = id
+    | otherwise
+        = showString "EagerState { esGraph = "
+        . shows (Gr.ShowGraph (esGraph es))
+        . showString ", esQuals = "
+        . shows (esQuals es)
+        . showString " }"
 
 runEagerConstraintT ∷ MonadU tv r m ⇒ EagerConstraintT tv r m a → m a
 runEagerConstraintT m = evalStateT (unEagerConstraintT_ m) es0
@@ -556,13 +561,11 @@ subtypeTypesK k0 τ10 τ20 = do
     (ConTy c1 [], VarTy (FreeVar r2)) →
       add (ConAt c1) (VarAt r2)
     (VarTy (FreeVar r1), _) → do
-      lift (sizeCheck r1 τ2)
-      τ2' ← copyType τ2
+      τ2' ← lift (occursCheck r1 τ2) >>= copyType
       unifyVarK k r1 τ2'
       subtypeTypesK k τ2' τ2
     (_, VarTy (FreeVar r2)) → do
-      lift (sizeCheck r2 τ1)
-      τ1' ← copyType τ1
+      τ1' ← lift (occursCheck r2 τ1) >>= copyType
       unifyVarK k r2 τ1'
       subtypeTypesK k τ1 τ1'
     (QuaTy q1 αs1 τ1', QuaTy q2 αs2 τ2')
@@ -609,10 +612,12 @@ unifyTypesK k0 τ10 τ20 = do
   decomp k τ1 τ2 = case (τ1, τ2) of
     (VarTy v1, VarTy v2)
       | v1 == v2    → return ()
-    (VarTy (FreeVar r1), _)
-                    → unifyVarK k r1 τ2
-    (_, VarTy (FreeVar r2))
-                    → unifyVarK k r2 τ1
+    (VarTy (FreeVar r1), VarTy (FreeVar r2)) →
+      unifyVarK k r1 (fvTy r2)
+    (VarTy (FreeVar r1), _) → do
+      unifyVarK k r1 =<< lift (occursCheck r1 τ2)
+    (_, VarTy (FreeVar r2)) → do
+      unifyVarK k r2 =<< lift (occursCheck r2 τ1)
     (QuaTy q1 αs1 τ1', QuaTy q2 αs2 τ2')
       | q1 == q2 && αs1 == αs2
                     → check (k + 1) τ1' τ2'
@@ -620,7 +625,7 @@ unifyTypesK k0 τ10 τ20 = do
       | c1 == c2 && length τs1 == length τs2
                     → sequence_
                         [ if isQVariance var
-                            then τ1' ⊏: τ2'
+                            then do τ1' ⊏: τ2'; τ2' ⊏: τ1'
                             else check k τ1' τ2'
                         | τ1' ← τs1
                         | τ2' ← τs2
@@ -644,13 +649,9 @@ unifyTypesK k0 τ10 τ20 = do
 unifyVarK ∷ MonadU tv r m ⇒ Int → tv → Type tv → SeenT tv r m ()
 unifyVarK k α τ0 = do
   lift $ gtrace ("unifyVarK", k, α, τ0)
-  let ?deref = readTV
   τ ← derefAll τ0
   unless (lcTy k τ) $
     fail "cannot unify because insufficiently polymorphic"
-  αs ← ftvSet τ
-  when (α `Set.member` αs) $
-    fail "occurs check failed"
   writeTV α τ
   (n, _) ← NM.mkNodeM (VarAt α)
   gr     ← NM.getGraph
@@ -669,14 +670,23 @@ unifyVarK k α τ0 = do
             Just a  → subtypeTypesK k τ (atomTy a)
         | (_, n') ← sucs ]
 
-sizeCheck ∷ MonadU tv r m ⇒ tv → Type tv → EagerConstraintT tv r m ()
-sizeCheck α τ = do
-  gtrace ("sizeCheck", α, τ)
+-- | Performs the occurs check and returns a type suitable for unifying
+--   with the given type variable, if possible.  This is possible if all
+--   occurrences of @α@ in @τ@ occur guarded by a type constructor that
+--   permits recursion, in which case we roll up @τ@ as a recursive type
+--   and return that.
+occursCheck ∷ MonadU tv r m ⇒ tv → Type tv → EagerConstraintT tv r m (Type tv)
+occursCheck α τ = do
+  gtrace ("occursCheck", α, τ)
   let ?deref = readTV
-  βs ← Set.toList <$> ftvSet τ
-  bs ← mapM (checkEquivTVs α) βs
-  when (any id bs) $
+  (βsGuarded, βsUnguarded)
+    ← (Map.keys *** Map.keys) . Map.partition id <$> ftvG τ
+  whenM (anyM (checkEquivTVs α) βsUnguarded) $
     fail "Occurs check failed (size check)"
+  recVars ← filterM (checkEquivTVs α) βsGuarded
+  when (not (null recVars)) $
+    gtrace ("occursCheck (recvars)", recVars)
+  return (foldr closeRec τ recVars)
 
 makeEquivTVs  ∷ MonadU tv r m ⇒ tv → tv → EagerConstraintT tv r m ()
 makeEquivTVs α β = do
@@ -744,9 +754,12 @@ gtrace ∷ (MonadU tv r m, Show a) ⇒ a → EagerConstraintT tv r m ()
 gtrace =
   if debug
     then \info → do
+      trace info
       es ← EagerConstraintT get
-      trace (info, es)
+      unsafeIOToU (print (indent es))
     else \_ → return ()
+  where
+    indent = Ppr.nest 4 . Ppr.fsep . map Ppr.text . words . show
 
 ---
 --- Abstract constraints
@@ -1001,7 +1014,7 @@ instance Tv r ⇒ Constraint (SubtypeConstraint r) r where
     skm1         ← skeletonize c
     trace ("gen (skeletonized)", skm1, (c, qc), τ)
     (expandSks, skipSks)
-                 ← occursCheck skm1
+                 ← skelOccursCheck skm1
     (_, noX)     ← expand skm1 expandSks skipSks
     trace ("gen (expand)", noX, (c, qc), τ)
     (c, qc)      ← decompose noX (c, qc)
@@ -1560,9 +1573,9 @@ skeletonize sc0 = do
 --   finite model. Returns the skeletons topologically sorted by
 --   size (largest first), and a list of skeletons to avoid
 --   expanding because they are involved in (legal) cycles.
-occursCheck ∷ ∀ tv r m. MonadU tv r m ⇒
-              SkelMap tv r m → m ([Skeleton tv r m], [Skeleton tv r m])
-occursCheck skm = do
+skelOccursCheck ∷ ∀ tv r m. MonadU tv r m ⇒
+                  SkelMap tv r m → m ([Skeleton tv r m], [Skeleton tv r m])
+skelOccursCheck skm = do
   gr ← foldM addSkel Gr.empty (Map.toList (unSkelMap skm))
   let scc = Gr.labScc (gr ∷ Gr (Skeleton tv r m) Bool)
   trace ("occursCheck", List.nub (Gr.edges gr), map (map fst) scc)
@@ -2286,19 +2299,5 @@ OPTIMIZATIONS FROM SIMONET 2003
   ∀ α ≤ C. α × α → 1
     C × C → 1
     A × B → 1
--}
-
-{-
-λf. f f
-
-0 <: C 1   ⋀   1 <: C 0
-
-0 <: C 1
-  0: C 2
-C 2 <: C 1
-2 <: 1
-    (2 ~ 1)
-1 <: C (C 2)
-
 -}
 

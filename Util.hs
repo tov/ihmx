@@ -15,7 +15,7 @@ module Util (
   -- module Data.Foldable,
   -- module Data.Traversable,
   findLastIndex, listNth,
-  allM, whenM, unlessM, foldr2, ordNub, concatMapM, mconcatMapM, foldM1,
+  allM, anyM, whenM, unlessM, foldr2, ordNub, concatMapM, mconcatMapM, foldM1,
   before,
   unEither,
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
@@ -55,7 +55,10 @@ listNth ∷ Int → [a] → Maybe a
 listNth i = foldr (const . Just) Nothing . drop i
 
 allM ∷ Monad m ⇒ (a → m Bool) → [a] → m Bool
-allM pred xs = mapM pred xs >>= return . all id
+allM pred xs = all id `liftM` mapM pred xs
+
+anyM ∷ Monad m ⇒ (a → m Bool) → [a] → m Bool
+anyM pred xs = any id `liftM` mapM pred xs
 
 whenM ∷ Monad m ⇒ m Bool → m () → m ()
 whenM test branch = test >>= flip when branch

@@ -938,6 +938,10 @@ closeTy k vs t0 = case t0 of
 closeWith ∷ Ord a ⇒ Quant → [a] → Type a → Type a
 closeWith = closeWithNames []
 
+-- | Build a recursive type by closing and binding the given variable
+closeRec ∷ Ord a ⇒ a → Type a → Type a
+closeRec a t = RecTy Nope (closeTy 0 [a] t)
+
 -- | Add the given quantifier while binding the given list of variables
 closeWithQuals ∷ Ord a ⇒ [QLit] → Quant → [a] → Type a → Type a
 closeWithQuals qls = closeWithNames (map (Nope,) qls)
@@ -1169,16 +1173,20 @@ countOccs = Stream.toList . loop . openTm 0 (map fvTm [0..]) . elimEmptyF
   the free type variables of a type.  It may be a bit over-engineered.
   The idea is to write a generic function that builds an 'FtvTree',
   which contains all the free type variables in the relevant piece of
-  syntax, along with variance information.
+  syntax, along with variance and recursive guard information.
 -}
 
--- | A tree of free type variables, with variance information
+-- | A tree of free type variables, with variance and recursive guard
+--   information
 data FtvTree v
   -- | A single free type variable
   = FTSingle v
   -- | Updates the incoming variance to give the variance in
   --   the subtree
   | FTVariance (Variance → Variance) (FtvTree v)
+  -- | Indicates that the subtree is guarded by a type constructor
+  --   that allows recursion
+  | FTGuard (FtvTree v)
   -- | A forest of 'FtvTree's
   | FTBranch [FtvTree v]
 
@@ -1195,11 +1203,12 @@ type VarMap v = Map.Map v Variance
 --   initial result.  Note that this fold gives no information about
 --   the shape of the tree, but it uses the tree structure to determine
 --   the variance of each type variable.
-foldFtvTree ∷ (v → Variance → r → r) → r → FtvTree v → r
-foldFtvTree each = loop Covariant where
-  loop var zero (FTSingle v)       = each v var zero
-  loop var zero (FTVariance vf t)  = loop (vf var) zero t
-  loop var zero (FTBranch ts)      = foldr (flip (loop var)) zero ts
+foldFtvTree ∷ (v → Variance → r → r) → (r → r) → r → FtvTree v → r
+foldFtvTree fsingle fguard = loop Covariant where
+  loop var acc (FTSingle v)       = fsingle v var acc
+  loop var acc (FTVariance vf t)  = loop (vf var) acc t
+  loop var acc (FTGuard t)        = fguard (loop var acc t)
+  loop var acc (FTBranch ts)      = foldr (flip (loop var)) acc ts
 
 -- | Type class for finding the free type variables (of type @v@) in a
 --   syntactic entity (of type @a@).
@@ -1216,33 +1225,28 @@ class Ord v ⇒ Ftv a v | a → v where
   ftvTree  ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (FtvTree v)
   -- | To fold over the free type variables in a piece of syntax.
   ftvFold  ∷ (Monad m, ?deref ∷ Deref m v) ⇒
-             (v → Variance → r → r) → r → a → m r
-  -- | To find all the type variables and their variances. Will repeat
-  --   type variables that occur more than once.
-  ftvList  ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m [(v, Variance)]
+             (v → Variance → r → r) → (r → r) → r → a → m r
   -- | To get a map from free type variables to their variances.
   ftvV     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (VarMap v)
+  -- | To get a map from free type variables to their guardedness
+  ftvG     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Map.Map v Bool)
   -- | To get a map from free type variables to a list of all their
   --   occurrences' variances.
   ftvSet   ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Set.Set v)
-  -- | To get a map from free type variables to a list of all their
-  --   occurrences' variances.
-  ftvVs    ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Map.Map v [Variance])
   -- | To get a list of the free type variables in a type (with no repeats).
-  ftvM     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m [v]
+  ftvList  ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m [v]
   -- | To get the set of (apparent) free variables without trying to
   --   dereference anything
   ftvPure  ∷ a → VarMap v
   -- 
   --
-  ftvFold each zero a
-                 = foldFtvTree each zero `liftM` ftvTree a
-  ftvList        = ftvFold (curry (:)) []
-  ftvV           = ftvFold (Map.insertWith (+)) Map.empty
-  ftvSet         = ftvFold (const . Set.insert) Set.empty
-  ftvVs          = ftvFold (\v a → Map.insertWith (++) v [a]) Map.empty
-  ftvM a         = liftM (ordNub . map fst) (ftvList a)
-  ftvPure a      = runIdentity (ftvV a) where ?deref = return . Left
+  ftvFold fsingle fguard zero a
+                 = foldFtvTree fsingle fguard zero `liftM` ftvTree a
+  ftvV           = ftvFold (Map.insertWith (+)) id Map.empty
+  ftvG           = ftvFold (\v _ → Map.insert v False) (True <$) Map.empty
+  ftvSet         = ftvFold (const . Set.insert) id Set.empty
+  ftvList        = liftM Set.toAscList . ftvSet
+  ftvPure        = runIdentity . ftvV where ?deref = return . Left
 
 instance Ord v ⇒ Ftv (Type v) v where
   ftvTree = foldType
@@ -1253,7 +1257,7 @@ instance Ord v ⇒ Ftv (Type v) v where
                  [ FTVariance (* var) tree
                  | tree ← trees
                  | var  ← getVariances c (length trees) ])
-             (\_ t1 t2 → FTBranch [t1, t2])
+             (\_ t1 t2 → FTBranch [FTGuard t1, t2])
              (mkRecF (\_ → id))
 
 instance Ftv a v ⇒ Ftv [a] v where
@@ -1908,82 +1912,78 @@ pprQExp arrowStyle _ _ (ConTy "L" _)  = Ppr.char 'L'
 pprQExp arrowStyle p g (ConTy q   vs) = case pureQualifier (ConTy q vs)
   -}
 
--- | To pretty-print a pattern and return the list of names of
---   the bound variables.
-pprPatt ∷ Int → Patt a → Ppr.Doc
-pprPatt = loop where
-  loop _ (VarPa n)    = Ppr.text n
-  loop _ WldPa        = Ppr.char '_'
-  loop _ (ConPa c []) = Ppr.text c
-  loop p (ConPa c πs) =
-    parensIf (p > 1) $
-      Ppr.sep (Ppr.text c : map (loop 2) πs)
-  loop p (InjPa c π)  =
-    parensIf (p > 1) $
-      Ppr.char '`' Ppr.<> Ppr.text c Ppr.<+> loop 1 π
-  loop p (AnnPa π annot) =
-    parensIf (p > 0) $
-      Ppr.hang (loop 1 π) 2 (Ppr.char ':' Ppr.<+> ppr annot)
+instance Ppr (Patt a) where
+  pprPrec = loop where
+    loop _ (VarPa n)    = Ppr.text n
+    loop _ WldPa        = Ppr.char '_'
+    loop _ (ConPa c []) = Ppr.text c
+    loop p (ConPa c πs) =
+      parensIf (p > 1) $
+        Ppr.sep (Ppr.text c : map (loop 2) πs)
+    loop p (InjPa c π)  =
+      parensIf (p > 1) $
+        Ppr.char '`' Ppr.<> Ppr.text c Ppr.<+> loop 1 π
+    loop p (AnnPa π annot) =
+      parensIf (p > 0) $
+        Ppr.hang (loop 1 π) 2 (Ppr.char ':' Ppr.<+> ppr annot)
 
 -- | To pretty-print a closed term.
 instance Ppr (Term a) where
-  ppr = pprTerm
-
--- | To pretty-print a term, given a name environment.
-pprTerm ∷ Term a → Ppr.Doc
-pprTerm  = loop 0 where
-  loop p e0 = case e0 of
-    AnnTm e annot       → parensIf (p > 1) $
-      Ppr.fsep [ loop 1 e, Ppr.text ":", ppr annot ]
-    AbsTm _ _           →
-      let (πs, e)        = unfoldAbs e0
-       in parensIf (p > 0) $
-            Ppr.hang
-              (Ppr.char 'λ'
-                 Ppr.<> Ppr.fsep (map (pprPatt 3) πs)
-                 Ppr.<> Ppr.char '.')
-              2
-              (loop 0 e)
-    LetTm π e1 e2       →
-      parensIf (p > 0) $
-        Ppr.hang
-          (Ppr.text "let" Ppr.<+> pprPatt 0 π Ppr.<+> Ppr.char '=' Ppr.<+>
-           loop 0 e1)
-          1
-          (Ppr.text "in" Ppr.<+> loop 0 e2)
-    MatTm e1 bs         →
-      parensIf (p > 0) . Ppr.vcat $
-        Ppr.text "match" Ppr.<+> loop 0 e1 Ppr.<+> Ppr.text "with" :
-        [ Ppr.hang
-            (Ppr.char '|' Ppr.<+> pprPatt 0 πi Ppr.<+> Ppr.char '→')
-            4
-            (loop 0 ei)
-        | (πi, ei) ← bs ]
-    RecTm bs e2         →
-      parensIf (p > 0) $
-        Ppr.text "let" Ppr.<+>
-        Ppr.vcat
-          [ Ppr.text kw Ppr.<+>
-            Ppr.hang
-              (Ppr.text ni Ppr.<+> Ppr.char '=')
-              2
+  pprPrec = loop where
+    loop p e0 = case e0 of
+      AnnTm e annot       → parensIf (p > 1) $
+        Ppr.fsep [ loop 1 e, Ppr.text ":", ppr annot ]
+      AbsTm _ _           →
+        let (πs, e)        = unfoldAbs e0
+         in parensIf (p > 0) $
+              Ppr.hang
+                (Ppr.char 'λ'
+                   Ppr.<> Ppr.fsep (map (pprPrec 3) πs)
+                   Ppr.<> Ppr.char '.')
+                2
+                (loop 0 e)
+      LetTm π e1 e2       →
+        parensIf (p > 0) $
+          Ppr.hang
+            (Ppr.text "let" Ppr.<+> pprPrec 0 π Ppr.<+> Ppr.char '=' Ppr.<+>
+             loop 0 e1)
+            1
+            (Ppr.text "in" Ppr.<+> loop 0 e2)
+      MatTm e1 bs         →
+        parensIf (p > 0) . Ppr.vcat $
+          Ppr.text "match" Ppr.<+> loop 0 e1 Ppr.<+> Ppr.text "with" :
+          [ Ppr.hang
+              (Ppr.char '|' Ppr.<+> pprPrec 0 πi Ppr.<+> Ppr.char '→')
+              4
               (loop 0 ei)
-          | (ni,ei)  ← bs
-          | kw       ← "rec" : repeat "and" ]
-        Ppr.$$ Ppr.text " in" Ppr.<+> loop 0 e2
-    VarTm name          → Ppr.text name
-    ConTm name es       → parensIf (p > 2 && not (null es)) $
-      Ppr.sep (Ppr.text name : map (loop 3) es)
-    LabTm inj name     →
-      Ppr.char (if inj then '`' else '#') Ppr.<> Ppr.text name
-    AppTm e1 e2         → parensIf (p > 2) $
-      Ppr.sep [loop 2 e1, loop 3 e2]
+          | (πi, ei) ← bs ]
+      RecTm bs e2         →
+        parensIf (p > 0) $
+          Ppr.text "let" Ppr.<+>
+          Ppr.vcat
+            [ Ppr.text kw Ppr.<+>
+              Ppr.hang
+                (Ppr.text ni Ppr.<+> Ppr.char '=')
+                2
+                (loop 0 ei)
+            | (ni,ei)  ← bs
+            | kw       ← "rec" : repeat "and" ]
+          Ppr.$$ Ppr.text " in" Ppr.<+> loop 0 e2
+      VarTm name          → Ppr.text name
+      ConTm name es       → parensIf (p > 2 && not (null es)) $
+        Ppr.sep (Ppr.text name : map (loop 3) es)
+      LabTm inj name     →
+        Ppr.char (if inj then '`' else '#') Ppr.<> Ppr.text name
+      AppTm e1 e2         → parensIf (p > 2) $
+        Ppr.sep [loop 2 e1, loop 3 e2]
 
 instance Show Annot where
   show = Ppr.render . ppr
 
--- deriving instance Show a ⇒ Show (Type a)
 instance Ppr a ⇒ Show (Type a) where
+  showsPrec p t = showString (Ppr.render (pprPrec p t))
+
+instance Ppr a ⇒ Show (Patt a) where
   showsPrec p t = showString (Ppr.render (pprPrec p t))
 
 instance Ppr a ⇒ Show (Term a) where

@@ -107,6 +107,7 @@ infer δ γ e0 = case e0 of
     γ'               ← γ &+&! π &:& τs
     τ2               ← infer δ' γ' e
     qe               ← arrowQualifier γ (AbsTm π e)
+    trace ("AbsTm", π, take 20 (show e), arrTy τ1 qe τ2)
     return (arrTy τ1 qe τ2)
   LetTm π e1 e2                 → do
     τ1               ← infer δ γ e1
@@ -163,6 +164,53 @@ inferMatch _ _ _ [] = newTVTy
 inferMatch δ γ τ ((InjPa n πi, ei):bs) | totalPatt πi = do
   β               ← newTVTy
   mαr             ← extractLabel n <$> derefAll τ
+  (α, r)          ← case mαr of
+    Just αr → return αr
+    Nothing → do
+      α ← newTVTy
+      r ← newTVTy
+      τ =: RowTy n α r
+      return (α, r)
+  (δ', _, τs)     ← inferPatt δ πi (Just α) (countOccsPatt πi ei)
+  γ'              ← γ &+&! πi &:& τs
+  τi              ← infer δ' γ' ei
+  τk              ← if null bs
+                      then do r <: endTy; return β
+                      else inferMatch δ' γ r bs
+  mapM_ (τ ⊏:) (countOccsPatt πi ei)
+  when (pattHasWild πi) (τ ⊏: A)
+  τi <: β
+  τk <: β
+  return β
+inferMatch δ γ τ ((πi, ei):bs) = do
+  β               ← newTVTy
+  (δ', _, τs)     ← inferPatt δ πi (Just τ) (countOccsPatt πi ei)
+  γ'              ← γ &+&! πi &:& τs
+  τi              ← infer δ' γ' ei
+  τk              ← inferMatch δ' γ τ bs
+  τi <: β
+  τk <: β
+  return β
+
+{-
+-- | To infer a type and constraint for a match form
+inferMatch ∷ MonadC tv r m ⇒
+             Δ tv → Γ tv → Type tv → [(Patt Empty, Term Empty)] →
+             Type tv → m ()
+inferMatch _ _ _ [] _ = return ()
+inferMatch δ γ τ ((InjPa n πi, ei):bs) τr | totalPatt πi = do
+  mp              ← extractLabel n <$> derefAll τ
+  (τn, τ')        ← case mp of
+    Just p  → return p
+    Nothing → do
+      τn ← newTVTy
+      τ' ← newTVTy
+      τ := RowTy n τn τ'
+      return (τn, τ')
+    
+  return ()
+{-
+  β               ← newTVTy
   (α, r)          ← maybe ((,) <$> newTVTy <*> newTVTy) return mαr
   (δ', _, τs)     ← inferPatt δ πi (Just α) (countOccsPatt πi ei)
   γ'              ← γ &+&! πi &:& τs
@@ -176,15 +224,14 @@ inferMatch δ γ τ ((InjPa n πi, ei):bs) | totalPatt πi = do
   τk <: β
   τ  <: RowTy n α r
   return β
-inferMatch δ γ τ ((πi, ei):bs) = do
-  β               ← newTVTy
+-}
+inferMatch δ γ τ ((πi, ei):bs) τr = do
   (δ', _, τs)     ← inferPatt δ πi (Just τ) (countOccsPatt πi ei)
   γ'              ← γ &+&! πi &:& τs
   τi              ← infer δ' γ' ei
-  τk              ← inferMatch δ' γ τ bs
-  τi <: β
-  τk <: β
-  return β
+  τi <: τr
+  inferMatch δ' γ τ bs τr
+-}
 
 -- | Extend the environment and update the ranks of the type variables
 (&+&!) ∷ MonadU tv r m ⇒ Γ tv → Map.Map Name (Type tv) → m (Γ tv)
@@ -414,6 +461,7 @@ inferFnTests = T.test
     \  Pair f g"
       -: "Pair (F → B) (G → B)"
   -- Occurs check
+  , te "let rec x = C x in x"
   , te "λf. f f"
   , te "let rec f = λ(C x).f (C (f x)) in f"
   -- Subtyping
@@ -589,7 +637,7 @@ inferFnTests = T.test
   , "λx. match x with `A y → y | `A y → M y"
       -: "∀ α. [ A: M α | A: α ] → M α"
   , "λx. match x with `A y → y | `B y → y | _ → botU"
-      -: "∀ α r. [ A: α | B: α | r ] → α"
+      -: "∀ α, r:A. [ A: α | B: α | r ] → α"
   , "λx. match x with `A y → `B y | `B y → `A y | y → #A (#B y)"
       -: "∀ α β r. [ A: α | B: β | r ] → [ A: β | B: α | r]"
   , "λx. match x with `A y → `B y | `B y → `A y | y → #B (#A y)"
@@ -615,10 +663,12 @@ inferFnTests = T.test
   , "let rec x = #B (`A x) in x"
       -: "∀β γ: U. μα. [ A: α | B: β | γ ]"
   , "λx. choose x (`A x)"
-      -: "∀γ: U. (μα. [ A: α | γ ]) → μα. [ A: α | γ ]"
+      -: "∀γ: R. (μα. [ A: α | γ ]) → μα. [ A: α | γ ]"
   , "λx. choose x (#B (`A x))"
-      -: "∀β γ: U. (μα. [ A: α | B: β | γ ]) → \
+      -: "∀β γ: R. (μα. [ A: α | B: β | γ ]) → \
          \         μα. [ A: α | B: β | γ ]"
+  , "let rec f = λz x. match x with `A x' -> f z x' | _ -> z in f"
+      -: "∀ α, β:A. α → (μγ. [ A: γ | β]) -α> α"
   , "let rec foldr = λf z xs.                   \
     \  match xs with                            \
     \  | `Cons (x, xs') → f x (foldr f z xs')   \
@@ -999,7 +1049,8 @@ inferFnTests = T.test
   pe a   = T.assertBool ("expected syntax error: " ++ a)
              (length (reads a ∷ [(Term Empty, String)]) /= 1)
   _limit a m = do
-    result ← timeout 1000000 m
+    result ← timeout 100000 m
     case result of
       Just () → return ()
       Nothing → T.assertBool ("Timeout: " ++ a) False
+
