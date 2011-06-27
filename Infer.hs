@@ -71,6 +71,7 @@ import Control.Monad.RWS    as RWS
 
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import System.IO (stderr, hPutStrLn)
+import System.Timeout (timeout)
 
 import MonadU
 import Constraint
@@ -333,7 +334,7 @@ showInfer ∷ Term Empty → Either String (Type String, String)
 showInfer e = runU $ do
   (τ, c) ← inferTm (emptyΓ &+& Map.fromList γ0) e
   τ'     ← stringifyType τ
-  return (τ', show c)
+  return (τ', c)
 
 stringifyType ∷ MonadU tv r m ⇒ Type tv → m (Type String)
 stringifyType = foldType (mkQuaF QuaTy) (mkBvF bvTy) (fvTy . show)
@@ -360,7 +361,8 @@ reportTime m = do
 tests, inferTests ∷ IO ()
 
 inferTests = tests
-tests      = reportTime $ do
+tests | debug     = fail "Don't run tests when debug == True"
+      | otherwise = reportTime $ do
   syntaxTests
   T.runTestTT inferFnTests
   return ()
@@ -982,7 +984,7 @@ inferFnTests = T.test
   -}
   ]
   where
-  a -: b = case readsPrec 0 a of
+  a -: b = limit a $ case readsPrec 0 a of
     [(e,[])] →
       let expect = standardize (read b)
           typing = showInfer e in
@@ -992,8 +994,12 @@ inferFnTests = T.test
            Left _       → False
            Right (τ, _) → τ == elimEmptyF expect)
     _  → T.assertBool ("Syntax error: " ++ a) False
-  te a   = T.assertBool ("¬⊢ " ++ a)
+  te a   = limit a $ T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))
   pe a   = T.assertBool ("expected syntax error: " ++ a)
              (length (reads a ∷ [(Term Empty, String)]) /= 1)
-
+  limit a m = do
+    result ← timeout 100000 m
+    case result of
+      Just () → return ()
+      Nothing → T.assertBool ("Timeout: " ++ a) False

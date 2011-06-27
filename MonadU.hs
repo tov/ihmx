@@ -29,7 +29,7 @@ module MonadU (
   -- ** Pure
   U, runU,
   -- * Debugging
-  warn, trace,
+  warn, trace, debug,
 ) where
 
 import Control.Applicative
@@ -53,6 +53,8 @@ import Syntax
 import Ppr
 import Util
 import MonadRef
+import qualified NodeMap as NM
+import qualified Graph as Gr
 
 ---
 --- A unification monad
@@ -108,20 +110,6 @@ class (Functor m, Applicative m, Monad m, Tv tv, MonadRef r m) ⇒
     α ← newTV
     writeTV_ α τ
     return α
-  -- | Combine two type variables to point to the same root.
-  --   If both type variables have a type at the root, that's
-  --   an error.
-  linkTV    ∷ tv → tv → m ()
-  linkTV α β = do
-    (α', mτα) ← rootTV α
-    (β', mτβ) ← rootTV β
-    when (α' /= β') $ do
-      setChanged
-      trace ("linkTV", (α', mτα), (β', mτβ))
-      case (mτα, mτβ) of
-        (Nothing, _) → writeTV_ α' (fvTy β')
-        (_, Nothing) → writeTV_ β' (fvTy α')
-        _ → fail "BUG! linkTV: Tried to overwrite type variable"
   -- | Write a type into an empty type variable.
   writeTV   ∷ tv → Type tv → m ()
   writeTV α τ = do
@@ -402,6 +390,19 @@ instance (MonadU tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
   putChanged = lift <$> putChanged
   unsafePerformU = unsafePerformU <$> liftM fst <$>
                    \m → RWS.evalRWST m getDefault getDefault
+  unsafeIOToU    = lift <$> unsafeIOToU
+
+instance (MonadU tv s m, Ord a, Gr.DynGraph g) ⇒
+         MonadU tv s (NM.NodeMapT a b g m) where
+  newTVKind = lift <$> newTVKind
+  writeTV_ = lift <$$> writeTV_
+  readTV_  = lift <$> readTV_
+  getTVRank_ = lift <$> getTVRank_
+  setTVRank_ = lift <$$> setTVRank_
+  hasChanged = lift hasChanged
+  putChanged = lift <$> putChanged
+  unsafePerformU =
+    unsafePerformU <$> liftM fst <$> NM.runNodeMapT NM.new Gr.empty
   unsafeIOToU    = lift <$> unsafeIOToU
 
 ---

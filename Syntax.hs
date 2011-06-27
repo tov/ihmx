@@ -518,12 +518,12 @@ mkBvF   ∷ (Int → Int → Perhaps Name → r) →
 mkBvF f (i, j) pn _ = f i j pn
 
 mkQuaF
-  ∷ (Quant → [(Perhaps Name, QLit)] → r → r) →
-    (∀a. Quant → [(Perhaps Name, QLit)] → ([(Int, Int)] → (r → r) → a) → a)
+  ∷ (Quant → [(Perhaps Name, QLit)] → r → s) →
+    (∀a. Quant → [(Perhaps Name, QLit)] → ([(Int, Int)] → (r → s) → a) → a)
 mkQuaF f q αs k = k [ (0, j) | j ← [0 .. length αs - 1] ] (f q αs)
 
-mkRecF ∷ (Perhaps Name → r → r) →
-         (∀a. Perhaps Name → ((Int, Int) → (r → r) → a) → a)
+mkRecF ∷ (Perhaps Name → r → s) →
+         (∀a. Perhaps Name → ((Int, Int) → (r → s) → a) → a)
 mkRecF f pn k = k (0, 0) (f pn)
 
 -- | Get the qualifier of a type
@@ -957,7 +957,7 @@ substTy τ' α = runIdentity . typeMapM each where
          | otherwise = return (fvTy β)
 -}
 
--- | Is the given type locally closed?  A type is locally closed
+-- | Is the given type locally closed to level k?  A type is locally closed
 --   if none of its bound variables point to quantifiers "outside" the
 --   type.
 --
@@ -965,8 +965,8 @@ substTy τ' α = runIdentity . typeMapM each where
 --   variable, because @lcTy@ doesn't attempt to dereference free
 --   variables.  This should be an invariant, because it would come
 --   about only as a result of a capturing substitution.
-lcTy ∷ Type a → Bool
-lcTy  = loop 0 where
+lcTy ∷ Int → Type a → Bool
+lcTy  = loop where
   loop k (QuaTy _ _ t)            = loop (k + 1) t
   loop k (VarTy (BoundVar i _ _)) = k > i
   loop _ (VarTy (FreeVar _))      = True
