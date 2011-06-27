@@ -281,7 +281,7 @@ instance MonadU tv r m ⇒ MonadC tv r (EagerConstraintT tv r m) where
     (qc, αqs, τ) ← solveQualifiers value αs qc τ
     EagerConstraintT (modify (esQualsUpdate (const qc)))
     gtrace ("gen (finished)", αqs, τ)
-    mapM_ (deleteTVProxy . fst) αqs
+    resetEquivTVs
     return (map fst αqs, map snd αqs)
     where
       --
@@ -458,7 +458,6 @@ instance MonadU tv r m ⇒ MonadC tv r (EagerConstraintT tv r m) where
       -- Update the type variables to assign atom2 to α1, updating the
       -- ftvs appropriately
       assignTV α atom τftv = do
-        deleteTVProxy α
         writeTV α (atomTy atom)
         assignFtvMap α atom τftv
       -- Given two type variables, where α ← atom, update a map of free
@@ -652,7 +651,6 @@ unifyVarK k α τ0 = do
   αs ← ftvSet τ
   when (α `Set.member` αs) $
     fail "occurs check failed"
-  lift (deleteTVProxy α)
   writeTV α τ
   (n, _) ← NM.mkNodeM (VarAt α)
   gr     ← NM.getGraph
@@ -691,6 +689,13 @@ checkEquivTVs α β = do
   pα ← getTVProxy α
   pβ ← getTVProxy β
   UF.sameRepr pα pβ
+
+resetEquivTVs ∷ MonadU tv r m ⇒ EagerConstraintT tv r m ()
+resetEquivTVs = do
+  EagerConstraintT (modify (esEquivsUpdate (const Map.empty)))
+  g     ← NM.getGraph
+  mapM_ (uncurry makeEquivTVs)
+        [ (α, β) | (VarAt α, VarAt β) ← Gr.labNodeEdges g ]
 
 deleteTVProxy ∷ MonadU tv r m ⇒ tv → EagerConstraintT tv r m ()
 deleteTVProxy α = do
