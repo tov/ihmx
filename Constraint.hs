@@ -173,20 +173,31 @@ instance MonadU tv r m ⇒ MonadC tv r (LazyConstraintT tv r m) where
 --- Eager subtyping constraint solver
 ---
 
-newtype EagerConstraintT tv (r ∷ * → *) m a
+newtype EagerConstraintT tv r m a
   = EagerConstraintT {
-      unEagerConstraintT_ ∷ StateT (EagerState tv) m a
+      unEagerConstraintT_ ∷ StateT (EagerState tv r) m a
     }
   deriving (Functor, Applicative, Monad, MonadTrans)
 
-data EagerState tv
+data EagerState tv r
   = EagerState {
       esGraph   ∷ !(Gr (Atom tv) ()),
       esNodeMap ∷ !(NM.NodeMap (Atom tv)),
+      esEquivs  ∷ !(ProxyMap tv r),
       esQuals   ∷ ![(Type tv, Type tv)]
     }
+type TVProxy  tv r = UF.Proxy r (Set.Set tv)
+type ProxyMap tv r = Map.Map tv (TVProxy tv r)
 
-instance Tv tv ⇒ Show (EagerState tv) where
+esQualsUpdate ∷ ([(Type tv, Type tv)] → [(Type tv, Type tv)]) →
+                EagerState tv r → EagerState tv r
+esQualsUpdate f es = es { esQuals = f (esQuals es) }
+
+esEquivsUpdate ∷ (ProxyMap tv r → ProxyMap tv r) →
+                 EagerState tv r → EagerState tv r
+esEquivsUpdate f es = es { esEquivs = f (esEquivs es) }
+
+instance Tv tv ⇒ Show (EagerState tv r) where
   showsPrec _ es = showString "EagerState { esGraph = "
                  . shows (Gr.ShowGraph (esGraph es))
                  . showString ", esQuals = "
@@ -195,7 +206,12 @@ instance Tv tv ⇒ Show (EagerState tv) where
 
 runEagerConstraintT ∷ MonadU tv r m ⇒ EagerConstraintT tv r m a → m a
 runEagerConstraintT m = evalStateT (unEagerConstraintT_ m) es0
-  where es0        = EagerState gr0 nm0 []
+  where es0        = EagerState {
+                       esGraph   = gr0,
+                       esNodeMap = nm0,
+                       esEquivs  = Map.empty,
+                       esQuals   = []
+                     }
         (gr0, nm0) = NM.mkMapGraph
                        (map (ConAt . snd) (Gr.labNodes tyConOrder))
                        []
@@ -230,8 +246,8 @@ instance (Ord tv, Monad m) ⇒
 instance MonadU tv r m ⇒ MonadC tv r (EagerConstraintT tv r m) where
   τ <: τ' = runSeenT (subtypeTypesK 0 τ τ')
   τ =: τ' = runSeenT (unifyTypesK 0 τ τ')
-  τ ⊏: τ' = EagerConstraintT . modify $ \es →
-    es { esQuals = (toQualifierType τ, toQualifierType τ') : esQuals es }
+  τ ⊏: τ' = EagerConstraintT . modify . esQualsUpdate $
+              ((toQualifierType τ, toQualifierType τ') :)
   --
   generalize' value γrank τ = do
     let ?deref = readTV
@@ -263,8 +279,9 @@ instance MonadU tv r m ⇒ MonadC tv r (EagerConstraintT tv r m) where
                 Set.toAscList $
                   (qcftv `Set.union` Map.keysSet τftv) Set.\\ cftv
     (qc, αqs, τ) ← solveQualifiers value αs qc τ
-    EagerConstraintT (modify (\es → es { esQuals = qc }))
+    EagerConstraintT (modify (esQualsUpdate (const qc)))
     gtrace ("gen (finished)", αqs, τ)
+    mapM_ (deleteTVProxy . fst) αqs
     return (map fst αqs, map snd αqs)
     where
       --
@@ -441,6 +458,7 @@ instance MonadU tv r m ⇒ MonadC tv r (EagerConstraintT tv r m) where
       -- Update the type variables to assign atom2 to α1, updating the
       -- ftvs appropriately
       assignTV α atom τftv = do
+        deleteTVProxy α
         writeTV α (atomTy atom)
         assignFtvMap α atom τftv
       -- Given two type variables, where α ← atom, update a map of free
@@ -531,7 +549,8 @@ subtypeTypesK k0 τ10 τ20 = do
   decomp k τ1 τ2 = case (τ1, τ2) of
     (VarTy v1, VarTy v2)
       | v1 == v2 → return ()
-    (VarTy (FreeVar r1), VarTy (FreeVar r2)) →
+    (VarTy (FreeVar r1), VarTy (FreeVar r2)) → do
+      lift (makeEquivTVs r1 r2)
       add (VarAt r1) (VarAt r2)
     (VarTy (FreeVar r1), ConTy c2 []) →
       add (VarAt r1) (ConAt c2)
@@ -633,6 +652,7 @@ unifyVarK k α τ0 = do
   αs ← ftvSet τ
   when (α `Set.member` αs) $
     fail "occurs check failed"
+  lift (deleteTVProxy α)
   writeTV α τ
   (n, _) ← NM.mkNodeM (VarAt α)
   gr     ← NM.getGraph
@@ -655,17 +675,42 @@ sizeCheck ∷ MonadU tv r m ⇒ tv → Type tv → EagerConstraintT tv r m ()
 sizeCheck α τ = do
   gtrace ("sizeCheck", α, τ)
   let ?deref = readTV
-  αs     ← equivClass α
-  βss    ← ftvSet τ >>= mapM equivClass . Set.toList
-  when (any (intersects αs) βss) $
+  βs ← Set.toList <$> ftvSet τ
+  bs ← mapM (checkEquivTVs α) βs
+  when (any id bs) $
     fail "Occurs check failed (size check)"
-  where
-    intersects set1 set2 = not (Set.null (set1 `Set.intersection` set2))
-    equivClass β = do
-      (n, _) ← NM.insNewMapNodeM (VarAt α)
-      g      ← NM.getGraph
-      return . Set.fromList $
-        β : [ γ | Just (VarAt γ) ← map (Gr.lab g) (Gr.neighbors g n) ]
+
+makeEquivTVs  ∷ MonadU tv r m ⇒ tv → tv → EagerConstraintT tv r m ()
+makeEquivTVs α β = do
+  pα ← getTVProxy α
+  pβ ← getTVProxy β
+  UF.coalesce_ (return <$$> Set.union) pα pβ
+
+checkEquivTVs ∷ MonadU tv r m ⇒ tv → tv → EagerConstraintT tv r m Bool
+checkEquivTVs α β = do
+  pα ← getTVProxy α
+  pβ ← getTVProxy β
+  UF.sameRepr pα pβ
+
+deleteTVProxy ∷ MonadU tv r m ⇒ tv → EagerConstraintT tv r m ()
+deleteTVProxy α = do
+  equivs ← EagerConstraintT (gets esEquivs)
+  case Map.lookup α equivs of
+    Just pα → do
+      set ← UF.desc pα
+      UF.setDesc pα (Set.delete α set)
+      EagerConstraintT (modify (esEquivsUpdate (Map.delete α)))
+    Nothing → return ()
+
+getTVProxy ∷ MonadU tv r m ⇒ tv → EagerConstraintT tv r m (TVProxy tv r)
+getTVProxy α = do
+  equivs ← EagerConstraintT (gets esEquivs)
+  case Map.lookup α equivs of
+    Just pα → return pα
+    Nothing → do
+      pα ← UF.create (Set.singleton α)
+      EagerConstraintT (modify (esEquivsUpdate (Map.insert α pα)))
+      return pα
 
 -- | Copy a type while replacing all the type variables with fresh ones
 --   of the same kind.
