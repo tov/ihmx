@@ -984,7 +984,7 @@ inferFnTests = T.test
   -}
   ]
   where
-  a -: b = limit a $ case readsPrec 0 a of
+  a -: b = _limit a $ case readsPrec 0 a of
     [(e,[])] →
       let expect = standardize (read b)
           typing = showInfer e in
@@ -994,12 +994,12 @@ inferFnTests = T.test
            Left _       → False
            Right (τ, _) → τ == elimEmptyF expect)
     _  → T.assertBool ("Syntax error: " ++ a) False
-  te a   = limit a $ T.assertBool ("¬⊢ " ++ a)
+  te a   = _limit a $ T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))
   pe a   = T.assertBool ("expected syntax error: " ++ a)
              (length (reads a ∷ [(Term Empty, String)]) /= 1)
-  limit a m = do
-    result ← timeout 100000 m
+  _limit a m = do
+    result ← timeout 1000000 m
     case result of
       Just () → return ()
       Nothing → T.assertBool ("Timeout: " ++ a) False

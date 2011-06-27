@@ -123,6 +123,7 @@ instance (MonadC tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
   showConstraint = lift showConstraint
 
 runConstraintT m = runEagerConstraintT m
+-- runConstraintT m = runLazyConstraintT m
 
 ---
 --- Lazy constraint solver using underlying subtyping constraint
@@ -488,7 +489,7 @@ instance MonadU tv r m ⇒ MonadC tv r (EagerConstraintT tv r m) where
     return (EagerConstraintT (put c))
   showConstraint = show <$> EagerConstraintT get
 
-type SeenT tv r m = StateT (Map.Map (Type tv, Type tv) Bool)
+type SeenT tv r m = StateT (Map.Map (REC_TYPE tv, REC_TYPE tv) Bool)
                            (EagerConstraintT tv r m)
 
 runSeenT ∷ MonadU tv r m ⇒ SeenT tv r m a → EagerConstraintT tv r m a
@@ -518,10 +519,10 @@ subtypeTypesK k0 τ10 τ20 = do
     τ1'  ← derefAll τ1
     τ2'  ← derefAll τ2
     seen ← get
-    if Map.member (τ1', τ2') seen
+    if Map.member (REC_TYPE τ1', REC_TYPE τ2') seen
       then return ()
       else do
-        put (Map.insert (τ1', τ2') False seen)
+        put (Map.insert (REC_TYPE τ1', REC_TYPE τ2') False seen)
         decomp k τ1' τ2'
   add a1 a2 = do
     NM.insNewMapNodeM a1
@@ -532,17 +533,17 @@ subtypeTypesK k0 τ10 τ20 = do
       | v1 == v2 → return ()
     (VarTy (FreeVar r1), VarTy (FreeVar r2)) →
       add (VarAt r1) (VarAt r2)
-    (VarTy (FreeVar r1), ConTy c2 [])
-      | tyConHasPreds c2 →
+    (VarTy (FreeVar r1), ConTy c2 []) →
       add (VarAt r1) (ConAt c2)
-    (ConTy c1 [], VarTy (FreeVar r2))
-      | tyConHasSuccs c1 →
+    (ConTy c1 [], VarTy (FreeVar r2)) →
       add (ConAt c1) (VarAt r2)
     (VarTy (FreeVar r1), _) → do
+      lift (sizeCheck r1 τ2)
       τ2' ← copyType τ2
       unifyVarK k r1 τ2'
       subtypeTypesK k τ2' τ2
     (_, VarTy (FreeVar r2)) → do
+      lift (sizeCheck r2 τ1)
       τ1' ← copyType τ1
       unifyVarK k r2 τ1'
       subtypeTypesK k τ1 τ1'
@@ -568,9 +569,9 @@ subtypeTypesK k0 τ10 τ20 = do
         check k τ12 (RowTy n2 τ21 β)
         check k α β
     (RecTy _ τ1', _)
-                    → check k (openTy 0 [τ1] τ1') τ2
+                    → decomp k (openTy 0 [τ1] τ1') τ2
     (_, RecTy _ τ2')
-                    → check k τ1 (openTy 0 [τ2] τ2')
+                    → decomp k τ1 (openTy 0 [τ2] τ2')
     _               → fail $ "cannot subtype " ++ show τ1 ++ " and " ++ show τ2
 
 unifyTypesK    ∷ MonadU tv r m ⇒ Int → Type tv → Type tv → SeenT tv r m ()
@@ -582,10 +583,10 @@ unifyTypesK k0 τ10 τ20 = do
     τ1'  ← derefAll τ1
     τ2'  ← derefAll τ2
     seen ← get
-    case Map.lookup (τ1', τ2') seen of
+    case Map.lookup (REC_TYPE τ1', REC_TYPE τ2') seen of
       Just True → return ()
       _         → do
-        put (Map.insert (τ1', τ2') True seen)
+        put (Map.insert (REC_TYPE τ1', REC_TYPE τ2') True seen)
         decomp k τ1' τ2'
   decomp k τ1 τ2 = case (τ1, τ2) of
     (VarTy v1, VarTy v2)
@@ -614,9 +615,9 @@ unifyTypesK k0 τ10 τ20 = do
         check k (RowTy n1 τ11 α) τ22
         check k τ12 (RowTy n2 τ21 α)
     (RecTy _ τ1', _)
-                    → check k (openTy 0 [τ1] τ1') τ2
+                    → decomp k (openTy 0 [τ1] τ1') τ2
     (_, RecTy _ τ2')
-                    → check k τ1 (openTy 0 [τ2] τ2')
+                    → decomp k τ1 (openTy 0 [τ2] τ2')
     _               → fail $ "cannot unify " ++ show τ1 ++ " and " ++ show τ2
 
 -- | Unify a type variable with a type, where the type must have
@@ -649,6 +650,22 @@ unifyVarK k α τ0 = do
             Nothing → return ()
             Just a  → subtypeTypesK k τ (atomTy a)
         | (_, n') ← sucs ]
+
+sizeCheck ∷ MonadU tv r m ⇒ tv → Type tv → EagerConstraintT tv r m ()
+sizeCheck α τ = do
+  gtrace ("sizeCheck", α, τ)
+  let ?deref = readTV
+  αs     ← equivClass α
+  βss    ← ftvSet τ >>= mapM equivClass . Set.toList
+  when (any (intersects αs) βss) $
+    fail "Occurs check failed (size check)"
+  where
+    intersects set1 set2 = not (Set.null (set1 `Set.intersection` set2))
+    equivClass β = do
+      (n, _) ← NM.insNewMapNodeM (VarAt α)
+      g      ← NM.getGraph
+      return . Set.fromList $
+        β : [ γ | Just (VarAt γ) ← map (Gr.lab g) (Gr.neighbors g n) ]
 
 -- | Copy a type while replacing all the type variables with fresh ones
 --   of the same kind.
@@ -2222,17 +2239,16 @@ OPTIMIZATIONS FROM SIMONET 2003
 -}
 
 {-
+λf. f f
 
-{0≤5 ⋀ 0≤9 ⋀ REC([ A: #5 | #6 ])≤3 ⋀ REC([ B: #4 | #3 ])≤9}
-{0≤9 ⋀ REC([ A: #0 | #6 ])≤3 ⋀ REC([ B: #4 | #3 ])≤9}
-{REC([ A: #0 | #6 ])≤3 ⋀ REC([ B: #4 | #3 ])≤0}
-#0 <- mu α. REC([ B: #4 | [ A: α | #6 ] ])
+0 <: C 1   ⋀   1 <: C 0
 
-data α t = S of α t | Z of α
-
-α t = mu β. [ S: β | Z: α ]
-
-((let rec f = λ x. match x with `Z f → f M : M | `S y → f y in f) (let rec x = λ _. choose (`Z (λ M.M)) (`S (x U)) in x U))
+0 <: C 1
+  0: C 2
+C 2 <: C 1
+2 <: 1
+    (2 ~ 1)
+1 <: C (C 2)
 
 -}
 
