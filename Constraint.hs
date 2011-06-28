@@ -202,8 +202,8 @@ instance (Ord tv, Monad m) ⇒
   putGraph g    = ConstraintT . modify $ \es → es { esGraph = g }
 
 instance MonadU tv r m ⇒ MonadC tv r (ConstraintT tv r m) where
-  τ <: τ' = runSeenT (subtypeTypesK 0 τ τ')
-  τ =: τ' = runSeenT (unifyTypesK 0 τ τ')
+  τ <: τ' = runSeenT (subtypeTypesK False 0 τ τ')
+  τ =: τ' = runSeenT (subtypeTypesK True 0 τ τ')
   τ ⊏: τ' = ConstraintT . modify . esQualsUpdate $
               ((toQualifierType τ, toQualifierType τ') :)
   --
@@ -474,127 +474,93 @@ runSeenT m = do
   gtrace "} runSeenT"
   return result
 
-compareTypesK ∷ MonadU tv r m ⇒
-                Variance → Int → Type tv → Type tv → SeenT tv r m ()
-compareTypesK var = case var of
-  Invariant     → unifyTypesK
-  Covariant     → subtypeTypesK
-  Contravariant → flip . subtypeTypesK
+relateTypesK ∷ MonadU tv r m ⇒
+               Variance → Int → Type tv → Type tv → SeenT tv r m ()
+relateTypesK var = case var of
+  Invariant     → subtypeTypesK True
+  Covariant     → subtypeTypesK False
+  Contravariant → flip . subtypeTypesK False
   QInvariant    → const (~:)
   QCovariant    → const (⊏:)
   QContravariant→ const (flip (⊏:))
-  Omnivariant   → \_ _ _   → return ()
+  Omnivariant   → \_ _ _ → return ()
 
-subtypeTypesK ∷ MonadU tv r m ⇒ Int → Type tv → Type tv → SeenT tv r m ()
-subtypeTypesK k0 τ10 τ20 = do
-  lift $ gtrace ("subtypeTypesK", k0, τ10, τ20)
+subtypeTypesK ∷ MonadU tv r m ⇒
+                Bool → Int → Type tv → Type tv → SeenT tv r m ()
+subtypeTypesK unify k0 τ10 τ20 = do
+  lift $ gtrace ("subtypeTypesK", unify, k0, τ10, τ20)
   check k0 τ10 τ20
   where
   check k τ1 τ2 = do
     τ1'  ← derefAll τ1
     τ2'  ← derefAll τ2
     seen ← get
-    if Map.member (REC_TYPE τ1', REC_TYPE τ2') seen
+    if Map.lookup (REC_TYPE τ1', REC_TYPE τ2') seen >= Just unify
       then return ()
       else do
-        put (Map.insert (REC_TYPE τ1', REC_TYPE τ2') False seen)
+        put (Map.insert (REC_TYPE τ1', REC_TYPE τ2') unify seen)
         decomp k τ1' τ2'
-  add a1 a2 = do
-    NM.insNewMapNodeM a1
-    NM.insNewMapNodeM a2
-    NM.insMapEdgeM (a1, a2, ())
+  --
   decomp k τ1 τ2 = case (τ1, τ2) of
     (VarTy v1, VarTy v2)
       | v1 == v2 → return ()
-    (VarTy (FreeVar r1), VarTy (FreeVar r2)) → do
+    (VarTy (FreeVar r1), VarTy (FreeVar r2))
+      | unify     →
+      unifyVarK k r1 (fvTy r2)
+      | otherwise → do
       lift (makeEquivTVs r1 r2)
-      add (VarAt r1) (VarAt r2)
-    (VarTy (FreeVar r1), ConTy c2 []) →
-      add (VarAt r1) (ConAt c2)
-    (ConTy c1 [], VarTy (FreeVar r2)) →
-      add (ConAt c1) (VarAt r2)
+      addEdge (VarAt r1) (VarAt r2)
+    (VarTy (FreeVar r1), ConTy c2 [])
+      | not unify, tyConHasRelated c2 →
+      addEdge (VarAt r1) (ConAt c2)
+    (ConTy c1 [], VarTy (FreeVar r2))
+      | not unify, tyConHasRelated c1 →
+      addEdge (ConAt c1) (VarAt r2)
     (VarTy (FreeVar r1), _) → do
-      τ2' ← lift (occursCheck r1 τ2) >>= copyType
+      τ2' ← lift $ occursCheck r1 τ2 >>= if unify then return else copyType
       unifyVarK k r1 τ2'
-      subtypeTypesK k τ2' τ2
+      unless unify (check k τ2' τ2)
     (_, VarTy (FreeVar r2)) → do
-      τ1' ← lift (occursCheck r2 τ1) >>= copyType
+      τ1' ← lift $ occursCheck r2 τ1 >>= if unify then return else copyType
       unifyVarK k r2 τ1'
-      subtypeTypesK k τ1 τ1'
+      unless unify (check k τ1 τ1')
     (QuaTy q1 αs1 τ1', QuaTy q2 αs2 τ2')
-      | q1 == q2 && αs1 == αs2 → check (k + 1) τ1' τ2'
+      | q1 == q2 && αs1 == αs2 →
+      check (k + 1) τ1' τ2'
     (ConTy c1 [], ConTy c2 [])
-      | c1 `tyConLe` c2 → return ()
+      | not unify, c1 `tyConLe` c2 → return ()
     (ConTy c1 τs1, ConTy c2 τs2)
       | c1 == c2 && length τs1 == length τs2 →
       sequence_
-        [ compareTypesK var k τ1' τ2'
+        [ if unify
+            then if isQVariance var
+              then τ1' ~: τ2'
+              else check k τ1' τ2'
+            else relateTypesK var k τ1' τ2'
         | var ← getVariances c1 (length τs1)
         | τ1' ← τs1
         | τ2' ← τs2 ]
     (RowTy n1 τ11 τ12, RowTy n2 τ21 τ22)
-      | n1 == n2
-                    → check k τ11 τ21
-                   >> check k τ12 τ22
+      | n1 == n2 → do
+        check k τ11 τ21
+        check k τ12 τ22
       | otherwise   → do
         α ← newTVTy
         check k (RowTy n1 τ11 α) τ22
         β ← newTVTy
         check k τ12 (RowTy n2 τ21 β)
         check k α β
-    (RecTy _ τ1', _)
-                    → decomp k (openTy 0 [τ1] τ1') τ2
-    (_, RecTy _ τ2')
-                    → decomp k τ1 (openTy 0 [τ2] τ2')
-    _               → fail $ "cannot subtype " ++ show τ1 ++ " and " ++ show τ2
-
-unifyTypesK    ∷ MonadU tv r m ⇒ Int → Type tv → Type tv → SeenT tv r m ()
-unifyTypesK k0 τ10 τ20 = do
-  lift $ gtrace ("unifyTypesK", k0, τ10, τ20)
-  check k0 τ10 τ20
-  where
-  check k τ1 τ2 = do
-    τ1'  ← derefAll τ1
-    τ2'  ← derefAll τ2
-    seen ← get
-    case Map.lookup (REC_TYPE τ1', REC_TYPE τ2') seen of
-      Just True → return ()
-      _         → do
-        put (Map.insert (REC_TYPE τ1', REC_TYPE τ2') True seen)
-        decomp k τ1' τ2'
-  decomp k τ1 τ2 = case (τ1, τ2) of
-    (VarTy v1, VarTy v2)
-      | v1 == v2    → return ()
-    (VarTy (FreeVar r1), VarTy (FreeVar r2)) →
-      unifyVarK k r1 (fvTy r2)
-    (VarTy (FreeVar r1), _) → do
-      unifyVarK k r1 =<< lift (occursCheck r1 τ2)
-    (_, VarTy (FreeVar r2)) → do
-      unifyVarK k r2 =<< lift (occursCheck r2 τ1)
-    (QuaTy q1 αs1 τ1', QuaTy q2 αs2 τ2')
-      | q1 == q2 && αs1 == αs2
-                    → check (k + 1) τ1' τ2'
-    (ConTy c1 τs1, ConTy c2 τs2)
-      | c1 == c2 && length τs1 == length τs2
-                    → sequence_
-                        [ if isQVariance var
-                            then τ1' ~: τ2'
-                            else check k τ1' τ2'
-                        | τ1' ← τs1
-                        | τ2' ← τs2
-                        | var ← getVariances c1 (length τs1) ]
-    (RowTy n1 τ11 τ12, RowTy n2 τ21 τ22)
-      | n1 == n2    → check k τ11 τ21
-                   >> check k τ12 τ22
-      | otherwise   → do
-        α ← newTVTy
-        check k (RowTy n1 τ11 α) τ22
-        check k τ12 (RowTy n2 τ21 α)
-    (RecTy _ τ1', _)
-                    → decomp k (openTy 0 [τ1] τ1') τ2
-    (_, RecTy _ τ2')
-                    → decomp k τ1 (openTy 0 [τ2] τ2')
-    _               → fail $ "cannot unify " ++ show τ1 ++ " and " ++ show τ2
+    (RecTy _ τ1', _) →
+      decomp k (openTy 0 [τ1] τ1') τ2
+    (_, RecTy _ τ2') →
+      decomp k τ1 (openTy 0 [τ2] τ2')
+    _ →
+      fail $ "cannot subtype/unify " ++ show τ1 ++ " and " ++ show τ2
+  --
+  addEdge a1 a2 = do
+    NM.insNewMapNodeM a1
+    NM.insNewMapNodeM a2
+    NM.insMapEdgeM (a1, a2, ())
 
 -- | Unify a type variable with a type, where the type must have
 --   no bound variables pointing further than @k@.
@@ -615,12 +581,12 @@ unifyVarK k α τ0 = do
       sequence_ $
         [ case Gr.lab gr' n' of
             Nothing → return ()
-            Just a  → subtypeTypesK k (atomTy a) τ
+            Just a  → subtypeTypesK False k (atomTy a) τ
         | (_, n') ← pres ]
         ++
         [ case Gr.lab gr' n' of
             Nothing → return ()
-            Just a  → subtypeTypesK k τ (atomTy a)
+            Just a  → subtypeTypesK False k τ (atomTy a)
         | (_, n') ← sucs ]
 
 -- | Performs the occurs check and returns a type suitable for unifying
@@ -755,11 +721,12 @@ infix 4 `tyConLe`
 
 -- | Are there any type constructors greater or lesser than
 --   this one?
-tyConHasSuccs, tyConHasPreds ∷ Name → Bool
+tyConHasSuccs, tyConHasPreds, tyConHasRelated ∷ Name → Bool
 tyConHasSuccs c = Gr.gelem n tyConOrder && Gr.outdeg tyConOrder n > 0
   where n = tyConNode c
 tyConHasPreds c = Gr.gelem n tyConOrder && Gr.indeg tyConOrder n > 0
   where n = tyConNode c
+tyConHasRelated c = Gr.gelem (tyConNode c) tyConOrder
 
 -- | Find the join or meet of a pair of type constructors, if possible
 tyConJoin, tyConMeet ∷ Monad m ⇒ Name → Name → m Name
