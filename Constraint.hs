@@ -127,59 +127,97 @@ instance (MonadC tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
 --- Eager subtyping constraint solver
 ---
 
+-- | Constraint monad transformer adds constraint solver state.
 newtype ConstraintT tv r m a
   = ConstraintT {
-      unConstraintT_ ∷ StateT (EagerState tv r) m a
+      unConstraintT_ ∷ StateT (CTState tv r) m a
     }
   deriving (Functor, Applicative, Monad, MonadTrans)
 
-data EagerState tv r
-  = EagerState {
-      esGraph   ∷ !(Gr (Atom tv) ()),
-      esNodeMap ∷ !(NM.NodeMap (Atom tv)),
-      esEquivs  ∷ !(ProxyMap tv r),
-      esQuals   ∷ ![(Type tv, Type tv)]
+-- | The state of the constraint solver.
+data CTState tv r
+  = CTState {
+      -- | Graph for subtype constraints on type variables and atomic
+      --   type constructors
+      csGraph   ∷ !(Gr (Atom tv) ()),
+      -- | Reverse lookup for turning atoms into node numbers for the
+      --   'csGraph' graph
+      csNodeMap ∷ !(NM.NodeMap (Atom tv)),
+      -- | Maps type variables to same-size equivalence classes
+      csEquivs  ∷ !(ProxyMap tv r),
+      -- | Types to relate by the subqualifier relation
+      csQuals   ∷ ![(Type tv, Type tv)]
     }
+-- | Representation of type variable equivalence class
 type TVProxy  tv r = UF.Proxy r (Set.Set tv)
+-- | The map from type variables to equivalence classes
 type ProxyMap tv r = Map.Map tv (TVProxy tv r)
 
-esQualsUpdate ∷ ([(Type tv, Type tv)] → [(Type tv, Type tv)]) →
-                EagerState tv r → EagerState tv r
-esQualsUpdate f es = es { esQuals = f (esQuals es) }
+-- | We reduce constraints to graphs representing inequalities on atoms,
+--   which are either type variables or nullary type constructors.
+data Atom tv = VarAt !tv
+             | ConAt !Name
+  deriving (Eq, Ord)
 
-esEquivsUpdate ∷ (ProxyMap tv r → ProxyMap tv r) →
-                 EagerState tv r → EagerState tv r
-esEquivsUpdate f es = es { esEquivs = f (esEquivs es) }
+-- | To inject an atom into a type
+atomTy ∷ Atom tv → Type tv
+atomTy (VarAt α) = fvTy α
+atomTy (ConAt n) = ConTy n []
 
-instance Tv tv ⇒ Show (EagerState tv r) where
-  showsPrec _ es
-    | null (Gr.edges (esGraph es)) && null (esQuals es)
+-- | Updater for 'csQuals' field
+csQualsUpdate ∷ ([(Type tv, Type tv)] → [(Type tv, Type tv)]) →
+                CTState tv r → CTState tv r
+csQualsUpdate f cs = cs { csQuals = f (csQuals cs) }
+
+-- | Updater for 'csEquivs' field
+csEquivsUpdate ∷ (ProxyMap tv r → ProxyMap tv r) →
+                 CTState tv r → CTState tv r
+csEquivsUpdate f cs = cs { csEquivs = f (csEquivs cs) }
+
+instance Tv tv ⇒ Show (Atom tv) where
+  show (VarAt α) = show (tvUniqueID α)
+  show (ConAt c) = c
+
+instance Ppr tv ⇒ Ppr (Atom tv) where
+  pprPrec p = pprPrec p . atomTy
+
+instance Tv tv ⇒ Ftv (Atom tv) tv where
+  ftvTree = ftvTree . atomTy
+
+instance Tv tv ⇒ Show (CTState tv r) where
+  showsPrec _ cs
+    | null (Gr.edges (csGraph cs)) && null (csQuals cs)
         = id
     | otherwise
-        = showString "EagerState { esGraph = "
-        . shows (Gr.ShowGraph (esGraph es))
-        . showString ", esQuals = "
-        . shows (esQuals es)
+        = showString "CTState { csGraph = "
+        . shows (Gr.ShowGraph (csGraph cs))
+        . showString ", csQuals = "
+        . shows (csQuals cs)
         . showString " }"
 
+-- | Run the constraint solver, starting with an empty (true)
+--   constraint.  Seeds the atom graph with the type constructors that
+--   are involved in the subtyping order.
 runConstraintT ∷ MonadU tv r m ⇒ ConstraintT tv r m a → m a
-runConstraintT m = evalStateT (unConstraintT_ m) es0
-  where es0        = EagerState {
-                       esGraph   = gr0,
-                       esNodeMap = nm0,
-                       esEquivs  = Map.empty,
-                       esQuals   = []
+runConstraintT m = evalStateT (unConstraintT_ m) cs0
+  where cs0        = CTState {
+                       csGraph   = gr0,
+                       csNodeMap = nm0,
+                       csEquivs  = Map.empty,
+                       csQuals   = []
                      }
         (gr0, nm0) = NM.mkMapGraph
                        (map (ConAt . snd) (Gr.labNodes tyConOrder))
                        []
 
+-- | Pass through for reference operations
 instance MonadRef r m ⇒ MonadRef r (ConstraintT tv r m) where
   newRef        = lift <$> newRef
   readRef       = lift <$> readRef
   writeRef      = lift <$$> writeRef
   unsafeIOToRef = lift <$> unsafeIOToRef
 
+-- | Pass through for unification operations
 instance MonadU tv r m ⇒ MonadU tv r (ConstraintT tv r m) where
   newTVKind     = lift <$> newTVKind
   writeTV_      = lift <$$> writeTV_
@@ -191,282 +229,37 @@ instance MonadU tv r m ⇒ MonadU tv r (ConstraintT tv r m) where
   unsafePerformU= error "No MonadU.unsafePerformU for ConstraintT"
   unsafeIOToU   = lift <$> unsafeIOToU
 
+-- | 'ConstraintT' implements 'Graph'/'NodeMap' transformer operations
+--   for accessing its graph and node map.
 instance (Ord tv, Monad m) ⇒
          NM.MonadNM (Atom tv) () Gr (ConstraintT tv r m) where
-  getNMState = ConstraintT (gets (esNodeMap &&& esGraph))
-  getNodeMap = ConstraintT (gets esNodeMap)
-  getGraph   = ConstraintT (gets esGraph)
-  putNMState (nm, g) = ConstraintT . modify $ \es →
-    es { esNodeMap = nm, esGraph = g }
-  putNodeMap nm = ConstraintT . modify $ \es → es { esNodeMap = nm }
-  putGraph g    = ConstraintT . modify $ \es → es { esGraph = g }
+  getNMState = ConstraintT (gets (csNodeMap &&& csGraph))
+  getNodeMap = ConstraintT (gets csNodeMap)
+  getGraph   = ConstraintT (gets csGraph)
+  putNMState (nm, g) = ConstraintT . modify $ \cs →
+    cs { csNodeMap = nm, csGraph = g }
+  putNodeMap nm = ConstraintT . modify $ \cs → cs { csNodeMap = nm }
+  putGraph g    = ConstraintT . modify $ \cs → cs { csGraph = g }
 
+-- | Constraint solver implementation.
 instance MonadU tv r m ⇒ MonadC tv r (ConstraintT tv r m) where
   τ <: τ' = runSeenT (subtypeTypesK False 0 τ τ')
   τ =: τ' = runSeenT (subtypeTypesK True 0 τ τ')
-  τ ⊏: τ' = ConstraintT . modify . esQualsUpdate $
+  τ ⊏: τ' = ConstraintT . modify . csQualsUpdate $
               ((toQualifierType τ, toQualifierType τ') :)
   --
-  generalize' value γrank τ = do
-    let ?deref = readTV
-    τftv ← ftvV τ;
-    gtrace ("gen (begin)", value, γrank, τftv, τ)
-    τftv ← coalesceSCCs τftv
-    gtrace ("gen (scc)", τftv, τ)
-    τftv ← satisfyTycons τftv
-    gtrace ("gen (tycons)", τftv, τ)
-    eliminateExistentials True (γrank, τftv)
-    gtrace ("gen (existentials 1)", τftv, τ)
-    removeRedundant
-    gtrace ("gen (redundant)", τftv, τ)
-    eliminateExistentials False (γrank, τftv)
-    gtrace ("gen (existentials 2)", τftv, τ)
-    τftv ← polarizedReduce τftv
-    gtrace ("gen (polarized)", τftv, τ)
-    eliminateExistentials False (γrank, τftv)
-    gtrace ("gen (existentials 3)", τftv, τ)
-    -- Guessing starts here
-    τftv ← coalesceComponents value (γrank, τftv)
-    gtrace ("gen (components)", τftv, τ)
-    -- Guessing ends here
-    qc    ← ConstraintT (gets esQuals)
-    cftv  ← ftvSet . map snd =<< NM.getsGraph Gr.labNodes
-    qcftv ← ftvSet qc
-    αs    ← Set.fromDistinctAscList <$$>
-              removeByRank γrank <$>
-                Set.toAscList $
-                  (qcftv `Set.union` Map.keysSet τftv) Set.\\ cftv
-    (qc, αqs, τ) ← solveQualifiers value αs qc τ
-    ConstraintT (modify (esQualsUpdate (const qc)))
-    gtrace ("gen (finished)", αqs, τ)
-    resetEquivTVs
-    return (map fst αqs, map snd αqs)
-    where
-      --
-      -- Make sure the graph is satisfiable and figure out anything that
-      -- is implied by the transitive closure of type constructors
-      satisfyTycons τftv0 = do
-        NM.insMapEdgesM [ (ConAt c1, ConAt c2, ())
-                        | (c1, c2) ← Gr.labNodeEdges tyConOrder ]
-        NM.modifyGraph Gr.trcnr
-        satisfyTycons' τftv0
-        where
-        satisfyTycons' = iterChanging $ \τftv →
-          foldM each τftv =<< NM.getsGraph Gr.labNodes
-        each τftv (n, VarAt α) = do
-          (nm, g) ← NM.getNMState
-          let assign c = do
-                τftv ← assignTV α (ConAt c) τftv
-                let n' = Gr.nmLab nm (ConAt c)
-                assignNode n n'
-                return τftv
-              lbs = [ c | Just (ConAt c) ← map (Gr.lab g) (Gr.pre g n)]
-              ubs = [ c | Just (ConAt c) ← map (Gr.lab g) (Gr.suc g n)]
-          glb ← case lbs of
-                  []   → return Nothing
-                  c:cs → Just <$> foldM tyConJoin c cs
-          lub ← case ubs of
-                  []   → return Nothing
-                  c:cs → Just <$> foldM tyConMeet c cs
-          case (glb, lub) of
-            (Just c1, Just c2) | c1 == c2         → assign c1
-            (Just c1, _) | not (tyConHasSuccs c1) → assign c1
-            (_, Just c2) | not (tyConHasPreds c2) → assign c2
-            _ → do
-              case glb of
-                Just lb | lb `notElem` lbs
-                  → NM.insMapEdgeM (ConAt lb, VarAt α, ())
-                _ → return ()
-              case lub of
-                Just ub | ub `notElem` ubs
-                  → NM.insMapEdgeM (VarAt α, ConAt ub, ())
-                _ → return ()
-              return τftv
-        each τftv (n, ConAt c1) = do
-          g ← NM.getGraph
-          sequence_
-            [ if c1 `tyConLe` c2
-                then return ()
-                else fail $ "Cannot unify: " ++ c1 ++ " ≤ " ++ c2
-            | Just (ConAt c2) ← map (Gr.lab g) (Gr.suc g n)]
-          return τftv
-      --
-      -- Eliminate existentially-quantified type variables from the
-      -- constraint
-      eliminateExistentials trans (γrank, τftv) = do
-        extvs ← getExistentials (γrank, τftv)
-        trace ("existentials are:", extvs)
-        mapM (eliminateNode trans) (Set.toList extvs)
-      -- Get the existential type variables
-      getExistentials (γrank, τftv) = do
-        lnodes ← NM.getsGraph Gr.labNodes
-        cftv   ← removeByRank γrank [ α | (_, VarAt α) ← lnodes ]
-        return (Set.fromList cftv Set.\\ Map.keysSet τftv)
-      -- Remove a node unless it is necessary to associate some of its
-      -- neighbors -- in particular, a node with multiple predecessors
-      -- but no successor (or dually, multiple successors but no
-      -- predecessor) should not be removed.
-      eliminateNode trans α = do
-        (nm, g) ← NM.getNMState
-        let node = Gr.nmLab nm (VarAt α)
-        case (Gr.pre g node, Gr.suc g node) of
-          (_:_:_, []) → return ()
-          ([], _:_:_) → return ()
-          (pre, suc)  → NM.putGraph $
-            let g' = Gr.delNode node g in
-            if trans
-              then g'
-              else foldr ($) g'
-                     [ Gr.insEdge (n1, n2, ())
-                     | n1 ← pre
-                     , n2 ← suc ]
-      --
-      -- Remove redundant edges:
-      --  • Edges implied by transitivity
-      --  • Edges relating type constructors to type constructors
-      removeRedundant = do
-        NM.modifyGraph Gr.untransitive
-        edges ← NM.getsGraph Gr.labNodeEdges
-        NM.delMapEdgesM [ (ConAt c1, ConAt c2)
-                        | (ConAt c1, ConAt c2) ← edges ]
-      --
-      -- Remove type variables based on polarity-related rules:
-      --  • Coalesce positive type variables with a single predecessor
-      --    and negative type variables with a single successor
-      --  • Coalesce positive type variables that share all their
-      --    predecessors and negative type variables that share all
-      --    their successors.
-      polarizedReduce = iterChanging $ \τftv → do
-        nm ← NM.getNodeMap
-        foldM tryRemove τftv (findPolar nm τftv)
-          where
-          tryRemove τftv (n, α, var) = do
-            let ln = (n, VarAt α)
-            mτ ← readTV α
-            g  ← NM.getGraph
-            case (mτ, Gr.gelem n g) of
-              (Left _, True) →
-                case (var, Gr.pre g n, Gr.suc g n) of
-                  -- Should we consider QCo(ntra)variance here too?
-                  (Covariant,     [pre], _)
-                    → snd <$> coalesce ln (Gr.labelNode g pre) τftv
-                  (Contravariant, _,     [suc])
-                    → snd <$> coalesce ln (Gr.labelNode g suc) τftv
-                  (Covariant,     pres,  _)
-                    → siblings g τftv (ln,  1) pres (Gr.pre,Gr.suc)
-                  (Contravariant, _,     sucs)
-                    → siblings g τftv (ln, -1) sucs (Gr.suc,Gr.pre)
-                  _ → return τftv
-              _ → return τftv
-          findPolar nm τftv = [ (Gr.nmLab nm (VarAt α), α, var)
-                              | (α, var) ← Map.toList τftv
-                              , var == 1 || var == -1 ]
-          siblings g τftv (lnode@(n,_), var) pres (gpre, gsuc) = do
-            lnodes ← liftM ordNub . runListT $ do
-              pre ← ListT (return pres)
-              sib ← ListT (return (gsuc g pre))
-              guard $ sib /= n
-              Just (VarAt β) ← return (Gr.lab g sib)
-              guard $ Map.lookup β τftv == Just var
-              guard $ gpre g sib == pres
-              return (sib, VarAt β)
-            case lnodes of
-              _:_ → do
-                  τftv' ← snd <$> coalesceList τftv (lnode:lnodes)
-                  return τftv'
-              _   → return τftv
-      --
-      -- Coalesce the strongly-connected components to single atoms
-      coalesceSCCs τftv = do
-        foldM (liftM snd <$$> coalesceList) τftv =<< NM.getsGraph Gr.labScc 
-      -- Given a list of atoms, coalesce them to one atom
-      coalesceList τftv0 (ln:lns) =
-        foldM (\(ln1, state) ln2 → coalesce ln1 ln2 state) (ln, τftv0) lns
-      coalesceList _      [] = fail "BUG! coalesceList got []"
-      -- Assign n2 to n1, updating the graph, type variables, and ftvs,
-      -- and return whichever node survives
-      coalesce (n1, lab1) (n2, lab2) τftv = do
-        case (lab1, lab2) of
-          (VarAt α,  _)        → (n1, α) `gets` (n2, lab2)
-          (_,        VarAt α)  → (n2, α) `gets` (n1, lab1)
-          (ConAt c1, ConAt c2)
-            | c1 == c2         → do
-            assignNode n1 n2
-            return ((n2, lab2), τftv)
-          _                    →
-            fail $ "Could not unify: " ++ show lab1 ++ " = " ++ show lab2
-        where
-          (n1', α) `gets` (n2', lab') = do
-            let ?deref = readTV
-            ftv2 ← ftvSet lab'
-            if α `Set.member` ftv2
-              then return ((n2', lab'), τftv)
-              else do
-                τftv' ← assignTV α lab' τftv
-                assignNode n1' n2'
-                return ((n2', lab'), τftv')
-      -- Update the graph to remove node n1, assigning all of its
-      -- neighbors to n2
-      assignNode n1 n2 = NM.modifyGraph $ \g →
-        Gr.insEdges [ (n', n2, ())
-                    | n' ← Gr.pre g n1, n' /= n1, n' /= n2 ] $
-        Gr.insEdges [ (n2, n', ())
-                    | n' ← Gr.suc g n1, n' /= n1, n' /= n2 ] $
-        Gr.delNode n1 g
-      -- Update the type variables to assign atom2 to α1, updating the
-      -- ftvs appropriately
-      assignTV α atom τftv = do
-        writeTV α (atomTy atom)
-        assignFtvMap α atom τftv
-      -- Given two type variables, where α ← atom, update a map of free
-      -- type variables to variance lists accordingly
-      assignFtvMap α atom vmap =
-        case Map.lookup α vmap of
-          Just vs → case atom of
-            VarAt β → return $ Map.insertWith (+) β vs vmap'
-            ConAt _ → return vmap'
-          Nothing → return vmap
-        where vmap' = Map.delete α vmap
-      -- Coalesce and remove fully-generalizable components
-      coalesceComponents value (γrank, τftv) = do
-        extvs  ← getExistentials (γrank, τftv)
-        τcands ← genCandidates value τftv γrank
-        let candidates = Set.mapMonotonic VarAt $ extvs `Set.union` τcands
-            each τftv component@(_:_)
-              | all (`Set.member` candidates) (map snd component)
-              = do
-                  ((node, _), τftv')
-                    ← coalesceList τftv component
-                  NM.getGraph >>= NM.putGraph . Gr.delNode node
-                  return τftv'
-            each τftv _
-              = return τftv
-        foldM each τftv =<< NM.getsGraph Gr.labComponents
-      -- Find the generalization candidates, which are free in τ but
-      -- not in γ (restricted further if not a value)
-      genCandidates value τftv γrank =
-        Set.fromDistinctAscList <$>
-          removeByRank γrank (map fst (Map.toAscList (restrict τftv)))
-          where
-          restrict = if value
-                       then id
-                       else Map.filter (`elem` [1, -1, 2, -2])
-      -- Remove type variables from a list if their rank indicates that
-      -- they're in the environment
-      removeByRank γrank = filterM keep
-        where
-          keep α = do
-            rank ← getTVRank α
-            return (rank > γrank)
-  --
-  saveConstraint = do
-    c ← ConstraintT get
-    return (ConstraintT (put c))
+  generalize'    = solveConstraint
+  saveConstraint = ConstraintT . put <$> ConstraintT get
   showConstraint = show <$> ConstraintT get
 
+-- | Monad transformer for tracking which type comparisons we've seen,
+--   in order to implement recursive subtyping.  A pair of types mapped
+--   to @True@ means that they're known to be equal, whereas @False@
+--   means that their only known to be subtyped.
 type SeenT tv r m = StateT (Map.Map (REC_TYPE tv, REC_TYPE tv) Bool)
                            (ConstraintT tv r m)
 
+-- | Run a recursive subtyping computation.
 runSeenT ∷ MonadU tv r m ⇒ SeenT tv r m a → ConstraintT tv r m a
 runSeenT m = do
   gtrace "runSeenT {"
@@ -474,17 +267,10 @@ runSeenT m = do
   gtrace "} runSeenT"
   return result
 
-relateTypesK ∷ MonadU tv r m ⇒
-               Variance → Int → Type tv → Type tv → SeenT tv r m ()
-relateTypesK var = case var of
-  Invariant     → subtypeTypesK True
-  Covariant     → subtypeTypesK False
-  Contravariant → flip . subtypeTypesK False
-  QInvariant    → const (~:)
-  QCovariant    → const (⊏:)
-  QContravariant→ const (flip (⊏:))
-  Omnivariant   → \_ _ _ → return ()
-
+-- | Relate two types at either subtyping or equality, depending on
+--   the value of the first parameter (@True@ means equality).
+--   This eagerly solves as much as possible, adding to the constraint
+--   only as necessary.
 subtypeTypesK ∷ MonadU tv r m ⇒
                 Bool → Int → Type tv → Type tv → SeenT tv r m ()
 subtypeTypesK unify k0 τ10 τ20 = do
@@ -562,9 +348,47 @@ subtypeTypesK unify k0 τ10 τ20 = do
     NM.insNewMapNodeM a2
     NM.insMapEdgeM (a1, a2, ())
 
+-- | Relate two types at the given variance.
+relateTypesK ∷ MonadU tv r m ⇒
+               Variance → Int → Type tv → Type tv → SeenT tv r m ()
+relateTypesK var = case var of
+  Invariant     → subtypeTypesK True
+  Covariant     → subtypeTypesK False
+  Contravariant → flip . subtypeTypesK False
+  QInvariant    → const (~:)
+  QCovariant    → const (⊏:)
+  QContravariant→ const (flip (⊏:))
+  Omnivariant   → \_ _ _ → return ()
+
+-- | Copy a type while replacing all the type variables with fresh ones
+--   of the same kind.
+copyType ∷ MonadU tv r m ⇒ Type tv → m (Type tv)
+copyType =
+  let ?deref = readTV
+   in foldTypeM (mkQuaF (return <$$$> QuaTy))
+                (mkBvF (return <$$$> bvTy))
+                (fvTy <$$> newTVKind . tvKind)
+                fcon
+                (return <$$$> RowTy)
+                (mkRecF (return <$$> RecTy))
+  where
+    -- Nullary type constructors that are involved in the atomic subtype
+    -- relation are converted to type variables:
+    fcon c [] | tyConHasRelated c = newTVTy
+    fcon c τs
+      = ConTy c <$> sequence
+          [ -- A Q-variant type constructor parameter becomes a single
+            -- type variable:
+            if isQVariance var
+              then fvTy <$> newTVKind QualKd
+              else return τ
+          | τ   ← τs
+          | var ← getVariances c (length τs) ]
+
 -- | Unify a type variable with a type, where the type must have
 --   no bound variables pointing further than @k@.
---   ASSUMPTION: @α@ has not been substituted.
+--   ASSUMPTIONS: @α@ has not been substituted and the occurs check has
+--   already passed.
 unifyVarK ∷ MonadU tv r m ⇒ Int → tv → Type tv → SeenT tv r m ()
 unifyVarK k α τ0 = do
   lift $ gtrace ("unifyVarK", k, α, τ0)
@@ -589,115 +413,339 @@ unifyVarK k α τ0 = do
             Just a  → subtypeTypesK False k τ (atomTy a)
         | (_, n') ← sucs ]
 
+--- OCCURS CHECK
+
 -- | Performs the occurs check and returns a type suitable for unifying
---   with the given type variable, if possible.  This is possible if all
---   occurrences of @α@ in @τ@ occur guarded by a type constructor that
+--   with the given type variable, if possible.  This does the subtyping
+--   occurs check, which checks not in terms of type variables but in
+--   terms of same-size equivalence classes of type variables.
+--   Unification is possible if all occurrences of type variables
+--   size-equivalent to @α@ appear guarded by a type constructor that
 --   permits recursion, in which case we roll up @τ@ as a recursive type
 --   and return that.
 occursCheck ∷ MonadU tv r m ⇒ tv → Type tv → ConstraintT tv r m (Type tv)
 occursCheck α τ = do
   gtrace ("occursCheck", α, τ)
   let ?deref = readTV
-  (βsGuarded, βsUnguarded)
-    ← (Map.keys *** Map.keys) . Map.partition id <$> ftvG τ
-  whenM (anyM (checkEquivTVs α) βsUnguarded) $
-    fail "Occurs check failed (size check)"
-  recVars ← filterM (checkEquivTVs α) βsGuarded
-  when (not (null recVars)) $
-    gtrace ("occursCheck (recvars)", recVars)
+  (guarded, unguarded) ← (Map.keys***Map.keys) . Map.partition id <$> ftvG τ
+  whenM (anyM (checkEquivTVs α) unguarded) $
+    fail "Occurs check failed"
+  recVars ← filterM (checkEquivTVs α) guarded
+  when (not (null recVars)) $ gtrace ("occursCheck (recvars)", recVars)
   return (foldr closeRec τ recVars)
 
+-- | Records that two type variables have the same size.
 makeEquivTVs  ∷ MonadU tv r m ⇒ tv → tv → ConstraintT tv r m ()
 makeEquivTVs α β = do
   pα ← getTVProxy α
   pβ ← getTVProxy β
   UF.coalesce_ (return <$$> Set.union) pα pβ
 
+-- | Checks whether two type variables have the same size.
 checkEquivTVs ∷ MonadU tv r m ⇒ tv → tv → ConstraintT tv r m Bool
 checkEquivTVs α β = do
   pα ← getTVProxy α
   pβ ← getTVProxy β
   UF.sameRepr pα pβ
 
+-- | Clears all size-equivalence classes and rebuilds them based on the
+--   current atomic subtyping constraint graph.
 resetEquivTVs ∷ MonadU tv r m ⇒ ConstraintT tv r m ()
 resetEquivTVs = do
-  ConstraintT (modify (esEquivsUpdate (const Map.empty)))
+  ConstraintT (modify (csEquivsUpdate (const Map.empty)))
   g     ← NM.getGraph
   mapM_ (uncurry makeEquivTVs)
         [ (α, β) | (VarAt α, VarAt β) ← Gr.labNodeEdges g ]
 
+-- | Helper to get the proxy the represents the size-equivalence class
+--   of a type variable.
 getTVProxy ∷ MonadU tv r m ⇒ tv → ConstraintT tv r m (TVProxy tv r)
 getTVProxy α = do
-  equivs ← ConstraintT (gets esEquivs)
+  equivs ← ConstraintT (gets csEquivs)
   case Map.lookup α equivs of
     Just pα → return pα
     Nothing → do
       pα ← UF.create (Set.singleton α)
-      ConstraintT (modify (esEquivsUpdate (Map.insert α pα)))
+      ConstraintT (modify (csEquivsUpdate (Map.insert α pα)))
       return pα
 
--- | Copy a type while replacing all the type variables with fresh ones
---   of the same kind.
-copyType ∷ MonadU tv r m ⇒ Type tv → m (Type tv)
-copyType =
-  let ?deref = readTV
-   in foldTypeM (mkQuaF (return <$$$> QuaTy))
-                (mkBvF (return <$$$> bvTy))
-                (fvTy <$$> newTVKind . tvKind)
-                fcon
-                (return <$$$> RowTy)
-                (mkRecF (return <$$> RecTy))
-  where
-    fcon c []
-      | tyConHasSuccs c || tyConHasPreds c
-      = newTVTy
-    fcon c τs
-      = ConTy c <$> sequence
-          [ if isQVariance var
-              then fvTy <$> newTVKind QualKd
-              else return τ
-          | τ   ← τs
-          | var ← getVariances c (length τs) ]
+--- CONSTRAINT SOLVING
 
+-- | Solve a constraint as much as possible, returning the type
+--   variables to generalize and their qualifier bounds.
+solveConstraint ∷ MonadU tv r m ⇒
+                  Bool → Rank → Type tv → ConstraintT tv r m ([tv], [QLit])
+solveConstraint value γrank τ = do
+  let ?deref = readTV
+  τftv ← ftvV τ;
+  gtrace ("gen (begin)", value, γrank, τftv, τ)
+  τftv ← coalesceSCCs τftv
+  gtrace ("gen (scc)", τftv, τ)
+  τftv ← satisfyTycons τftv
+  gtrace ("gen (tycons)", τftv, τ)
+  eliminateExistentials True (γrank, τftv)
+  gtrace ("gen (existentials 1)", τftv, τ)
+  removeRedundant
+  gtrace ("gen (redundant)", τftv, τ)
+  eliminateExistentials False (γrank, τftv)
+  gtrace ("gen (existentials 2)", τftv, τ)
+  τftv ← polarizedReduce τftv
+  gtrace ("gen (polarized)", τftv, τ)
+  eliminateExistentials False (γrank, τftv)
+  gtrace ("gen (existentials 3)", τftv, τ)
+  -- Guessing starts here
+  τftv ← coalesceComponents value (γrank, τftv)
+  gtrace ("gen (components)", τftv, τ)
+  -- Guessing ends here
+  qc    ← ConstraintT (gets csQuals)
+  cftv  ← ftvSet . map snd =<< NM.getsGraph Gr.labNodes
+  qcftv ← ftvSet qc
+  αs    ← Set.fromDistinctAscList <$$>
+            removeByRank γrank <$>
+              Set.toAscList $
+                (qcftv `Set.union` Map.keysSet τftv) Set.\\ cftv
+  (qc, αqs, τ) ← solveQualifiers value αs qc τ
+  ConstraintT (modify (csQualsUpdate (const qc)))
+  gtrace ("gen (finished)", αqs, τ)
+  resetEquivTVs
+  return (map fst αqs, map snd αqs)
+  where
+    --
+    -- Make sure the graph is satisfiable and figure out anything that
+    -- is implied by the transitive closure of type constructors
+    satisfyTycons τftv0 = do
+      NM.insMapEdgesM [ (ConAt c1, ConAt c2, ())
+                      | (c1, c2) ← Gr.labNodeEdges tyConOrder ]
+      NM.modifyGraph Gr.trcnr
+      satisfyTycons' τftv0
+      where
+      satisfyTycons' = iterChanging $ \τftv →
+        foldM each τftv =<< NM.getsGraph Gr.labNodes
+      each τftv (n, VarAt α) = do
+        (nm, g) ← NM.getNMState
+        let assign c = do
+              τftv ← assignTV α (ConAt c) τftv
+              let n' = Gr.nmLab nm (ConAt c)
+              assignNode n n'
+              return τftv
+            lbs = [ c | Just (ConAt c) ← map (Gr.lab g) (Gr.pre g n)]
+            ubs = [ c | Just (ConAt c) ← map (Gr.lab g) (Gr.suc g n)]
+        glb ← case lbs of
+                []   → return Nothing
+                c:cs → Just <$> foldM tyConJoin c cs
+        lub ← case ubs of
+                []   → return Nothing
+                c:cs → Just <$> foldM tyConMeet c cs
+        case (glb, lub) of
+          (Just c1, Just c2) | c1 == c2         → assign c1
+          (Just c1, _) | not (tyConHasSuccs c1) → assign c1
+          (_, Just c2) | not (tyConHasPreds c2) → assign c2
+          _ → do
+            case glb of
+              Just lb | lb `notElem` lbs
+                → NM.insMapEdgeM (ConAt lb, VarAt α, ())
+              _ → return ()
+            case lub of
+              Just ub | ub `notElem` ubs
+                → NM.insMapEdgeM (VarAt α, ConAt ub, ())
+              _ → return ()
+            return τftv
+      each τftv (n, ConAt c1) = do
+        g ← NM.getGraph
+        sequence_
+          [ if c1 `tyConLe` c2
+              then return ()
+              else fail $ "Cannot unify: " ++ c1 ++ " ≤ " ++ c2
+          | Just (ConAt c2) ← map (Gr.lab g) (Gr.suc g n)]
+        return τftv
+    --
+    -- Eliminate existentially-quantified type variables from the
+    -- constraint
+    eliminateExistentials trans (γrank, τftv) = do
+      extvs ← getExistentials (γrank, τftv)
+      trace ("existentials are:", extvs)
+      mapM (eliminateNode trans) (Set.toList extvs)
+    -- Get the existential type variables
+    getExistentials (γrank, τftv) = do
+      lnodes ← NM.getsGraph Gr.labNodes
+      cftv   ← removeByRank γrank [ α | (_, VarAt α) ← lnodes ]
+      return (Set.fromList cftv Set.\\ Map.keysSet τftv)
+    -- Remove a node unless it is necessary to associate some of its
+    -- neighbors -- in particular, a node with multiple predecessors
+    -- but no successor (or dually, multiple successors but no
+    -- predecessor) should not be removed.
+    eliminateNode trans α = do
+      (nm, g) ← NM.getNMState
+      let node = Gr.nmLab nm (VarAt α)
+      case (Gr.pre g node, Gr.suc g node) of
+        (_:_:_, []) → return ()
+        ([], _:_:_) → return ()
+        (pre, suc)  → NM.putGraph $
+          let g' = Gr.delNode node g in
+          if trans
+            then g'
+            else foldr ($) g'
+                   [ Gr.insEdge (n1, n2, ())
+                   | n1 ← pre
+                   , n2 ← suc ]
+    --
+    -- Remove redundant edges:
+    --  • Edges implied by transitivity
+    --  • Edges relating type constructors to type constructors
+    removeRedundant = do
+      NM.modifyGraph Gr.untransitive
+      edges ← NM.getsGraph Gr.labNodeEdges
+      NM.delMapEdgesM [ (ConAt c1, ConAt c2)
+                      | (ConAt c1, ConAt c2) ← edges ]
+    --
+    -- Remove type variables based on polarity-related rules:
+    --  • Coalesce positive type variables with a single predecessor
+    --    and negative type variables with a single successor
+    --  • Coalesce positive type variables that share all their
+    --    predecessors and negative type variables that share all
+    --    their successors.
+    polarizedReduce = iterChanging $ \τftv → do
+      nm ← NM.getNodeMap
+      foldM tryRemove τftv (findPolar nm τftv)
+        where
+        tryRemove τftv (n, α, var) = do
+          let ln = (n, VarAt α)
+          mτ ← readTV α
+          g  ← NM.getGraph
+          case (mτ, Gr.gelem n g) of
+            (Left _, True) →
+              case (var, Gr.pre g n, Gr.suc g n) of
+                -- Should we consider QCo(ntra)variance here too?
+                (Covariant,     [pre], _)
+                  → snd <$> coalesce ln (Gr.labelNode g pre) τftv
+                (Contravariant, _,     [suc])
+                  → snd <$> coalesce ln (Gr.labelNode g suc) τftv
+                (Covariant,     pres,  _)
+                  → siblings g τftv (ln,  1) pres (Gr.pre,Gr.suc)
+                (Contravariant, _,     sucs)
+                  → siblings g τftv (ln, -1) sucs (Gr.suc,Gr.pre)
+                _ → return τftv
+            _ → return τftv
+        findPolar nm τftv = [ (Gr.nmLab nm (VarAt α), α, var)
+                            | (α, var) ← Map.toList τftv
+                            , var == 1 || var == -1 ]
+        siblings g τftv (lnode@(n,_), var) pres (gpre, gsuc) = do
+          lnodes ← liftM ordNub . runListT $ do
+            pre ← ListT (return pres)
+            sib ← ListT (return (gsuc g pre))
+            guard $ sib /= n
+            Just (VarAt β) ← return (Gr.lab g sib)
+            guard $ Map.lookup β τftv == Just var
+            guard $ gpre g sib == pres
+            return (sib, VarAt β)
+          case lnodes of
+            _:_ → do
+                τftv' ← snd <$> coalesceList τftv (lnode:lnodes)
+                return τftv'
+            _   → return τftv
+    --
+    -- Coalesce the strongly-connected components to single atoms
+    coalesceSCCs τftv = do
+      foldM (liftM snd <$$> coalesceList) τftv =<< NM.getsGraph Gr.labScc 
+    -- Given a list of atoms, coalesce them to one atom
+    coalesceList τftv0 (ln:lns) =
+      foldM (\(ln1, state) ln2 → coalesce ln1 ln2 state) (ln, τftv0) lns
+    coalesceList _      [] = fail "BUG! coalesceList got []"
+    -- Assign n2 to n1, updating the graph, type variables, and ftvs,
+    -- and return whichever node survives
+    coalesce (n1, lab1) (n2, lab2) τftv = do
+      case (lab1, lab2) of
+        (VarAt α,  _)        → (n1, α) `gets` (n2, lab2)
+        (_,        VarAt α)  → (n2, α) `gets` (n1, lab1)
+        (ConAt c1, ConAt c2)
+          | c1 == c2         → do
+          assignNode n1 n2
+          return ((n2, lab2), τftv)
+        _                    →
+          fail $ "Could not unify: " ++ show lab1 ++ " = " ++ show lab2
+      where
+        (n1', α) `gets` (n2', lab') = do
+          let ?deref = readTV
+          ftv2 ← ftvSet lab'
+          if α `Set.member` ftv2
+            then return ((n2', lab'), τftv)
+            else do
+              τftv' ← assignTV α lab' τftv
+              assignNode n1' n2'
+              return ((n2', lab'), τftv')
+    -- Update the graph to remove node n1, assigning all of its
+    -- neighbors to n2
+    assignNode n1 n2 = NM.modifyGraph $ \g →
+      Gr.insEdges [ (n', n2, ())
+                  | n' ← Gr.pre g n1, n' /= n1, n' /= n2 ] $
+      Gr.insEdges [ (n2, n', ())
+                  | n' ← Gr.suc g n1, n' /= n1, n' /= n2 ] $
+      Gr.delNode n1 g
+    -- Update the type variables to assign atom2 to α1, updating the
+    -- ftvs appropriately
+    assignTV α atom τftv = do
+      writeTV α (atomTy atom)
+      assignFtvMap α atom τftv
+    -- Given two type variables, where α ← atom, update a map of free
+    -- type variables to variance lists accordingly
+    assignFtvMap α atom vmap =
+      case Map.lookup α vmap of
+        Just vs → case atom of
+          VarAt β → return $ Map.insertWith (+) β vs vmap'
+          ConAt _ → return vmap'
+        Nothing → return vmap
+      where vmap' = Map.delete α vmap
+    -- Coalesce and remove fully-generalizable components
+    coalesceComponents value (γrank, τftv) = do
+      extvs  ← getExistentials (γrank, τftv)
+      τcands ← genCandidates value τftv γrank
+      let candidates = Set.mapMonotonic VarAt $ extvs `Set.union` τcands
+          each τftv component@(_:_)
+            | all (`Set.member` candidates) (map snd component)
+            = do
+                ((node, _), τftv')
+                  ← coalesceList τftv component
+                NM.getGraph >>= NM.putGraph . Gr.delNode node
+                return τftv'
+          each τftv _
+            = return τftv
+      foldM each τftv =<< NM.getsGraph Gr.labComponents
+    -- Find the generalization candidates, which are free in τ but
+    -- not in γ (restricted further if not a value)
+    genCandidates value τftv γrank =
+      Set.fromDistinctAscList <$>
+        removeByRank γrank (map fst (Map.toAscList (restrict τftv)))
+        where
+        restrict = if value
+                     then id
+                     else Map.filter (`elem` [1, -1, 2, -2])
+    -- Remove type variables from a list if their rank indicates that
+    -- they're in the environment
+    removeByRank γrank = filterM keep
+      where
+        keep α = do
+          rank ← getTVRank α
+          return (rank > γrank)
+
+-- | Tracing facility for constraint solving; shows the supplied
+--   argument and the state of the constraint solver.
 gtrace ∷ (MonadU tv r m, Show a) ⇒ a → ConstraintT tv r m ()
 gtrace =
   if debug
     then \info → do
       trace info
-      es ← ConstraintT get
-      unsafeIOToU (print (indent es))
+      cs ← ConstraintT get
+      unsafeIOToU (print (indent cs))
     else \_ → return ()
   where
     indent = Ppr.nest 4 . Ppr.fsep . map Ppr.text . words . show
 
 ---
---- Abstract constraints
+--- THE SUBTYPE ORDER
+---
+--- Currently hardcoded as a graph on type constructor names
 ---
 
--- | We reduce constraints to inequalities on atoms, which are either
---   type variables or nullary type constructors.
-data Atom tv = VarAt !tv
-             | ConAt !Name
-  deriving (Eq, Ord)
-
-instance Tv tv ⇒ Show (Atom tv) where
-  show (VarAt α) = show (tvUniqueID α)
-  show (ConAt c) = c
-
-instance Ppr tv ⇒ Ppr (Atom tv) where
-  pprPrec p = pprPrec p . atomTy
-
-instance Tv tv ⇒ Ftv (Atom tv) tv where
-  ftvTree = ftvTree . atomTy
-
--- | To inject an atom into a type
-atomTy ∷ Atom tv → Type tv
-atomTy (VarAt α) = fvTy α
-atomTy (ConAt n) = ConTy n []
-
----
---- The subtype order
----
 
 -- | To compare two nullary type constructors
 tyConNode  ∷ String → Gr.Node
@@ -755,6 +803,10 @@ tyConCombine next countNext goalName c1 c2
         giveUp = fail $
           "Type constructors " ++ c1 ++ " and " ++ c2 ++
           " have no " ++ goalName ++ "."
+
+---
+--- QUALIFIER CONSTRAINT SOLVING
+---
 
 {-
 
@@ -884,6 +936,8 @@ We convert it to SAT as follows:
 
 -}
 
+-- | Internal representation of qualifier expressions used by the
+--   qualifier solver.
 data QE tv = QE { qeQLit ∷ !QLit, qeQSet ∷ !(Set.Set tv) }
 
 instance Tv tv ⇒ Show (QE tv) where
@@ -942,6 +996,10 @@ instance Tv tv ⇒ Show (QEMeet tv) where
 instance Ord tv ⇒ Ftv (QEMeet tv) tv where
   ftvTree = ftvTree . unQEMeet
 
+instance Ord tv ⇒ Monoid (QEMeet tv) where
+  mempty  = maxBound
+  mappend = foldr qemInsert <$.> unQEMeet
+
 qemSingleton ∷ QE tv → QEMeet tv
 qemSingleton (QE L _) = maxBound
 qemSingleton qe       = QEMeet [qe]
@@ -957,28 +1015,41 @@ qemInsert qe (QEMeet qem) = QEMeet (loop qe qem) where
     | qe' ⊑ qe            = qe':qem
     | otherwise           = qe':loop qe qem
 
-instance Ord tv ⇒ Monoid (QEMeet tv) where
-  mempty  = maxBound
-  mappend = foldr qemInsert <$.> unQEMeet
-
-data SQState a tv
-  = SQState {
+-- | State of the qualifier constraint solver
+data QCState tv
+  = QCState {
+      -- | Generalization candidates, which are type variables that
+      --   appear in the qualifier constraint or type-to-be-generalized,
+      --   but not in the shape constraint or environment
       sq_αs    ∷ !(Set.Set tv),
+      -- | The current type to be generalized
+      sq_τ     ∷ !(Type tv),
+      -- | Free type variables and variances in the type-to-be-generalized.
       sq_τftv  ∷ !(VarMap tv),
+      -- | Part of the qualifier constraint: joins of type variables
+      --   lower-bounded by qualifier literals.
       sq_βlst  ∷ ![(QLit, Set.Set tv)],
-      sq_vmap  ∷ !(Map.Map tv (QEMeet tv)),
-      sq_τ     ∷ !a
+      -- | Part of the qualifier constraint: type variables
+      --   upper-bounded by (meets of) qualifier expressions.
+      sq_vmap  ∷ !(Map.Map tv (QEMeet tv))
     }
   deriving Show
 
--- | Given a list of type variables that need qlit bounds and a set
---   of qualifier inequalities, solve and produce bounds.  Also return
---   any remaining inequalities (which must be satisfiable, but we
---   haven't guessed how to satisfy them yet.)
+-- | Solver for qualifier contraints.
+--   Given a qualifier constraint, solve and produce type variable
+--   bounds.  Also return any remaining inequalities (which must be
+--   satisfiable, but we haven't guessed how to satisfy them yet).
 solveQualifiers
   ∷ MonadU tv r m ⇒
-    Bool → Set.Set tv → [(Type tv, Type tv)] →
-    Type tv → m ([(Type tv, Type tv)], [(tv, QLit)], Type tv)
+    -- | Are we generalizing the type of a non-expansive term?
+    Bool →
+    -- | Generalization candidates
+    Set.Set tv →
+    -- | The constraint as pairs of types in the subqualifier relation
+    [(Type tv, Type tv)] →
+    -- | The type to be generalized
+    Type tv →
+    m ([(Type tv, Type tv)], [(tv, QLit)], Type tv)
 solveQualifiers value αs qc τ = do
   let ?deref = readTV
   trace ("solveQ (init)", αs, qc)
@@ -988,7 +1059,7 @@ solveQualifiers value αs qc τ = do
   trace ("solveQ (stdize)", qc)
   -- Decompose implements DECOMPOSE, TOP-SAT, BOT-SAT, and BOT-UNSAT.
   τftv           ← ftvV τ
-  state          ← decompose qc SQState {
+  state          ← decompose qc QCState {
                      sq_αs   = αs,
                      sq_τftv = τftv,
                      sq_βlst = [],
@@ -1171,8 +1242,7 @@ solveQualifiers value αs qc τ = do
     state ← decompose ineqs
       state {
         sq_αs   = sq_αs state Set.\\ γset,
-        sq_τftv = Map.foldrWithKey (\γ (QE _ γs) → substMap γ γs)
-                                   (sq_τftv state) γqes,
+        sq_τftv = Map.foldrWithKey substQE (sq_τftv state) γqes,
         sq_βlst = βlst,
         sq_vmap = vmap
       }
@@ -1249,19 +1319,28 @@ solveQualifiers value αs qc τ = do
   fromVar (FreeVar α) = α
   fromVar _           = error "BUG! solveQualifiers got bound tyvar"
 
-substMap ∷ Ord tv ⇒ tv → Set.Set tv → VarMap tv → VarMap tv
-substMap β βs vmap = case takeMap β vmap of
+-- | Update a type variable variance map as a result of substituting a
+--   qualifier expression for a type variable.
+substQE ∷ Ord tv ⇒ tv → QE tv → VarMap tv → VarMap tv
+substQE β (QE _ βs) vmap = case takeMap β vmap of
   (Just v, vmap') → Map.unionWith (⊔) vmap' (setToMap v βs)
   _               → vmap
 
+-- | Lookup a key in a map and remove the key from the map.
 takeMap ∷ Ord k ⇒ k → Map.Map k v → (Maybe v, Map.Map k v)
 takeMap = Map.updateLookupWithKey (\_ _ → Nothing)
 
+-- | Lift a 'Set.Set' to a 'Map.Map' with constant value
 setToMap   ∷ a → Set.Set k → Map.Map k a
 setToMap   = setToMapWith . const
 
+-- | Lift a 'Set.Set' to a 'Map.Map' with values computed from keys.
 setToMapWith   ∷ (k → a) → Set.Set k → Map.Map k a
 setToMapWith f = Map.fromDistinctAscList . map (id &&& f) . Set.toAscList
+
+---
+--- SAT SOLVING FOR QUALIFIER CONSTRAINTS
+---
 
 class SATable a v where
   πa ∷ VarMap v → a → SAT.Boolean
