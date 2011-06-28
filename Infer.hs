@@ -73,7 +73,7 @@ import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import System.IO (stderr, hPutStrLn)
 import System.Timeout (timeout)
 
-import MonadU
+import TV
 import Constraint
 import Syntax hiding (tests)
 import Env
@@ -85,7 +85,7 @@ import qualified Rank
 ---
 
 -- | Infer the type of a term, given a type context
-inferTm ∷ (MonadU tv r m, Show tv, Tv tv) ⇒
+inferTm ∷ (MonadTV tv r m, Show tv, Tv tv) ⇒
           Γ tv → Term Empty → m (Type tv, String)
 inferTm γ e = do
   δ0 ← Map.fromDistinctAscList <$> sequence
@@ -163,7 +163,7 @@ inferMatch ∷ MonadC tv r m ⇒
 inferMatch _ _ _ [] = newTVTy
 inferMatch δ γ τ ((InjPa n πi, ei):bs) | totalPatt πi = do
   β               ← newTVTy
-  mαr             ← extractLabel n <$> derefAll τ
+  mαr             ← extractLabel n <$> substDeep τ
   (α, r)          ← case mαr of
     Just αr → return αr
     Nothing → do
@@ -192,66 +192,24 @@ inferMatch δ γ τ ((πi, ei):bs) = do
   τk <: β
   return β
 
-{-
--- | To infer a type and constraint for a match form
-inferMatch ∷ MonadC tv r m ⇒
-             Δ tv → Γ tv → Type tv → [(Patt Empty, Term Empty)] →
-             Type tv → m ()
-inferMatch _ _ _ [] _ = return ()
-inferMatch δ γ τ ((InjPa n πi, ei):bs) τr | totalPatt πi = do
-  mp              ← extractLabel n <$> derefAll τ
-  (τn, τ')        ← case mp of
-    Just p  → return p
-    Nothing → do
-      τn ← newTVTy
-      τ' ← newTVTy
-      τ := RowTy n τn τ'
-      return (τn, τ')
-    
-  return ()
-{-
-  β               ← newTVTy
-  (α, r)          ← maybe ((,) <$> newTVTy <*> newTVTy) return mαr
-  (δ', _, τs)     ← inferPatt δ πi (Just α) (countOccsPatt πi ei)
-  γ'              ← γ &+&! πi &:& τs
-  τi              ← infer δ' γ' ei
-  τk              ← if null bs
-                      then do r <: endTy; return β
-                      else inferMatch δ' γ r bs
-  mapM_ (τ ⊏:) (countOccsPatt πi ei)
-  when (pattHasWild πi) (τ ⊏: A)
-  τi <: β
-  τk <: β
-  τ  <: RowTy n α r
-  return β
--}
-inferMatch δ γ τ ((πi, ei):bs) τr = do
-  (δ', _, τs)     ← inferPatt δ πi (Just τ) (countOccsPatt πi ei)
-  γ'              ← γ &+&! πi &:& τs
-  τi              ← infer δ' γ' ei
-  τi <: τr
-  inferMatch δ' γ τ bs τr
--}
-
 -- | Extend the environment and update the ranks of the type variables
-(&+&!) ∷ MonadU tv r m ⇒ Γ tv → Map.Map Name (Type tv) → m (Γ tv)
+(&+&!) ∷ MonadTV tv r m ⇒ Γ tv → Map.Map Name (Type tv) → m (Γ tv)
 γ &+&! m = do
   lowerRank (Rank.inc (rankΓ γ)) (Map.elems m)
   return (bumpΓ γ &+& m)
 
 infixl 2 &+&!
 
-arrowQualifier ∷ MonadU tv r m ⇒ Γ tv → Term a → m (QExp tv)
+arrowQualifier ∷ MonadTV tv r m ⇒ Γ tv → Term a → m (QExp tv)
 arrowQualifier γ e =
   qualifier (ConTy "U" [ σ
                        | n ← Set.toList (termFv e)
                        , σ ← γ &.& n ])
-  where ?deref = readTV
 
 -- | Instantiate a prenex quantifier
 inst ∷ MonadC tv r m ⇒ Type tv → m (Type tv)
 inst σ0 = do
-  σ      ← deref σ0
+  σ      ← substRoot σ0
   τ      ← case σ of
     QuaTy AllQu nqs τ → do
       αs ← sequence
@@ -296,7 +254,7 @@ inferPatt δ0 π0 mτ0 occs = do
     case mτ of
       Nothing → ConTy name <$> sequence [ loop πi Nothing | πi ← πs ]
       Just τ0 → do
-        τ ← deref τ0
+        τ ← substRoot τ0
         case τ of
           ConTy name' τs@(_:_) | length τs == length πs, name == name' →
             ConTy name <$> sequence
@@ -311,7 +269,7 @@ inferPatt δ0 π0 mτ0 occs = do
     case mτ of
       Nothing → RowTy name <$> loop π Nothing <*> newTVTy
       Just τ0 → do
-        τ ← deref τ0
+        τ ← substRoot τ0
         case τ of
           -- XXX Need to permute?
           RowTy name' τ' τr | name == name' → do
@@ -337,7 +295,7 @@ inferPatt δ0 π0 mτ0 occs = do
 --   some-bound names in the annotation and update the environment
 --   accordingly. Return the annotation instantiated to a type and the
 --   list of new universal tyvars.
-instAnnot ∷ MonadU tv r m ⇒
+instAnnot ∷ MonadTV tv r m ⇒
             Δ tv → Annot → m (Δ tv, Type tv, [Type tv])
 instAnnot δ (Annot names σ0) = do
   αs ← mapM eachName names
@@ -383,10 +341,9 @@ showInfer e = runU $ do
   τ'     ← stringifyType τ
   return (τ', c)
 
-stringifyType ∷ MonadU tv r m ⇒ Type tv → m (Type String)
+stringifyType ∷ MonadTV tv r m ⇒ Type tv → m (Type String)
 stringifyType = foldType (mkQuaF QuaTy) (mkBvF bvTy) (fvTy . show)
                          ConTy RowTy (mkRecF RecTy)
-  where ?deref = readTV
 
 ---
 --- Testing
@@ -1034,7 +991,7 @@ inferFnTests = T.test
   -}
   ]
   where
-  a -: b = _limit a $ case readsPrec 0 a of
+  a -: b = limit a $ case readsPrec 0 a of
     [(e,[])] →
       let expect = standardize (read b)
           typing = showInfer e in
@@ -1044,12 +1001,12 @@ inferFnTests = T.test
            Left _       → False
            Right (τ, _) → τ == elimEmptyF expect)
     _  → T.assertBool ("Syntax error: " ++ a) False
-  te a   = _limit a $ T.assertBool ("¬⊢ " ++ a)
+  te a   = limit a $ T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))
   pe a   = T.assertBool ("expected syntax error: " ++ a)
              (length (reads a ∷ [(Term Empty, String)]) /= 1)
-  _limit a m = do
-    result ← timeout 100000 m
+  limit a m = do
+    result ← timeout 1000000 m
     case result of
       Just () → return ()
       Nothing → T.assertBool ("Timeout: " ++ a) False

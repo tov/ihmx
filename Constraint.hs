@@ -40,7 +40,7 @@ import qualified NodeMap as NM
 import qualified Data.Boolean.SatSolver as SAT
 
 import Syntax
-import MonadU
+import TV
 import MonadRef
 import Util
 import Ppr
@@ -51,7 +51,7 @@ import qualified UnionFind as UF
 --- A constraint-solving monad
 ---
 
-class MonadU tv r m ⇒ MonadC tv r m | m → tv r where
+class MonadTV tv r m ⇒ MonadC tv r m | m → tv r where
   -- | Subtype and equality constraints
   (<:), (=:)    ∷ Type tv → Type tv → m ()
   -- | Subqualifier constraint
@@ -76,12 +76,12 @@ class MonadU tv r m ⇒ MonadC tv r m | m → tv r where
   generalize    ∷ Bool → Rank → Type tv → m (Type tv)
   generalize value γrank τ = do
     (αs, qls) ← generalize' value γrank τ
-    standardizeMus =<< closeWithQuals qls AllQu αs <$> derefAll τ
+    standardizeMus =<< closeWithQuals qls AllQu αs <$> substDeep τ
   -- | Generalize a list of types together.
   generalizeList ∷ Bool → Rank → [Type tv] → m [Type tv]
   generalizeList value γrank τs = do
     (αs, qls) ← generalize' value γrank (tupleTy τs)
-    mapM (standardizeMus <=< closeWithQuals qls AllQu αs <$$> derefAll) τs
+    mapM (standardizeMus <=< closeWithQuals qls AllQu αs <$$> substDeep) τs
   -- | Saves the constraint in an action that, when run, restores the
   --   saved constraint
   saveConstraint ∷ m (m ())
@@ -198,7 +198,7 @@ instance Tv tv ⇒ Show (CTState tv r) where
 -- | Run the constraint solver, starting with an empty (true)
 --   constraint.  Seeds the atom graph with the type constructors that
 --   are involved in the subtyping order.
-runConstraintT ∷ MonadU tv r m ⇒ ConstraintT tv r m a → m a
+runConstraintT ∷ MonadTV tv r m ⇒ ConstraintT tv r m a → m a
 runConstraintT m = evalStateT (unConstraintT_ m) cs0
   where cs0        = CTState {
                        csGraph   = gr0,
@@ -218,7 +218,7 @@ instance MonadRef r m ⇒ MonadRef r (ConstraintT tv r m) where
   unsafeIOToRef = lift <$> unsafeIOToRef
 
 -- | Pass through for unification operations
-instance MonadU tv r m ⇒ MonadU tv r (ConstraintT tv r m) where
+instance MonadTV tv r m ⇒ MonadTV tv r (ConstraintT tv r m) where
   newTVKind     = lift <$> newTVKind
   writeTV_      = lift <$$> writeTV_
   readTV_       = lift <$> readTV_
@@ -226,8 +226,8 @@ instance MonadU tv r m ⇒ MonadU tv r (ConstraintT tv r m) where
   setTVRank_    = lift <$$> setTVRank_
   hasChanged    = lift hasChanged
   putChanged    = lift <$> putChanged
-  unsafePerformU= error "No MonadU.unsafePerformU for ConstraintT"
-  unsafeIOToU   = lift <$> unsafeIOToU
+  unsafePerformTV = error "No MonadTV.unsafePerformU for ConstraintT"
+  unsafeIOToTV  = lift <$> unsafeIOToTV
 
 -- | 'ConstraintT' implements 'Graph'/'NodeMap' transformer operations
 --   for accessing its graph and node map.
@@ -242,7 +242,7 @@ instance (Ord tv, Monad m) ⇒
   putGraph g    = ConstraintT . modify $ \cs → cs { csGraph = g }
 
 -- | Constraint solver implementation.
-instance MonadU tv r m ⇒ MonadC tv r (ConstraintT tv r m) where
+instance MonadTV tv r m ⇒ MonadC tv r (ConstraintT tv r m) where
   τ <: τ' = runSeenT (subtypeTypesK False 0 τ τ')
   τ =: τ' = runSeenT (subtypeTypesK True 0 τ τ')
   τ ⊏: τ' = ConstraintT . modify . csQualsUpdate $
@@ -260,7 +260,7 @@ type SeenT tv r m = StateT (Map.Map (REC_TYPE tv, REC_TYPE tv) Bool)
                            (ConstraintT tv r m)
 
 -- | Run a recursive subtyping computation.
-runSeenT ∷ MonadU tv r m ⇒ SeenT tv r m a → ConstraintT tv r m a
+runSeenT ∷ MonadTV tv r m ⇒ SeenT tv r m a → ConstraintT tv r m a
 runSeenT m = do
   gtrace "runSeenT {"
   result ← evalStateT m Map.empty
@@ -271,15 +271,15 @@ runSeenT m = do
 --   the value of the first parameter (@True@ means equality).
 --   This eagerly solves as much as possible, adding to the constraint
 --   only as necessary.
-subtypeTypesK ∷ MonadU tv r m ⇒
+subtypeTypesK ∷ MonadTV tv r m ⇒
                 Bool → Int → Type tv → Type tv → SeenT tv r m ()
 subtypeTypesK unify k0 τ10 τ20 = do
   lift $ gtrace ("subtypeTypesK", unify, k0, τ10, τ20)
   check k0 τ10 τ20
   where
   check k τ1 τ2 = do
-    τ1'  ← derefAll τ1
-    τ2'  ← derefAll τ2
+    τ1'  ← substDeep τ1
+    τ2'  ← substDeep τ2
     seen ← get
     if Map.lookup (REC_TYPE τ1', REC_TYPE τ2') seen >= Just unify
       then return ()
@@ -349,7 +349,7 @@ subtypeTypesK unify k0 τ10 τ20 = do
     NM.insMapEdgeM (a1, a2, ())
 
 -- | Relate two types at the given variance.
-relateTypesK ∷ MonadU tv r m ⇒
+relateTypesK ∷ MonadTV tv r m ⇒
                Variance → Int → Type tv → Type tv → SeenT tv r m ()
 relateTypesK var = case var of
   Invariant     → subtypeTypesK True
@@ -362,15 +362,14 @@ relateTypesK var = case var of
 
 -- | Copy a type while replacing all the type variables with fresh ones
 --   of the same kind.
-copyType ∷ MonadU tv r m ⇒ Type tv → m (Type tv)
+copyType ∷ MonadTV tv r m ⇒ Type tv → m (Type tv)
 copyType =
-  let ?deref = readTV
-   in foldTypeM (mkQuaF (return <$$$> QuaTy))
-                (mkBvF (return <$$$> bvTy))
-                (fvTy <$$> newTVKind . tvKind)
-                fcon
-                (return <$$$> RowTy)
-                (mkRecF (return <$$> RecTy))
+   foldTypeM (mkQuaF (return <$$$> QuaTy))
+             (mkBvF (return <$$$> bvTy))
+             (fvTy <$$> newTVKind . tvKind)
+             fcon
+             (return <$$$> RowTy)
+             (mkRecF (return <$$> RecTy))
   where
     -- Nullary type constructors that are involved in the atomic subtype
     -- relation are converted to type variables:
@@ -389,10 +388,10 @@ copyType =
 --   no bound variables pointing further than @k@.
 --   ASSUMPTIONS: @α@ has not been substituted and the occurs check has
 --   already passed.
-unifyVarK ∷ MonadU tv r m ⇒ Int → tv → Type tv → SeenT tv r m ()
+unifyVarK ∷ MonadTV tv r m ⇒ Int → tv → Type tv → SeenT tv r m ()
 unifyVarK k α τ0 = do
   lift $ gtrace ("unifyVarK", k, α, τ0)
-  τ ← derefAll τ0
+  τ ← substDeep τ0
   unless (lcTy k τ) $
     fail "cannot unify because insufficiently polymorphic"
   writeTV α τ
@@ -423,10 +422,9 @@ unifyVarK k α τ0 = do
 --   size-equivalent to @α@ appear guarded by a type constructor that
 --   permits recursion, in which case we roll up @τ@ as a recursive type
 --   and return that.
-occursCheck ∷ MonadU tv r m ⇒ tv → Type tv → ConstraintT tv r m (Type tv)
+occursCheck ∷ MonadTV tv r m ⇒ tv → Type tv → ConstraintT tv r m (Type tv)
 occursCheck α τ = do
   gtrace ("occursCheck", α, τ)
-  let ?deref = readTV
   (guarded, unguarded) ← (Map.keys***Map.keys) . Map.partition id <$> ftvG τ
   whenM (anyM (checkEquivTVs α) unguarded) $
     fail "Occurs check failed"
@@ -435,14 +433,14 @@ occursCheck α τ = do
   return (foldr closeRec τ recVars)
 
 -- | Records that two type variables have the same size.
-makeEquivTVs  ∷ MonadU tv r m ⇒ tv → tv → ConstraintT tv r m ()
+makeEquivTVs  ∷ MonadTV tv r m ⇒ tv → tv → ConstraintT tv r m ()
 makeEquivTVs α β = do
   pα ← getTVProxy α
   pβ ← getTVProxy β
   UF.coalesce_ (return <$$> Set.union) pα pβ
 
 -- | Checks whether two type variables have the same size.
-checkEquivTVs ∷ MonadU tv r m ⇒ tv → tv → ConstraintT tv r m Bool
+checkEquivTVs ∷ MonadTV tv r m ⇒ tv → tv → ConstraintT tv r m Bool
 checkEquivTVs α β = do
   pα ← getTVProxy α
   pβ ← getTVProxy β
@@ -450,7 +448,7 @@ checkEquivTVs α β = do
 
 -- | Clears all size-equivalence classes and rebuilds them based on the
 --   current atomic subtyping constraint graph.
-resetEquivTVs ∷ MonadU tv r m ⇒ ConstraintT tv r m ()
+resetEquivTVs ∷ MonadTV tv r m ⇒ ConstraintT tv r m ()
 resetEquivTVs = do
   ConstraintT (modify (csEquivsUpdate (const Map.empty)))
   g     ← NM.getGraph
@@ -459,7 +457,7 @@ resetEquivTVs = do
 
 -- | Helper to get the proxy the represents the size-equivalence class
 --   of a type variable.
-getTVProxy ∷ MonadU tv r m ⇒ tv → ConstraintT tv r m (TVProxy tv r)
+getTVProxy ∷ MonadTV tv r m ⇒ tv → ConstraintT tv r m (TVProxy tv r)
 getTVProxy α = do
   equivs ← ConstraintT (gets csEquivs)
   case Map.lookup α equivs of
@@ -473,10 +471,9 @@ getTVProxy α = do
 
 -- | Solve a constraint as much as possible, returning the type
 --   variables to generalize and their qualifier bounds.
-solveConstraint ∷ MonadU tv r m ⇒
+solveConstraint ∷ MonadTV tv r m ⇒
                   Bool → Rank → Type tv → ConstraintT tv r m ([tv], [QLit])
 solveConstraint value γrank τ = do
-  let ?deref = readTV
   τftv ← ftvV τ;
   gtrace ("gen (begin)", value, γrank, τftv, τ)
   τftv ← coalesceSCCs τftv
@@ -665,7 +662,6 @@ solveConstraint value γrank τ = do
           fail $ "Could not unify: " ++ show lab1 ++ " = " ++ show lab2
       where
         (n1', α) `gets` (n2', lab') = do
-          let ?deref = readTV
           ftv2 ← ftvSet lab'
           if α `Set.member` ftv2
             then return ((n2', lab'), τftv)
@@ -729,13 +725,13 @@ solveConstraint value γrank τ = do
 
 -- | Tracing facility for constraint solving; shows the supplied
 --   argument and the state of the constraint solver.
-gtrace ∷ (MonadU tv r m, Show a) ⇒ a → ConstraintT tv r m ()
+gtrace ∷ (MonadTV tv r m, Show a) ⇒ a → ConstraintT tv r m ()
 gtrace =
   if debug
     then \info → do
       trace info
       cs ← ConstraintT get
-      unsafeIOToU (print (indent cs))
+      unsafeIOToTV (print (indent cs))
     else \_ → return ()
   where
     indent = Ppr.nest 4 . Ppr.fsep . map Ppr.text . words . show
@@ -1040,7 +1036,7 @@ data QCState tv
 --   bounds.  Also return any remaining inequalities (which must be
 --   satisfiable, but we haven't guessed how to satisfy them yet).
 solveQualifiers
-  ∷ MonadU tv r m ⇒
+  ∷ MonadTV tv r m ⇒
     -- | Are we generalizing the type of a non-expansive term?
     Bool →
     -- | Generalization candidates
@@ -1051,7 +1047,6 @@ solveQualifiers
     Type tv →
     m ([(Type tv, Type tv)], [(tv, QLit)], Type tv)
 solveQualifiers value αs qc τ = do
-  let ?deref = readTV
   trace ("solveQ (init)", αs, qc)
   -- Clean up the constraint, standardize types to qualifier form, and
   -- deal with trivial stuff right away:
@@ -1132,12 +1127,11 @@ solveQualifiers value αs qc τ = do
   --
   -- Standardize the qualifiers in the type
   stdizeType state = do
-    τ    ← derefAll τ
+    τ    ← substDeep τ
     let meet = bigMeet . map qeQLit . filter (Set.null . qeQSet) . unQEMeet
         qm   = Map.map meet (sq_vmap state)
         τ'   = standardizeQuals qm τ
     trace ("stdizeType", τ, τ', qm)
-    let ?deref = readTV
     τftv ← ftvV τ'
     return state {
              sq_τ    = τ',
@@ -1312,7 +1306,6 @@ solveQualifiers value αs qc τ = do
     clean (q, βs) = toQualifierType (q, βs Set.\\ sq_αs state)
   --
   makeQE q = do
-    let ?deref = readTV
     QExp ql γs ← qualifier (toQualifierType q)
     return (QE ql (Set.fromList (fromVar <$> γs)))
   --

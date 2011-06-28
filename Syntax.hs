@@ -4,7 +4,7 @@
       EmptyDataDecls,
       FlexibleInstances,
       FunctionalDependencies,
-      ImplicitParams,
+      GeneralizedNewtypeDeriving,
       MultiParamTypeClasses,
       ParallelListComp,
       PatternGuards,
@@ -19,9 +19,6 @@
   #-}
 module Syntax where
 
-import Control.Arrow
-import Control.Applicative
-import Control.Monad
 import Control.Monad.Identity
 import Control.Monad.Reader     as CMR
 import Control.Monad.Writer     as CMW
@@ -44,6 +41,7 @@ import Parsable
 import Ppr
 import MonadRef
 import qualified Stream
+import qualified NodeMap
 
 ---
 --- Some algebra / order theory
@@ -462,12 +460,51 @@ data Annot = Annot [Name] (Type Name)
 annot0 :: Annot
 annot0  = Annot ["_"] (fvTy "_")
 
--- | The type of a dereferencing function for free type variable
---   representation @v@, in some monad @m@.
-type Deref m v = v → m (Either v (Type v))
+---
+--- GENERIC DEREFERENCING
+---
+
+type ReadTV v m = v → m (Either v (Type v))
+
+-- | Class for a dereferencing operation for free type variable
+--   representation @v@ in some monad @m@.
+class Monad m ⇒ MonadReadTV v m where readTV ∷ ReadTV v m
+
+-- | A monad transformer that allows specifying the dereference
+--   operation.
+newtype ReadTV_T v m a
+  = ReadTV_T {
+      unReadTV_T ∷ ReaderT (ReadTV v m) m a
+    }
+  deriving (Functor, Applicative, Monad)
+
+-- | Run the 'ReadTV_T' monad transformer with a given dereference
+--   operation
+runReadTV_T ∷ ReadTV_T v m a → ReadTV v m → m a
+runReadTV_T = runReaderT . unReadTV_T
+
+instance MonadTrans (ReadTV_T v) where lift = ReadTV_T . lift
+
+instance Monad m ⇒ MonadReadTV v (ReadTV_T v m) where
+  readTV v = do
+    derefer ← ReadTV_T ask
+    lift (derefer v)
+
+-- | The type of a pure 'MonadReadTV' computation where the dereferencing
+--   operation always returns the type variable without attempting to
+--   actually dereference.
+type PureDeref v = ReadTV_T v Identity
+
+-- | Run a dereferencing computation purely.
+runPureDeref   ∷ PureDeref v a → a
+runPureDeref m = runIdentity (runReadTV_T m (return . Left))
+
+---
+--- TYPE FOLDS
+---
 
 -- | Fold a type, while dereferencing type variables
-foldType ∷ ∀ m v r s. (Monad m, ?deref ∷ Deref m v) ⇒
+foldType ∷ ∀ m v r s. MonadReadTV v m ⇒
            -- | For quantifiers
            (∀a. Quant → [(Perhaps Name, QLit)] → ([s] → (r → r) → a) → a) →
            -- | For bound variables
@@ -484,7 +521,7 @@ foldType ∷ ∀ m v r s. (Monad m, ?deref ∷ Deref m v) ⇒
            Type v →
            m r
 foldType fquant fbvar ffvar fcon frow frec t0 =
-  let ?deref = lift . ?deref in CMR.runReaderT (loop t0) []
+  CMR.runReaderT (loop t0) []
   where
   loop (QuaTy q αs t)           =
     fquant q αs $ \ss f → f `liftM` CMR.local (ss:) (loop t)
@@ -492,14 +529,14 @@ foldType fquant fbvar ffvar fcon frow frec t0 =
     env ← CMR.ask
     return (fbvar (i, j) n (look i j env))
   loop (VarTy (FreeVar v))      = do
-    mt ← ?deref v
+    mt ← lift (readTV v)
     case mt of
       Left v' → return (ffvar v')
       Right t → loop t
   loop (ConTy n ts)             =
     fcon n `liftM` sequence
       [ if isQVariance v
-          then loop . unQExp =<< qualifier t
+          then loop . unQExp =<< lift (qualifier t)
           else loop t
       | t ← ts
       | v ← getVariances n (length ts) ]
@@ -527,8 +564,7 @@ mkRecF ∷ (Perhaps Name → r → s) →
 mkRecF f pn k = k (0, 0) (f pn)
 
 -- | Get the qualifier of a type
-qualifier ∷ (Monad m, ?deref ∷ Deref m v) ⇒
-            Type v → m (QExp v)
+qualifier ∷ MonadReadTV v m ⇒ Type v → m (QExp v)
 qualifier = foldType fquant fbvar ffvar fcon frow frec
   where
   fquant _ αs k          = k (map snd αs) bumpQExp
@@ -541,12 +577,12 @@ qualifier = foldType fquant fbvar ffvar fcon frow frec
   bumpQExp (QExp q vs)   = QExp q (bumpVar (-1) <$> vs)
 
 -- | Get something in the *form* of a qualifier without dereferencing
-pureQualifier ∷ Type v → QExp v
-pureQualifier t = runIdentity (qualifier t) where ?deref = return . Left
+pureQualifier ∷ ∀ v. Type v → QExp v
+pureQualifier t = runPureDeref (qualifier t ∷ PureDeref v (QExp v))
 
 -- | Monadic version of type folding
 foldTypeM
-  ∷ ∀m v r s. (Monad m, ?deref ∷ Deref m v) ⇒
+  ∷ ∀m v r s. MonadReadTV v m ⇒
     (∀a. Quant → [(Perhaps Name, QLit)] → ([s] → (r → m r) → a) → a) →
     ((Int, Int) → Perhaps Name → Maybe s → m r) →
     (v → m r) →
@@ -597,21 +633,21 @@ typeMapM f = foldTypeM (\q αs k → k (map (0,) [0..length αs - 1])
 
 
 -- | Is the given type ground (type-variable and quantifier free)?
-isGroundType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isGroundType ∷ MonadReadTV v m ⇒ Type v → m Bool
 isGroundType = foldType (\_ _ k → k (repeat False) (const False))
                         (\_ _ → maybe False id)
                         (\_ → False) (\_ → and) (\_ → (&&))
                         (\_ k → k True id)
 
 -- | Is the given type closed? (ASSUMPTION: The type is locally closed)
-isClosedType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isClosedType ∷ MonadReadTV v m ⇒ Type v → m Bool
 isClosedType = foldType (\_ _ k → k (repeat True) id)
                         (\_ _ → maybe False id)
                         (\_ → False) (\_ → and) (\_ → (&&))
                         (\_ k → k True id)
 
 -- | Is the given type quantifier free?
-isMonoType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isMonoType ∷ MonadReadTV v m ⇒ Type v → m Bool
 isMonoType = foldType (mkQuaF (\_ _ _ → False))
                       (mkBvF (\_ _ _ → True))
                       (\_ → True) (\_ → and) (\_ → (&&))
@@ -619,10 +655,10 @@ isMonoType = foldType (mkQuaF (\_ _ _ → False))
 
 -- | Is the given type (universal) prenex?
 --   (Precondition: the argument is standard)
-isPrenexType ∷ (Monad m, ?deref ∷ Deref m v) ⇒ Type v → m Bool
+isPrenexType ∷ MonadReadTV v m ⇒ Type v → m Bool
 isPrenexType (QuaTy AllQu _ τ)   = isMonoType τ
 isPrenexType (VarTy (FreeVar r)) =
-  either (\_ → return True) isPrenexType =<< ?deref r
+  either (\_ → return True) isPrenexType =<< readTV r
 isPrenexType τ                   = isMonoType τ
 
 ---
@@ -1222,19 +1258,19 @@ class Ord v ⇒ Ftv a v | a → v where
   --
   --   This is the only method that doesn't have a default
   --   implementation, so it must be defined explicitly.
-  ftvTree  ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (FtvTree v)
+  ftvTree  ∷ MonadReadTV v m ⇒ a → m (FtvTree v)
   -- | To fold over the free type variables in a piece of syntax.
-  ftvFold  ∷ (Monad m, ?deref ∷ Deref m v) ⇒
+  ftvFold  ∷ MonadReadTV v m ⇒
              (v → Variance → r → r) → (r → r) → r → a → m r
   -- | To get a map from free type variables to their variances.
-  ftvV     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (VarMap v)
+  ftvV     ∷ MonadReadTV v m ⇒ a → m (VarMap v)
   -- | To get a map from free type variables to their guardedness
-  ftvG     ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Map.Map v Bool)
+  ftvG     ∷ MonadReadTV v m ⇒ a → m (Map.Map v Bool)
   -- | To get a map from free type variables to a list of all their
   --   occurrences' variances.
-  ftvSet   ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m (Set.Set v)
+  ftvSet   ∷ MonadReadTV v m ⇒ a → m (Set.Set v)
   -- | To get a list of the free type variables in a type (with no repeats).
-  ftvList  ∷ (Monad m, ?deref ∷ Deref m v) ⇒ a → m [v]
+  ftvList  ∷ MonadReadTV v m ⇒ a → m [v]
   -- | To get the set of (apparent) free variables without trying to
   --   dereference anything
   ftvPure  ∷ a → VarMap v
@@ -1246,7 +1282,7 @@ class Ord v ⇒ Ftv a v | a → v where
   ftvG           = ftvFold (\v _ → Map.insert v False) (True <$) Map.empty
   ftvSet         = ftvFold (const . Set.insert) id Set.empty
   ftvList        = liftM Set.toAscList . ftvSet
-  ftvPure        = runIdentity . ftvV where ?deref = return . Left
+  ftvPure a      = runPureDeref (ftvV a ∷ PureDeref v (VarMap v))
 
 instance Ord v ⇒ Ftv (Type v) v where
   ftvTree = foldType
