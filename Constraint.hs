@@ -287,22 +287,25 @@ subtypeTypes unify τ10 τ20 = do
     (VarTy v1, VarTy v2)
       | v1 == v2 → return ()
     (VarTy (FreeVar r1), VarTy (FreeVar r2))
-      | unify     →
-      unifyVar r1 (fvTy r2)
-      | otherwise → do
-      lift (makeEquivTVs r1 r2)
-      addEdge (VarAt r1) (VarAt r2)
+      | tvFlavorIs Universal r1, tvFlavorIs Universal r2 →
+      if unify
+        then unifyVar r1 (fvTy r2)
+        else do
+          lift (makeEquivTVs r1 r2)
+          addEdge (VarAt r1) (VarAt r2)
     (VarTy (FreeVar r1), ConTy c2 [])
-      | not unify, tyConHasRelated c2 →
+      | not unify, tvFlavorIs Universal r1, tyConHasRelated c2 →
       addEdge (VarAt r1) (ConAt c2)
     (ConTy c1 [], VarTy (FreeVar r2))
-      | not unify, tyConHasRelated c1 →
+      | not unify, tvFlavorIs Universal r2, tyConHasRelated c1 →
       addEdge (ConAt c1) (VarAt r2)
-    (VarTy (FreeVar r1), _) → do
+    (VarTy (FreeVar r1), _)
+      | tvFlavorIs Universal r1 → do
       τ2' ← lift $ occursCheck r1 τ2 >>= if unify then return else copyType
       unifyVar r1 τ2'
       unless unify (check τ2' τ2)
-    (_, VarTy (FreeVar r2)) → do
+    (_, VarTy (FreeVar r2))
+      | tvFlavorIs Universal r2 → do
       τ1' ← lift $ occursCheck r2 τ1 >>= if unify then return else copyType
       unifyVar r2 τ1'
       unless unify (check τ1 τ1')
@@ -362,11 +365,13 @@ copyType ∷ MonadTV tv r m ⇒ Type tv → m (Type tv)
 copyType =
    foldTypeM (mkQuaF (return <$$$> QuaTy))
              (mkBvF (return <$$$> bvTy))
-             (newTVTy' . tvKind)
+             fvar
              fcon
              (return <$$$> RowTy)
              (mkRecF (return <$$> RecTy))
   where
+    fvar α | tvFlavorIs Universal α = newTVTy' (tvKind α)
+           | otherwise              = return (fvTy α)
     -- Nullary type constructors that are involved in the atomic subtype
     -- relation are converted to type variables:
     fcon c [] | tyConHasRelated c = newTVTy
@@ -1151,7 +1156,8 @@ solveQualifiers value αs qc τ = do
   substNeg doLossy state =
     subst who state $ Map.fromDistinctAscList $ do
       δ ← Set.toAscList (sq_αs state)
-      guard (Map.findWithDefault 0 δ (sq_τftv state) ⊑ QContravariant)
+      guard (tvKindIs QualKd δ
+             && Map.findWithDefault 0 δ (sq_τftv state) ⊑ QContravariant)
       case Map.lookup δ (sq_vmap state) of
         Nothing            → return (δ, maxBound)
         Just (QEMeet [])   → return (δ, maxBound)

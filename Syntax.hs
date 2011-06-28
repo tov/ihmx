@@ -641,7 +641,7 @@ isMonoType ∷ MonadReadTV v m ⇒ Type v → m Bool
 isMonoType = foldType (mkQuaF (\_ _ _ → False))
                       (mkBvF (\_ _ _ → True))
                       (\_ → True) (\_ → and) (\_ → (&&))
-                      (mkRecF (\_ _ → False))
+                      (mkRecF (\_ _ → True))
 
 -- | Is the given type (universal) prenex?
 --   (Precondition: the argument is standard)
@@ -788,6 +788,13 @@ pattHasWild (ConPa _ πs) = any pattHasWild πs
 pattHasWild (InjPa _ π)  = pattHasWild π
 pattHasWild (AnnPa π _)  = pattHasWild π
 
+pattHasAnnot ∷ Patt a → Bool
+pattHasAnnot (VarPa _)    = False
+pattHasAnnot WldPa        = False
+pattHasAnnot (ConPa _ πs) = any pattHasAnnot πs
+pattHasAnnot (InjPa _ π)  = pattHasAnnot π
+pattHasAnnot (AnnPa π _)  = True
+
 pattBv ∷ Patt a → [Name]
 pattBv (VarPa n)    = [n]
 pattBv WldPa        = []
@@ -857,7 +864,9 @@ termFv e0 = case e0 of
 
 γ0' ∷ [(Name, String)]
 γ0' = [ ("id",          "∀ α. α → α")
+      , ("ids",         "List (∀ α. α → α)")
       , ("choose",      "∀ α : A. α → α -α> α")
+      , ("discard",     "∀ α : A. α → α")
       , ("apply",       "∀ α β γ. (α -γ> β) → α -γ> β")
       , ("revapp",      "∀ α β γ. α → (α -γ> β) -α γ> β")
       -- Lists

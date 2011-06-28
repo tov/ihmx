@@ -128,10 +128,7 @@ class (Functor m, Applicative m, Monad m,
   setTVRank_  ∷ Rank → tv → m ()
   -- | Find out the rank of a type variable.
   getTVRank   ∷ tv → m Rank
-  getTVRank tv =
-    getTVRank_ tv >>=
-    maybe (fail "BUG! (getTVRank) substituted tyvar has no rank")
-          return
+  getTVRank   = fromMaybe Rank.infinity <$$> getTVRank_
   -- | Lower the rank of a type variable
   lowerTVRank ∷ Rank → tv → m ()
   lowerTVRank r tv = do
@@ -246,14 +243,14 @@ data TV r
 
 data TVRep r
   = UniFl !(r (Either Rank (Type (TV r))))
-  | ExiFl
+  | ExiFl !(r Rank)
   | SkoFl
 
 instance Tv (TV r) where
   tvUniqueID = tvId
   tvKind     = tvKind_
   tvFlavor TV { tvRep = UniFl _ } = Universal
-  tvFlavor TV { tvRep = ExiFl }   = Existential
+  tvFlavor TV { tvRep = ExiFl _ } = Existential
   tvFlavor TV { tvRep = SkoFl }   = Skolem
 
 instance Eq (TV s) where
@@ -319,22 +316,24 @@ instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
     trace ("new", flavor, kind, i)
     TV i kind <$> case flavor of
       Universal   → lift $ UniFl <$> newRef (Left Rank.infinity)
-      Existential → return ExiFl
+      Existential → lift $ ExiFl <$> newRef Rank.infinity
       Skolem      → return SkoFl
   --
   writeTV_ TV { tvRep = UniFl r } t = lift (writeRef r (Right t))
-  writeTV_ TV { tvRep = SkoFl }   _ = fail "BUG! writeTV_ got ex."
-  writeTV_ TV { tvRep = ExiFl }   _ = fail "BUG! writeTV_ got skolem"
+  writeTV_ TV { tvRep = ExiFl _ } _ = fail "BUG! writeTV_ got ex."
+  writeTV_ TV { tvRep = SkoFl }   _ = fail "BUG! writeTV_ got skolem"
   readTV_ TV { tvRep = UniFl r } = (const Nothing ||| Just) <$> UT (readRef r)
   readTV_ TV { tvRep = _ }       = return Nothing
   --
   getTVRank_ TV { tvRep = UniFl r }
     = (Just ||| const Nothing ) <$> UT (readRef r)
-  getTVRank_ TV { tvRep = _ }
+  getTVRank_ TV { tvRep = ExiFl r }
+    = Just <$> UT (readRef r)
+  getTVRank_ TV { tvRep = SkoFl }
     = return Nothing
   setTVRank_ rank TV { tvRep = UniFl r } = UT (writeRef r (Left rank))
-  setTVRank_ _    TV { tvRep = ExiFl }   = fail "BUG! setTVRank_ got ex."
-  setTVRank_ _    TV { tvRep = SkoFl }   = fail "BUG! setTVRank_ got skolem"
+  setTVRank_ rank TV { tvRep = ExiFl r } = UT (writeRef r rank)
+  setTVRank_ _    TV { tvRep = SkoFl }   = return ()
   --
   hasChanged   = UT $ gets utsChanged
   putChanged b = UT $ modify $ \uts → uts { utsChanged = b }
@@ -424,9 +423,10 @@ instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
 unsafeReadTV ∷ TV s → Maybe (Type (TV s))
 unsafeReadTV TV { tvRep = UniFl r } = (const Nothing ||| Just) (unsafeReadRef r)
 unsafeReadTV TV { tvRep = SkoFl }   = Nothing
-unsafeReadTV TV { tvRep = ExiFl }   = Nothing
+unsafeReadTV TV { tvRep = ExiFl _ } = Nothing
 
 debug ∷ Bool
+-- debug = True
 debug = False
 
 warn ∷ MonadTV tv r m ⇒ String → m ()
