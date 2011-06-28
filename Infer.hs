@@ -1,6 +1,7 @@
 {-#
   LANGUAGE
     ImplicitParams,
+    NoImplicitPrelude,
     ParallelListComp,
     ScopedTypeVariables,
     UnicodeSyntax
@@ -66,7 +67,6 @@ module Infer (
 import qualified Data.Map   as Map
 import qualified Data.Set   as Set
 import qualified Test.HUnit as T
-import Control.Monad.RWS    as RWS
 -- import Control.Monad.State  as CMS
 
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
@@ -88,11 +88,7 @@ import qualified Rank
 inferTm ∷ (MonadTV tv r m, Show tv, Tv tv) ⇒
           Γ tv → Term Empty → m (Type tv, String)
 inferTm γ e = do
-  δ0 ← Map.fromDistinctAscList <$> sequence
-    [ do
-        α ← newTVKind (varianceToKind var)
-        return (name, fvTy α)
-    | (name, var) ← Map.toAscList (ftvPure e) ]
+  δ0 ← mapM (fvTy <$$> newTVKind . varianceToKind) (ftvPure e)
   runConstraintT $ do
     τ ← infer δ0 γ e
     σ ← generalize (syntacticValue e) (rankΓ γ) τ

@@ -1,5 +1,6 @@
 {-#
   LANGUAGE
+    NoImplicitPrelude,
     UnicodeSyntax
   #-}
 module Graph (

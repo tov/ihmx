@@ -7,6 +7,7 @@
     ImplicitParams,
     KindSignatures,
     MultiParamTypeClasses,
+    NoImplicitPrelude,
     ParallelListComp,
     ScopedTypeVariables,
     TupleSections,
@@ -19,13 +20,6 @@ module Constraint (
   MonadC(..), runConstraintT,
 ) where
 
-import Prelude
-
-import Control.Monad.Reader
-import Control.Monad.Writer
-import Control.Monad.State
-import Control.Monad.RWS
-import Control.Monad.List
 import qualified Data.List  as List
 import qualified Data.Map   as Map
 import qualified Data.Set   as Set
@@ -426,7 +420,7 @@ occursCheck ∷ MonadTV tv r m ⇒ tv → Type tv → ConstraintT tv r m (Type t
 occursCheck α τ = do
   gtrace ("occursCheck", α, τ)
   (guarded, unguarded) ← (Map.keys***Map.keys) . Map.partition id <$> ftvG τ
-  whenM (anyM (checkEquivTVs α) unguarded) $
+  whenM (anyA (checkEquivTVs α) unguarded) $
     fail "Occurs check failed"
   recVars ← filterM (checkEquivTVs α) guarded
   when (not (null recVars)) $ gtrace ("occursCheck (recvars)", recVars)
@@ -1129,7 +1123,7 @@ solveQualifiers value αs qc τ = do
   stdizeType state = do
     τ    ← substDeep τ
     let meet = bigMeet . map qeQLit . filter (Set.null . qeQSet) . unQEMeet
-        qm   = Map.map meet (sq_vmap state)
+        qm   = meet <$> sq_vmap state
         τ'   = standardizeQuals qm τ
     trace ("stdizeType", τ, τ', qm)
     τftv ← ftvV τ'
@@ -1141,11 +1135,12 @@ solveQualifiers value αs qc τ = do
   -- Substitute U for qualifier variables upper bounded by U (FORCE-U).
   forceU state =
     subst "forceU" state $
-      Map.fromDistinctAscList
-      [ (β, minBound)
-      | (β, QEMeet [QE U γs]) ← Map.toAscList (sq_vmap state)
-      , tvKindIs QualKd β
-      , Set.null γs ]
+      const minBound <$>
+        Map.filterWithKey
+          (\β qem → case qem of
+            QEMeet [QE U γs] → tvKindIs QualKd β && Set.null γs
+            _                → False)
+          (sq_vmap state)
   --
   -- Replace Q- or 0 variables by a single upper bound, if they have only
   -- one (SUBST-NEG), or by L if they have none (SUBST-NEG-TOP).  If

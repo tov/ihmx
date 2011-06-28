@@ -6,6 +6,7 @@
       FunctionalDependencies,
       GeneralizedNewtypeDeriving,
       MultiParamTypeClasses,
+      NoImplicitPrelude,
       ParallelListComp,
       PatternGuards,
       RankNTypes,
@@ -19,11 +20,6 @@
   #-}
 module Syntax where
 
-import Control.Monad.Identity
-import Control.Monad.Reader     as CMR
-import Control.Monad.Writer     as CMW
-import Control.Monad.State      as CMS hiding (withState)
-import Control.Monad.RWS        as RWS
 import Control.Monad.ST (runST)
 import qualified Data.Char      as Char
 import qualified Data.List      as List
@@ -515,12 +511,12 @@ foldType ∷ ∀ m v r s. MonadReadTV v m ⇒
            Type v →
            m r
 foldType fquant fbvar ffvar fcon frow frec t0 =
-  CMR.runReaderT (loop t0) []
+  runReaderT (loop t0) []
   where
   loop (QuaTy q αs t)           =
-    fquant q αs $ \ss f → f `liftM` CMR.local (ss:) (loop t)
+    fquant q αs $ \ss f → f `liftM` local (ss:) (loop t)
   loop (VarTy (BoundVar i j n)) = do
-    env ← CMR.ask
+    env ← ask
     return (fbvar (i, j) n (look i j env))
   loop (VarTy (FreeVar v))      = do
     mt ← lift (readTV v)
@@ -537,7 +533,7 @@ foldType fquant fbvar ffvar fcon frow frec t0 =
   loop (RowTy n t1 t2)          =
     frow n `liftM` loop t1 `ap` loop t2
   loop (RecTy n t)              =
-    frec n (\s f → f `liftM` CMR.local ([s]:) (loop t))
+    frec n (\s f → f `liftM` local ([s]:) (loop t))
   --
   look i j env
     | rib:_ ← drop i env
@@ -1386,7 +1382,7 @@ matchLabels
      ([(Name, Type v)], Type v), ([(Name, Type v)], Type v))
 matchLabels t10 t20 = (pairs, (extra1, ext1), (extra2, ext2))
   where
-    (pairs, extra1, extra2) = CMW.execWriter (loop row1 row2)
+    (pairs, extra1, extra2) = execWriter (loop row1 row2)
     (row1, ext1) = unfoldRow t10
     (row2, ext2) = unfoldRow t20
     loop []    rest2 = tell ([], [], rest2)
@@ -1395,7 +1391,6 @@ matchLabels t10 t20 = (pairs, (extra1, ext1), (extra2, ext2))
       | n1 < n2      = tell ([], [p1], [])      >> loop rest1 (p2:rest2)
       | n1 > n2      = tell ([], [], [p2])      >> loop (p1:rest1) rest2
       | otherwise    = tell ([(p1,p2)], [], []) >> loop rest1 rest2
-    tell = CMW.tell
 
 ---
 --- Parsing

@@ -8,6 +8,7 @@
     KindSignatures,
     ImplicitParams,
     MultiParamTypeClasses,
+    NoImplicitPrelude,
     RankNTypes,
     TypeFamilies,
     UndecidableInstances,
@@ -32,15 +33,7 @@ module TV (
   warn, trace, debug,
 ) where
 
-import Control.Applicative
-import Control.Monad
-
 import Control.Monad.ST
-import Control.Monad.Error  as CME
-import Control.Monad.State  as CMS
-import Control.Monad.Writer as CMW
-import Control.Monad.Reader as CMR
-import Control.Monad.RWS    as RWS
 import Data.STRef
 import Data.IORef
 import qualified Text.PrettyPrint as Ppr
@@ -335,7 +328,7 @@ runU m = runST (runErrorT (runUT m))
 --- Pass-through instances
 ---
 
-instance (MonadTV tv s m, Monoid w) ⇒ MonadTV tv s (CMW.WriterT w m) where
+instance (MonadTV tv s m, Monoid w) ⇒ MonadTV tv s (WriterT w m) where
   newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
@@ -343,10 +336,10 @@ instance (MonadTV tv s m, Monoid w) ⇒ MonadTV tv s (CMW.WriterT w m) where
   setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
-  unsafePerformTV = unsafePerformTV <$> liftM fst <$> CMW.runWriterT
+  unsafePerformTV = unsafePerformTV <$> liftM fst <$> runWriterT
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
-instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (CMS.StateT s m) where
+instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (StateT s m) where
   newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
@@ -354,10 +347,10 @@ instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (CMS.StateT s m) where
   setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
-  unsafePerformTV = unsafePerformTV <$> flip CMS.evalStateT getDefault
+  unsafePerformTV = unsafePerformTV <$> flip evalStateT getDefault
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
-instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (CMR.ReaderT r m) where
+instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (ReaderT r m) where
   newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
@@ -365,11 +358,11 @@ instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (CMR.ReaderT r m) wher
   setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
-  unsafePerformTV = unsafePerformTV <$> flip CMR.runReaderT getDefault
+  unsafePerformTV = unsafePerformTV <$> flip runReaderT getDefault
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
 instance (MonadTV tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
-         MonadTV tv p (RWS.RWST r w s m) where
+         MonadTV tv p (RWST r w s m) where
   newTVKind = lift <$> newTVKind
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
@@ -378,7 +371,7 @@ instance (MonadTV tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
   unsafePerformTV = unsafePerformTV <$> liftM fst <$>
-                   \m → RWS.evalRWST m getDefault getDefault
+                   \m → evalRWST m getDefault getDefault
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
 instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
