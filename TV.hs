@@ -267,7 +267,9 @@ instance Show (TV s) where
     (True, Just t) → showsPrec _p t
                      -- shows (tvId tv) . showChar '=' .
                      -- showsPrec 2 t
-    _              → showChar (flavorSigil (tvFlavor tv)) . shows (tvId tv)
+    _              → showChar (flavorSigil (tvFlavor tv))
+                   . (if tvKindIs QualKd tv then showChar '*' else id)
+                   . shows (tvId tv)
 
 instance Ftv (TV s) (TV s) where
   ftvTree = ftvTree . fvTy
@@ -300,10 +302,10 @@ instance Monad m ⇒ Applicative (UT s m) where
   (<*>) = ap
 
 instance MonadRef s m ⇒ MonadRef s (UT s m) where
-  newRef        = UT . newRef
-  readRef       = UT . readRef
-  writeRef      = UT <$$> writeRef
-  unsafeIOToRef = UT . unsafeIOToRef
+  newRef        = lift . newRef
+  readRef       = lift . readRef
+  writeRef      = lift <$$> writeRef
+  unsafeIOToRef = lift . unsafeIOToRef
 
 instance MonadTV tv r m ⇒ MonadReadTV tv m where
   readTV = liftM (uncurry (flip maybe Right . Left)) . rootTV
@@ -364,7 +366,7 @@ instance (MonadTV tv r m, Monoid w) ⇒ MonadTV tv r (WriterT w m) where
   setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
-  unsafePerformTV = unsafePerformTV <$> liftM fst <$> runWriterT
+  unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
 instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (StateT s m) where
@@ -375,7 +377,7 @@ instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (StateT s m) where
   setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
-  unsafePerformTV = unsafePerformTV <$> flip evalStateT getDefault
+  unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
 instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (ReaderT r m) where
@@ -386,7 +388,7 @@ instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (ReaderT r m) where
   setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
-  unsafePerformTV = unsafePerformTV <$> flip runReaderT getDefault
+  unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
 instance (MonadTV tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
@@ -398,8 +400,7 @@ instance (MonadTV tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
   setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
-  unsafePerformTV = unsafePerformTV <$> liftM fst <$>
-                   \m → evalRWST m getDefault getDefault
+  unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
 instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
@@ -411,8 +412,7 @@ instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
   setTVRank_ = lift <$$> setTVRank_
   hasChanged = lift hasChanged
   putChanged = lift <$> putChanged
-  unsafePerformTV =
-    unsafePerformTV <$> liftM fst <$> NM.runNodeMapT NM.new Gr.empty
+  unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
 ---

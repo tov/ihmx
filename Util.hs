@@ -48,15 +48,16 @@ import Control.Applicative
 import Control.Monad hiding ( forM, forM_, mapM_, mapM, msum,
                               sequence, sequence_ )
 
-import Control.Monad.Error    ( MonadError(..), ErrorT(..) )
+import Control.Monad.Error    ( MonadError(..), ErrorT(..), mapErrorT )
 import Control.Monad.Identity ( Identity(..) )
-import Control.Monad.List     ( ListT(..) )
-import Control.Monad.RWS      ( RWST(..), evalRWST )
-import Control.Monad.Reader   ( MonadReader(..), ReaderT(..) )
+import Control.Monad.List     ( ListT(..), mapListT )
+import Control.Monad.RWS      ( RWST(..), evalRWST, mapRWST )
+import Control.Monad.Reader   ( MonadReader(..), ReaderT(..), mapReaderT )
 import Control.Monad.State    ( MonadState(..), StateT(..), evalStateT,
-                                evalState, gets, modify )
+                                evalState, gets, modify, mapStateT )
 import Control.Monad.Trans    ( MonadTrans(..), MonadIO(..) )
-import Control.Monad.Writer   ( MonadWriter(..), WriterT(..), execWriter )
+import Control.Monad.Writer   ( MonadWriter(..), WriterT(..), execWriter,
+                                mapWriterT )
 
 import Data.Maybe
 import Data.Monoid

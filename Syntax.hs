@@ -54,6 +54,14 @@ instance (Bounded a, Lattice a) ⇒ BoundedLattice a where
   bigJoin = foldr (⊔) minBound
   bigMeet = foldr (⊓) maxBound
 
+instance Lattice a ⇒ Lattice (Maybe a) where
+  Just a  ⊔ Just b  = Just (a ⊔ b)
+  Nothing ⊔ b       = b
+  a       ⊔ Nothing = a
+  Just a  ⊓ Just b  = Just (a ⊓ b)
+  Nothing ⊓ _       = Nothing
+  _       ⊓ Nothing = Nothing
+
 newtype DUAL a = DUAL { dual ∷ a } deriving (Eq, Show)
 
 instance Lattice a ⇒ Lattice (DUAL a) where
@@ -793,7 +801,7 @@ pattHasAnnot (VarPa _)    = False
 pattHasAnnot WldPa        = False
 pattHasAnnot (ConPa _ πs) = any pattHasAnnot πs
 pattHasAnnot (InjPa _ π)  = pattHasAnnot π
-pattHasAnnot (AnnPa π _)  = True
+pattHasAnnot (AnnPa _ _)  = True
 
 pattBv ∷ Patt a → [Name]
 pattBv (VarPa n)    = [n]
@@ -864,11 +872,13 @@ termFv e0 = case e0 of
 
 γ0' ∷ [(Name, String)]
 γ0' = [ ("id",          "∀ α. α → α")
-      , ("ids",         "List (∀ α. α → α)")
       , ("choose",      "∀ α : A. α → α -α> α")
       , ("discard",     "∀ α : A. α → α")
       , ("apply",       "∀ α β γ. (α -γ> β) → α -γ> β")
       , ("revapp",      "∀ α β γ. α → (α -γ> β) -α γ> β")
+      -- FCP
+      , ("ids",         "List (∀ α. α → α)")
+      , ("poly",        "(∀ α. α -> α) → Int × Bool")
       -- Lists
       , ("single",      "∀ α. α → List α")
       , ("nil",         "∀ α. List α")
@@ -885,18 +895,18 @@ termFv e0 = case e0 of
       , ("rref",        "∀ α. α → Ref R α")
       , ("aref",        "∀ α:A. α → Ref A α")
       , ("lref",        "∀ α. α → Ref L α")
-      , ("swapRef",     "∀ α β. Pair (Ref β α) α → Pair (Ref β α) α")
-      , ("swapRef'",    "∀ α β γ. Pair (Ref (A β γ) α) β → \
-                        \         Pair (Ref (A β γ) β) α")
+      , ("swapRef",     "∀ α β. Ref β α × α → Ref β α × α")
+      , ("swapRef'",    "∀ α β γ. Ref (A β γ) α × β → \
+                        \         Ref (A β γ) β × α")
       , ("readRef",     "∀ α:R, β. Ref β α → α")
-      , ("readRef'"  ,  "∀ α:R, β. Ref β α → Pair (Ref β α) α")
+      , ("readRef'"  ,  "∀ α:R, β. Ref β α → Ref β α × α")
       , ("freeRef'",    "∀ α β. Ref (A β) α → α")
-      , ("writeRef",    "∀ α β:A. Pair (Ref β α) α → T")
-      , ("writeRef'",   "∀ α:A, β γ. Pair (Ref (A β γ) α) β → Ref (A β γ) β")
+      , ("writeRef",    "∀ α β:A. Ref β α × α → T")
+      , ("writeRef'",   "∀ α:A, β γ. Ref (A β γ) α × β → Ref (A β γ) β")
       -- Products
-      , ("pair",        "∀ α β. α → β -α> Pair α β")
-      , ("fst",         "∀ α : L, β : A. Pair α β → α")
-      , ("snd",         "∀ α : A, β : L. Pair α β → β")
+      , ("pair",        "∀ α β. α → β -α> α × β")
+      , ("fst",         "∀ α : L, β : A. α × β → α")
+      , ("snd",         "∀ α : A, β : L. α × β → β")
       -- Sums
       , ("inl",         "∀ α β. α → Either α β")
       , ("inr",         "∀ α β. β → Either α β")
@@ -906,6 +916,15 @@ termFv e0 = case e0 of
       , ("readFile",    "∀ α. File α → File α")
       , ("writeFile",   "File A → File A")
       , ("closeFile",   "File A → T")
+      -- Simple ST-like thing
+      , ("runST'",      "∀ β. (all s. ST s β) → β")
+      , ("returnST'",   "∀ α s. α → ST s Z")
+      -- ST Monad
+      , ("runST",       "∀ α β. (all s. α → ST s β) → β")
+      , ("bindST",      "∀ α β s. ST s α → (α → ST s β) → ST s β")
+      , ("returnST",    "∀ α s. α → ST s α")
+      , ("newSTRef",    "∀ α s. α → ST s (STRef s α)")
+      , ("readSTRef",   "∀ α:R, s. STRef s α → ST s α")
       -- Any
       , ("eat",         "∀ α β. α → β → β")
       , ("eatU",        "∀ α:U, β. α → β → β")

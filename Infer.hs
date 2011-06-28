@@ -84,7 +84,7 @@ inferTm γ e = do
   δ0 ← mapM (newTVTy' . varianceToKind) (ftvPure e)
   runConstraintT $ do
     τ ← infer [Universal, Existential] δ0 γ e Nothing
-    σ ← generalize (syntacticValue e) (rankΓ γ) τ
+    σ ← generalize False (rankΓ γ) τ
     c ← showConstraint
     return (σ, c)
 
@@ -92,9 +92,9 @@ inferTm γ e = do
 infer ∷ MonadC tv r m ⇒
         [Flavor] → Δ tv → Γ tv → Term Empty → Maybe (Type tv) → m (Type tv)
 infer φ0 δ γ e0 mσ = do
-  trace ("infer", φ0, δ, cleanΓ γ, e0, mσ)
+  trace ("infer {", φ0, δ, cleanΓ γ, e0, mσ)
   φ ← maybe return prenexFlavors mσ φ0
-  case e0 of
+  σ ← case e0 of
     AbsTm π e                     → do
       [mσ1, _, mσ2]    ← splitCon mσ "->" 3
       (δ', σ1, σs, αs) ← inferPatt δ π mσ1 (countOccsPatt π e)
@@ -153,6 +153,8 @@ infer φ0 δ γ e0 mσ = do
       σ'               ← infer [] δ' γ e (Just σ)
       σ' ≤ σ
       return σ
+  trace ("} infer", σ)
+  return σ
 
 -- | Determine which quantifiers may appear at the beginning of
 --   a type scheme, given a list of quantifiers that may be presumed
@@ -261,19 +263,20 @@ infixl 2 &+&!
 inferApp ∷ MonadC tv r m ⇒
            Δ tv → Γ tv → Type tv → [Term Empty] → m (Type tv)
 inferApp δ γ ρ e1n = do
+  trace ("inferApp", δ, cleanΓ γ, ρ, e1n)
   (σ1m, σ) ← funmatchN (length e1n) ρ
-  σ1m'     ← sequence
-                [ do
-                    -- last arg to infer (Just σi) is for
-                    -- formal-to-actual propagation
-                    return (σi, do
+  withPinnedTVs ρ $
+    subsumeN [ -- last arg to infer (Just σi) is for
+               -- formal-to-actual propagation
+               (σi, do
+                      trace ("subsumeI", i)
                       σi' ← infer [Existential] δ γ ei (Just σi)
                       if isAnnotated ei
                         then σi' <: σi
                         else σi' ≤  σi)
-                | σi ← σ1m
-                | ei ← e1n ]
-  subsumeN σ1m'
+             | i  ← [0..]
+             | σi ← σ1m
+             | ei ← e1n ]
   if length σ1m < length e1n
     then do
       ρ' ← instantiate σ
@@ -594,12 +597,12 @@ inferFnTests = T.test
       -: "Z → Z"
   , "let rec f = λ_. g G    \
     \    and g = λ_. f F in \
-    \  Pair f g"
-      -: "∀α β. Pair (F → α) (G → β)"
+    \  (f, g)"
+      -: "∀α β. (F → α) × (G → β)"
   , "let rec f = λ_. g G : B \
     \    and g = λ_. f F in  \
-    \  Pair f g"
-      -: "Pair (F → B) (G → B)"
+    \  (f, g)"
+      -: "(F → B) × (G → B)"
   -- Occurs check
   , te "let rec x = C x in x"
   , te "λf. f f"
@@ -744,8 +747,8 @@ inferFnTests = T.test
   --
   -- Generalization with non-empty Γ
   --
-  , "λ(f : B -α> B). let g = λh. h f in Pair f g"
-      -: "∀ α:R, β. (B -α> B) → Pair (B -α> B) (((B -α> B) -L> β) -α> β)"
+  , "λ(f : B -α> B). let g = λh. h f in (f, g)"
+      -: "∀ α:R, β. (B -α> B) → (B -α> B) × (((B -α> B) -L> β) -α> β)"
   , "λ(f : B -α> B). let g = λh. h f in g"
       -: "∀ α β. (B -α> B) → ((B -α> B) -L> β) -α> β"
   --
@@ -834,7 +837,8 @@ inferFnTests = T.test
       -: "Z"
   , te "(botU : (μγ. [ Cons: U × γ | Nil: U ]) → Z) \
        \(botU : μγ. [ Cons: A × γ | Nil: U ])"
-  {-
+  --- First class polymorphism
+  , te "λf. P (f A) (f B)"
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
                 -: "(∀ α. α → α) → P A B"
   , "(single : (∀ α. α → α) → List (∀ α. α → α)) id"
@@ -849,24 +853,56 @@ inferFnTests = T.test
   , te "λx. poly x"
   , te "poly (id id)"
   , "poly ((id : (∀ α. α → α) → β) id)"
-                -: "Pair Int Bool"
+                -: "Int × Bool"
   , "poly (id (id : ∀ α. α → α))"
-                -: "Pair Int Bool"
+                -: "Int × Bool"
   , "single (single (id : ∀ α. α → α))"
                 -: "List (List (∀ α. α → α))"
+  , "head ids"  -: "∀ α. α → α"
+  , "apply head ids"
+                -: "∀ α. α → α"
+  , "revapp ids head"
+                -: "∀ α. α → α"
+  , te "apply single id : List (∀ α. α → α)"
+  , te "λx. apply poly x"
+  , te "apply poly (id id)"
+  , "apply poly ((id : (∀ α. α → α) → β) id)"
+                -: "Int × Bool"
+  , "apply poly (id (id : ∀ α. α → α))"
+                -: "Int × Bool"
+  , "apply single (single (id : ∀ α. α → α))"
+                -: "List (List (∀ α. α → α))"
+  , te "revaapp id single : List (∀ α. α → α)"
+  , te "λx. apply x poly"
+  , te "revapp (id id) poly"
+  , "revapp ((id : (∀ α. α → α) → β) id) poly"
+                -: "Int × Bool"
+  , "revapp (id (id : ∀ α. α → α)) poly"
+                -: "Int × Bool"
+  , "revapp (single (id : ∀ α. α → α)) single"
+                -: "List (List (∀ α. α → α))"
   -- ST Monad
-  , "runST (λt. bindST (newSTRef A) readSTRef)"
-                -: "A"
-  , "apply runST (λt. bindST (newSTRef A) readSTRef)"
-                -: "A"
-  , "revapp (λt. bindST (newSTRef A) readSTRef) runST"
-                -: "A"
-  , "runST (λt. bindST (newSTRef A) (λr. returnST A))"
-                -: "A"
-  , te "runST (λt. bindST (newSTRef A) (λr. returnST r))"
+  , "runST (λ_. returnST X)"
+                -: "X"
+  , "apply runST (λ_. returnST X)"
+                -: "X"
+  , "revapp (λ_. returnST X) runST"
+                -: "X"
+  , "runST (λ_. bindST (newSTRef X) readSTRef)"
+                -: "X"
+  , "apply runST (λ_. bindST (newSTRef X) readSTRef)"
+                -: "X"
+  , "revapp (λ_. bindST (newSTRef X) readSTRef) runST"
+                -: "X"
+  , "runST (λ_. bindST (newSTRef X) (λr. returnST X))"
+                -: "X"
+  , te "runST (λ_. bindST (newSTRef X) (λr. returnST r))"
   -- Value restriction
-  , "let r = ref nil in writeRef r (cons A nil)"
+  , "let r = ref nil in writeRef (r, cons A nil)"
                 -: "T"
+  , "let r = ref (`Nil T) in writeRef (r, `Cons (A, `Nil T))"
+                -: "T"
+  {-
   , "let r = ref nil in let t = writeRef r (cons A nil) in r"
                 -: "Ref (List A)"
   , "let r = ref nil in let t = writeRef r (cons A (readRef r)) in r"
@@ -887,17 +923,17 @@ inferFnTests = T.test
       \ let t = writeRef r (cons B (readRef r)) in r"
   -- Scoped type variables
   , "λ (x : α) (y : β). pair x y"
-                -: "∀ α β. α → β → Pair α β"
+                -: "∀ α β. α → β → α × β"
   , "λ (x : α) (y : α). pair x y"
-                -: "∀ α. α → α → Pair α α"
+                -: "∀ α. α → α → α × α"
   , "λ (x : α) (y : β). pair x (y : α)"
-                -: "∀ α. α → α → Pair α α"
-  , "λ (x : α) (y : β). pair x y : Pair β α"
-                -: "∀ α. α → α → Pair α α"
-  , "λ (x : α) (y : β). pair x y : Pair β γ"
-                -: "∀ α. α → α → Pair α α"
-  , "λ (x : α) (y : β). pair x y : Pair γ α"
-                -: "∀ α. α → α → Pair α α"
+                -: "∀ α. α → α → α × α"
+  , "λ (x : α) (y : β). pair x y : β × α"
+                -: "∀ α. α → α → α × α"
+  , "λ (x : α) (y : β). pair x y : β × γ"
+                -: "∀ α. α → α → α × α"
+  , "λ (x : α) (y : β). pair x y : γ × α"
+                -: "∀ α. α → α → α × α"
   -- Type annotations
   , "(λx.x) : ∀ α. α → α"
                 -: "∀α. α → α"
@@ -1174,12 +1210,12 @@ inferFnTests = T.test
     \let y : ∃α. C α = C A in        \
     \λ(f : ∀α. α → α → Z). f x y"
                 -: "(∀α. α → α → Z) → Z"
-  , te "let e : ∃α. Pair α (α → Int) = Pair Int (λx.x) in (snd e) (fst e)"
-  , "let e : ∃α. Pair α (α → Int) = Pair Int (λx.x) in  \
+  , te "let e : ∃α. α × (α → Int) = (Int, λx.x) in (snd e) (fst e)"
+  , "let e : ∃α. α × (α → Int) = (Int, λx.x) in  \
     \(λp. (snd p) (fst p)) e"
                 -: "Int"
-  , te "let e : ∃α. Pair α (α → C α) = Pair Int (λx.C x) in (snd e) (fst e)"
-  , "let e : ∃α. Pair α (α → C α) = Pair Int (λx.C x) in  \
+  , te "let e : ∃α. α × (α → C α) = (Int, λx.C x) in (snd e) (fst e)"
+  , "let e : ∃α. α × (α → C α) = (Int, λx.C x) in  \
     \(λp. (snd p) (fst p)) e"
                 -: "∃α. C α"
   -}

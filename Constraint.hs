@@ -63,6 +63,13 @@ class MonadTV tv r m ⇒ MonadC tv r m | m → tv r where
     QContravariant → τ' ⊏: τ
     QInvariant     → τ ~: τ'
     Omnivariant    → return ()
+  -- | Run a computation in the context of some "pinned down" type
+  --   variables, which means that they won't be considered for
+  --   elimination or generalization.
+  withPinnedTVs ∷ Ftv a tv ⇒ a → m b → m b
+  -- | Update the pinned TVs list to reflect a substitution.
+  --   PRECONDITION: @τ@ is fully substituted
+  updatePinnedTVs ∷ tv → Type tv → m ()
   -- | Figure out which variables to generalize in a piece of syntax
   generalize'   ∷ Bool → Rank → Type tv → m ([tv], [QLit])
   -- | Generalize a type under a constraint and environment,
@@ -88,6 +95,8 @@ instance (MonadC tv s m, Monoid w) ⇒ MonadC tv s (WriterT w m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  withPinnedTVs  = mapWriterT <$> withPinnedTVs
+  updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
@@ -96,6 +105,8 @@ instance (MonadC tv r m, Defaultable s) ⇒ MonadC tv r (StateT s m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  withPinnedTVs  = mapStateT <$> withPinnedTVs
+  updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
@@ -104,6 +115,8 @@ instance (MonadC tv p m, Defaultable r) ⇒ MonadC tv p (ReaderT r m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  withPinnedTVs  = mapReaderT <$> withPinnedTVs
+  updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
@@ -113,6 +126,8 @@ instance (MonadC tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  withPinnedTVs  = mapRWST <$> withPinnedTVs
+  updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
@@ -140,7 +155,9 @@ data CTState tv r
       -- | Maps type variables to same-size equivalence classes
       csEquivs  ∷ !(ProxyMap tv r),
       -- | Types to relate by the subqualifier relation
-      csQuals   ∷ ![(Type tv, Type tv)]
+      csQuals   ∷ ![(Type tv, Type tv)],
+      -- | Stack of pinned type variables
+      csPinned  ∷ ![Set.Set tv]
     }
 -- | Representation of type variable equivalence class
 type TVProxy  tv r = UF.Proxy r (Set.Set tv)
@@ -167,6 +184,11 @@ csQualsUpdate f cs = cs { csQuals = f (csQuals cs) }
 csEquivsUpdate ∷ (ProxyMap tv r → ProxyMap tv r) →
                  CTState tv r → CTState tv r
 csEquivsUpdate f cs = cs { csEquivs = f (csEquivs cs) }
+
+-- | Updater for 'csPinned' field
+csPinnedUpdate ∷ ([Set.Set tv] → [Set.Set tv]) →
+                 CTState tv r → CTState tv r
+csPinnedUpdate f cs = cs { csPinned = f (csPinned cs) }
 
 instance Tv tv ⇒ Show (Atom tv) where
   show (VarAt α) = show (tvUniqueID α)
@@ -198,7 +220,8 @@ runConstraintT m = evalStateT (unConstraintT_ m) cs0
                        csGraph   = gr0,
                        csNodeMap = nm0,
                        csEquivs  = Map.empty,
-                       csQuals   = []
+                       csQuals   = [],
+                       csPinned  = []
                      }
         (gr0, nm0) = NM.mkMapGraph
                        (map (ConAt . snd) (Gr.labNodes tyConOrder))
@@ -241,9 +264,32 @@ instance MonadTV tv r m ⇒ MonadC tv r (ConstraintT tv r m) where
   τ =: τ' = runSeenT (subtypeTypes True τ τ')
   τ ⊏: τ' = ConstraintT . modify . csQualsUpdate $
               ((toQualifierType τ, toQualifierType τ') :)
+  withPinnedTVs a m = do
+    αs     ← ftvSet a
+    ConstraintT (modify (csPinnedUpdate (αs :)))
+    result ← m
+    ConstraintT (modify (csPinnedUpdate tail))
+    return result
+  --
+  updatePinnedTVs α τ = do
+    let βs      = Map.keysSet (ftvPure τ)
+        update  = snd . mapAccumR eachSet False
+        eachSet False set
+          | α `Set.member` set = (True, βs `Set.union` Set.delete α set)
+        eachSet done set       = (done, set)
+    ConstraintT (modify (csPinnedUpdate update))
   --
   generalize'    = solveConstraint
-  saveConstraint = ConstraintT . put <$> ConstraintT get
+  saveConstraint = do
+    c      ← ConstraintT get
+    return . ConstraintT $ do
+      pinned ← gets csPinned
+      put (csPinnedUpdate (`asLengthOf` pinned) c)
+    where
+    xs `asLengthOf` ys =
+      reverse (zipWith const
+                       (reverse xs ++ repeat Set.empty)
+                       (reverse ys))
   showConstraint = show <$> ConstraintT get
 
 -- | Monad transformer for tracking which type comparisons we've seen,
@@ -396,6 +442,7 @@ unifyVar α τ0 = do
   unless (lcTy 0 τ) $
     fail "cannot unify because insufficiently polymorphic"
   writeTV α τ
+  updatePinnedTVs α τ
   (n, _) ← NM.mkNodeM (VarAt α)
   gr     ← NM.getGraph
   case Gr.match n gr of
@@ -682,6 +729,7 @@ solveConstraint value γrank τ = do
     -- ftvs appropriately
     assignTV α atom τftv = do
       writeTV α (atomTy atom)
+      updatePinnedTVs α (atomTy atom)
       assignFtvMap α atom τftv
     -- Given two type variables, where α ← atom, update a map of free
     -- type variables to variance lists accordingly
@@ -717,12 +765,13 @@ solveConstraint value γrank τ = do
                      then id
                      else Map.filter (`elem` [1, -1, 2, -2])
     -- Remove type variables from a list if their rank indicates that
-    -- they're in the environment
-    removeByRank γrank = filterM keep
-      where
-        keep α = do
-          rank ← getTVRank α
-          return (rank > γrank)
+    -- they're in the environment or if they're pinned
+    removeByRank γrank αs = do
+      pinned ← Set.unions <$> ConstraintT (gets csPinned)
+      let keep α = do
+            rank ← getTVRank α
+            return (rank > γrank && α `Set.notMember` pinned)
+      filterM keep αs
 
 -- | Tracing facility for constraint solving; shows the supplied
 --   argument and the state of the constraint solver.
@@ -1037,7 +1086,7 @@ data QCState tv
 --   bounds.  Also return any remaining inequalities (which must be
 --   satisfiable, but we haven't guessed how to satisfy them yet).
 solveQualifiers
-  ∷ MonadTV tv r m ⇒
+  ∷ MonadC tv r m ⇒
     -- | Are we generalizing the type of a non-expansive term?
     Bool →
     -- | Generalization candidates
@@ -1222,7 +1271,11 @@ solveQualifiers value αs qc τ = do
   -- This is okay:     { 1 ↦ 2 3, 2 ↦ 4 }
   -- This is not okay: { 1 ↦ 3 4, 2 ↦ 1 }
   unsafeSubst state γqes = do
-    sequence [ writeTV γ (toQualifierType qe) | (γ, qe) ← Map.toList γqes ]
+    sequence [ do
+                 let τ = toQualifierType qe
+                 writeTV γ τ
+                 updatePinnedTVs γ τ
+             | (γ, qe) ← Map.toList γqes ]
     let γset          = Map.keysSet γqes
         unchanged set = Set.null (γset `Set.intersection` set)
         (βlst, βlst') = List.partition (unchanged . snd) (sq_βlst state)
@@ -1249,39 +1302,42 @@ solveQualifiers value αs qc τ = do
   -- As a last ditch effort, use a simple SAT solver to find a
   -- decent literal-only substitution.
   runSat state doIt = do
-    let formula = toSat state
+    let τftv    = sq_τftv state
+        keep α  = tvKindIs QualKd α
+               || tvFlavorIs Universal α && Map.lookup α τftv ⊑ Just 0
+        βs      = Set.filter keep (sq_αs state)
+        formula = toSat βs state
         sols    = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
-        δs      = Set.filter (tvKindIs QualKd) (sq_αs state)
-    trace ("runSat", formula, sols)
+    trace ("runSat", formula, sols, βs)
     case sols of
       []  → fail "Qualifier constraints unsatisfiable"
       sat:_ | doIt
           → subst "sat" state =<<
               Map.fromDistinctAscList <$> sequence
                 [ do
-                    βs ← case var of
+                    slack ← case var of
                       QInvariant → Set.singleton <$> newTV' QualKd
                       _          → return Set.empty
-                    -- warn $ "\nSAT: substituting " ++ show (QE q βs) ++
+                    -- warn $ "\nSAT: substituting " ++ show (QE q slack) ++
                     --        " for type variable " ++ show δ
-                    return (δ, QE q βs)
-                | δ ← Set.toAscList δs
+                    return (δ, QE q slack)
+                | δ ← Set.toAscList βs
                 , let (q, var) = decodeSatVar δ (sq_τftv state) sat
                 , q /= U || var /= QInvariant ]
       _   → return state
   --
-  toSat state = foldr (SAT.:&&:) SAT.Yes $
-      [ (πr vm q ==> πr vm (U,βs)) SAT.:&&: (πa vm q ==> πa vm (U,βs))
+  toSat βs state = foldr (SAT.:&&:) SAT.Yes $
+      [ (πr τftv q ==> πr τftv (U,βs)) SAT.:&&: (πa τftv q ==> πa τftv (U,βs))
       | (q, βs) ← sq_βlst state ]
     ++
-      [ (πr vm (FreeVar α) ==> πr vm (q,αs)) SAT.:&&:
-        (πa vm (FreeVar α) ==> πa vm (q,αs))
+      [ (πr τftv (FreeVar α) ==> πr τftv (q,αs)) SAT.:&&:
+        (πa τftv (FreeVar α) ==> πa τftv (q,αs))
       | (α, QEMeet qes) ← Map.toList (sq_vmap state)
       , QE q αs         ← qes
-      , tvKindIs QualKd α ]
+      , tvKindIs QualKd α || α `Set.member` βs ]
     where
       p ==> q = SAT.Not p SAT.:||: q
-      vm = sq_τftv state
+      τftv    = sq_τftv state
   --
   -- Find the variables to generalize
   genVars state = return state { sq_αs = αs' } where
