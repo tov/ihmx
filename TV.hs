@@ -14,9 +14,9 @@
     UndecidableInstances,
     UnicodeSyntax
   #-}
-module TV {-(
+module TV (
   -- * Unification monad
-  MonadTV(..), Substitutable(..),
+  MonadTV(..), MonadReadTV(..), NewTV(..), Substitutable(..),
   -- ** Rank management
   lowerRank,
   -- ** Change monitoring
@@ -31,7 +31,7 @@ module TV {-(
   U, runU,
   -- * Debugging
   warn, trace, debug,
-)-} where
+) where
 
 import Control.Monad.ST
 import Data.STRef
@@ -246,12 +246,14 @@ data TV r
 
 data TVRep r
   = UniFl !(r (Either Rank (Type (TV r))))
+  | ExiFl
   | SkoFl
 
 instance Tv (TV r) where
   tvUniqueID = tvId
   tvKind     = tvKind_
   tvFlavor TV { tvRep = UniFl _ } = Universal
+  tvFlavor TV { tvRep = ExiFl }   = Existential
   tvFlavor TV { tvRep = SkoFl }   = Skolem
 
 instance Eq (TV s) where
@@ -316,19 +318,22 @@ instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
     UT $ put uts { utsGensym = succ i }
     trace ("new", flavor, kind, i)
     TV i kind <$> case flavor of
-      Universal → lift $ UniFl <$> newRef (Left Rank.infinity)
-      Skolem    → return SkoFl
+      Universal   → lift $ UniFl <$> newRef (Left Rank.infinity)
+      Existential → return ExiFl
+      Skolem      → return SkoFl
   --
   writeTV_ TV { tvRep = UniFl r } t = lift (writeRef r (Right t))
-  writeTV_ TV { tvRep = SkoFl }   _ = fail "BUG! writeTV_ got skolem"
+  writeTV_ TV { tvRep = SkoFl }   _ = fail "BUG! writeTV_ got ex."
+  writeTV_ TV { tvRep = ExiFl }   _ = fail "BUG! writeTV_ got skolem"
   readTV_ TV { tvRep = UniFl r } = (const Nothing ||| Just) <$> UT (readRef r)
-  readTV_ TV { tvRep = SkoFl }   = return Nothing
+  readTV_ TV { tvRep = _ }       = return Nothing
   --
   getTVRank_ TV { tvRep = UniFl r }
     = (Just ||| const Nothing ) <$> UT (readRef r)
-  getTVRank_ TV { tvRep = SkoFl }
+  getTVRank_ TV { tvRep = _ }
     = return Nothing
   setTVRank_ rank TV { tvRep = UniFl r } = UT (writeRef r (Left rank))
+  setTVRank_ _    TV { tvRep = ExiFl }   = fail "BUG! setTVRank_ got ex."
   setTVRank_ _    TV { tvRep = SkoFl }   = fail "BUG! setTVRank_ got skolem"
   --
   hasChanged   = UT $ gets utsChanged
@@ -418,7 +423,8 @@ instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
 -- | Super sketchy!
 unsafeReadTV ∷ TV s → Maybe (Type (TV s))
 unsafeReadTV TV { tvRep = UniFl r } = (const Nothing ||| Just) (unsafeReadRef r)
-unsafeReadTV TV { tvRep = SkoFl }   = error "BUG! unsafeReadTV got skolem"
+unsafeReadTV TV { tvRep = SkoFl }   = Nothing
+unsafeReadTV TV { tvRep = ExiFl }   = Nothing
 
 debug ∷ Bool
 debug = False

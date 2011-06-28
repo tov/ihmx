@@ -657,6 +657,9 @@ isPrenexType τ                   = isMonoType τ
 
 newtype REC_TYPE a = REC_TYPE { unREC_TYPE ∷ Type a }
 
+instance Ppr a ⇒ Show (REC_TYPE a) where
+  showsPrec = showsPrec <$.> unREC_TYPE
+
 instance Ord a ⇒ Eq (REC_TYPE a) where
   a == b   = compare a b == EQ
 
@@ -671,7 +674,7 @@ instance Ord a ⇒ Ord (REC_TYPE a) where
       compareM a b = return (compare a b)
       loop τ1 τ2 = do
         seen ← get
-        if (Set.member (τ1, τ2) seen || Set.member (τ2, τ2) seen)
+        if (Set.member (τ1, τ2) seen || Set.member (τ2, τ1) seen)
           then return EQ
           else do
             put (Set.insert (τ1, τ2) seen)
@@ -697,7 +700,9 @@ instance Ord a ⇒ Ord (REC_TYPE a) where
               (ConTy _ _, VarTy _)
                 → return GT
               (ConTy n1 τs1, ConTy n2 τs2)
-                → foldl' thenCompareM (compareM n1 n2) (zipWith loop τs1 τs2)
+                → compareM n1 n2 `thenCompareM`
+                  compareM (length τs1) (length τs2) `thenCompareM`
+                  foldl' thenCompareM (return EQ) (zipWith loop τs1 τs2)
               (ConTy _ _, _)
                 → return LT
               (RowTy _ _ _, QuaTy _ _ _)
@@ -1317,13 +1322,18 @@ class (Ftv v v, Show v, Ppr v) ⇒ Tv v where
 
 data Flavor
   = Universal
+  | Existential
   | Skolem
   deriving (Eq, Ord, Show)
 
 -- | Shorthand for indicating a flavor
 flavorSigil ∷ Flavor → Char
-flavorSigil Universal = '#'
-flavorSigil Skolem    = '$'
+flavorSigil Universal   = '@'
+flavorSigil Existential = '#'
+flavorSigil Skolem      = '$'
+
+tvFlavorIs ∷ Tv v ⇒ Flavor → v → Bool
+tvFlavorIs flavor v = tvFlavor v == flavor
 
 tvKindIs ∷ Tv v ⇒ Kind → v → Bool
 tvKindIs kind v = tvKind v == kind

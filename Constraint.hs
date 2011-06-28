@@ -237,8 +237,8 @@ instance (Ord tv, Monad m) ⇒
 
 -- | Constraint solver implementation.
 instance MonadTV tv r m ⇒ MonadC tv r (ConstraintT tv r m) where
-  τ <: τ' = runSeenT (subtypeTypesK False 0 τ τ')
-  τ =: τ' = runSeenT (subtypeTypesK True 0 τ τ')
+  τ <: τ' = runSeenT (subtypeTypes False τ τ')
+  τ =: τ' = runSeenT (subtypeTypes True τ τ')
   τ ⊏: τ' = ConstraintT . modify . csQualsUpdate $
               ((toQualifierType τ, toQualifierType τ') :)
   --
@@ -265,28 +265,30 @@ runSeenT m = do
 --   the value of the first parameter (@True@ means equality).
 --   This eagerly solves as much as possible, adding to the constraint
 --   only as necessary.
-subtypeTypesK ∷ MonadTV tv r m ⇒
-                Bool → Int → Type tv → Type tv → SeenT tv r m ()
-subtypeTypesK unify k0 τ10 τ20 = do
-  lift $ gtrace ("subtypeTypesK", unify, k0, τ10, τ20)
-  check k0 τ10 τ20
+subtypeTypes ∷ MonadTV tv r m ⇒
+                Bool → Type tv → Type tv → SeenT tv r m ()
+subtypeTypes unify τ10 τ20 = do
+  check τ10 τ20
   where
-  check k τ1 τ2 = do
+  check τ1 τ2 = do
+    lift $ gtrace ("subtypeTypes", unify, τ1, τ2)
     τ1'  ← substDeep τ1
     τ2'  ← substDeep τ2
     seen ← get
     if Map.lookup (REC_TYPE τ1', REC_TYPE τ2') seen >= Just unify
-      then return ()
+      then do
+        let ps = [ p | p ← Map.keys seen, p == (REC_TYPE τ1', REC_TYPE τ2') ]
+        trace ("found!", τ1', τ2', ps, unify)
       else do
         put (Map.insert (REC_TYPE τ1', REC_TYPE τ2') unify seen)
-        decomp k τ1' τ2'
+        decomp τ1' τ2'
   --
-  decomp k τ1 τ2 = case (τ1, τ2) of
+  decomp τ1 τ2 = case (τ1, τ2) of
     (VarTy v1, VarTy v2)
       | v1 == v2 → return ()
     (VarTy (FreeVar r1), VarTy (FreeVar r2))
       | unify     →
-      unifyVarK k r1 (fvTy r2)
+      unifyVar r1 (fvTy r2)
       | otherwise → do
       lift (makeEquivTVs r1 r2)
       addEdge (VarAt r1) (VarAt r2)
@@ -298,15 +300,15 @@ subtypeTypesK unify k0 τ10 τ20 = do
       addEdge (ConAt c1) (VarAt r2)
     (VarTy (FreeVar r1), _) → do
       τ2' ← lift $ occursCheck r1 τ2 >>= if unify then return else copyType
-      unifyVarK k r1 τ2'
-      unless unify (check k τ2' τ2)
+      unifyVar r1 τ2'
+      unless unify (check τ2' τ2)
     (_, VarTy (FreeVar r2)) → do
       τ1' ← lift $ occursCheck r2 τ1 >>= if unify then return else copyType
-      unifyVarK k r2 τ1'
-      unless unify (check k τ1 τ1')
+      unifyVar r2 τ1'
+      unless unify (check τ1 τ1')
     (QuaTy q1 αs1 τ1', QuaTy q2 αs2 τ2')
       | q1 == q2 && αs1 == αs2 →
-      check (k + 1) τ1' τ2'
+      check τ1' τ2'
     (ConTy c1 [], ConTy c2 [])
       | not unify, c1 `tyConLe` c2 → return ()
     (ConTy c1 τs1, ConTy c2 τs2)
@@ -315,25 +317,25 @@ subtypeTypesK unify k0 τ10 τ20 = do
         [ if unify
             then if isQVariance var
               then τ1' ~: τ2'
-              else check k τ1' τ2'
-            else relateTypesK var k τ1' τ2'
+              else check τ1' τ2'
+            else relateTypes var τ1' τ2'
         | var ← getVariances c1 (length τs1)
         | τ1' ← τs1
         | τ2' ← τs2 ]
     (RowTy n1 τ11 τ12, RowTy n2 τ21 τ22)
       | n1 == n2 → do
-        check k τ11 τ21
-        check k τ12 τ22
+        check τ11 τ21
+        check τ12 τ22
       | otherwise   → do
         α ← newTVTy
-        check k (RowTy n1 τ11 α) τ22
+        check (RowTy n1 τ11 α) τ22
         β ← newTVTy
-        check k τ12 (RowTy n2 τ21 β)
-        check k α β
+        check τ12 (RowTy n2 τ21 β)
+        check α β
     (RecTy _ τ1', _) →
-      decomp k (openTy 0 [τ1] τ1') τ2
+      decomp (openTy 0 [τ1] τ1') τ2
     (_, RecTy _ τ2') →
-      decomp k τ1 (openTy 0 [τ2] τ2')
+      decomp τ1 (openTy 0 [τ2] τ2')
     _ →
       fail $ "cannot subtype/unify " ++ show τ1 ++ " and " ++ show τ2
   --
@@ -343,16 +345,16 @@ subtypeTypesK unify k0 τ10 τ20 = do
     NM.insMapEdgeM (a1, a2, ())
 
 -- | Relate two types at the given variance.
-relateTypesK ∷ MonadTV tv r m ⇒
-               Variance → Int → Type tv → Type tv → SeenT tv r m ()
-relateTypesK var = case var of
-  Invariant     → subtypeTypesK True
-  Covariant     → subtypeTypesK False
-  Contravariant → flip . subtypeTypesK False
-  QInvariant    → const (~:)
-  QCovariant    → const (⊏:)
-  QContravariant→ const (flip (⊏:))
-  Omnivariant   → \_ _ _ → return ()
+relateTypes ∷ MonadTV tv r m ⇒
+              Variance → Type tv → Type tv → SeenT tv r m ()
+relateTypes var = case var of
+  Invariant     → subtypeTypes True
+  Covariant     → subtypeTypes False
+  Contravariant → flip (subtypeTypes False)
+  QInvariant    → (~:)
+  QCovariant    → (⊏:)
+  QContravariant→ flip (⊏:)
+  Omnivariant   → \_ _ → return ()
 
 -- | Copy a type while replacing all the type variables with fresh ones
 --   of the same kind.
@@ -378,15 +380,15 @@ copyType =
           | τ   ← τs
           | var ← getVariances c (length τs) ]
 
--- | Unify a type variable with a type, where the type must have
---   no bound variables pointing further than @k@.
+-- | Unify a type variable with a type, where the type must be locally
+--   closed.
 --   ASSUMPTIONS: @α@ has not been substituted and the occurs check has
 --   already passed.
-unifyVarK ∷ MonadTV tv r m ⇒ Int → tv → Type tv → SeenT tv r m ()
-unifyVarK k α τ0 = do
-  lift $ gtrace ("unifyVarK", k, α, τ0)
+unifyVar ∷ MonadTV tv r m ⇒ tv → Type tv → SeenT tv r m ()
+unifyVar α τ0 = do
+  lift $ gtrace ("unifyVar", α, τ0)
   τ ← substDeep τ0
-  unless (lcTy k τ) $
+  unless (lcTy 0 τ) $
     fail "cannot unify because insufficiently polymorphic"
   writeTV α τ
   (n, _) ← NM.mkNodeM (VarAt α)
@@ -398,12 +400,12 @@ unifyVarK k α τ0 = do
       sequence_ $
         [ case Gr.lab gr' n' of
             Nothing → return ()
-            Just a  → subtypeTypesK False k (atomTy a) τ
+            Just a  → subtypeTypes False (atomTy a) τ
         | (_, n') ← pres ]
         ++
         [ case Gr.lab gr' n' of
             Nothing → return ()
-            Just a  → subtypeTypesK False k τ (atomTy a)
+            Just a  → subtypeTypes False τ (atomTy a)
         | (_, n') ← sucs ]
 
 --- OCCURS CHECK
