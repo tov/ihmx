@@ -40,8 +40,6 @@ import Util
 import Parsable
 import Ppr
 import MonadRef
-import qualified Stream
-import qualified NodeMap
 
 ---
 --- Some algebra / order theory
@@ -65,10 +63,6 @@ newtype DUAL a = DUAL { dual ∷ a } deriving (Eq, Show)
 instance Lattice a ⇒ Lattice (DUAL a) where
   DUAL a ⊔ DUAL b = DUAL (a ⊓ b)
   DUAL a ⊓ DUAL b = DUAL (a ⊔ b)
-
-instance Lattice a ⇒ Lattice (Stream.Stream a) where
-  (⊔) = liftM2 (⊔)
-  (⊓) = liftM2 (⊓)
 
 instance Bounded a ⇒ Bounded (DUAL a) where
   minBound = DUAL maxBound
@@ -1180,25 +1174,6 @@ countOccs x = loop where
   loop (LabTm _ _)        = 0
   loop (AppTm e1 e2)      = loop e1 + loop e2
   loop (AnnTm e _)        = loop e
-
-{-
--- | Count the occurrences of the variables of rib 0
-countOccs ∷ Term Empty → [Occurrence]
-countOccs = Stream.toList . loop . openTm 0 (map fvTm [0..]) . elimEmptyF
-  where
-  loop (AbsTm _ e)         = loop e
-  loop (LetTm _ e1 e2)     = loop e1 + loop e2
-  loop (MatTm e1 bs)       = loop e1 + bigJoin (map (loop . snd) bs)
-  loop (RecTm bs e2)       = loop e2 + sum (map (loop . snd) bs)
-  loop (VarTm (FreeVar j)) = δ j
-  loop (VarTm _)           = 0
-  loop (ConTm _ es)        = sum (map loop es)
-  loop (LabTm _ _)         = 0
-  loop (AppTm e1 e2)       = loop e1 + loop e2
-  loop (AnnTm e _)         = loop e
-  --
-  δ j = fmap (\j' → if j == j' then 1 else 0) (Stream.iterate succ 0)
--}
 
 ---
 --- Free type variables

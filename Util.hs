@@ -5,7 +5,6 @@
   #-}
 module Util (
   module Perhaps,
-  module TupleClass,
   module Control.Arrow,
   module Control.Applicative,
   module Control.Monad,
@@ -33,7 +32,6 @@ import Prelude hiding ( (=<<), Functor(..), Maybe(..), Monad(..), all,
 -}
 
 import Perhaps
-import TupleClass
 
 import Control.Arrow
 import Control.Applicative
