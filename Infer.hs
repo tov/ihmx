@@ -1,6 +1,7 @@
 {-#
   LANGUAGE
     ImplicitParams,
+    NoImplicitPrelude,
     ParallelListComp,
     ScopedTypeVariables,
     UnicodeSyntax
@@ -54,7 +55,7 @@
      sets α = τ.
 -}
 module Infer (
-  infer0, infer,
+  inferTm, infer,
   -- * Testing
   -- ** Interactive testing
   check, showInfer,
@@ -64,178 +65,192 @@ module Infer (
 
 -- import qualified Data.List  as List
 import qualified Data.Map   as Map
+import qualified Data.Set   as Set
 import qualified Test.HUnit as T
-import Control.Monad.RWS    as RWS
 -- import Control.Monad.State  as CMS
 
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import System.IO (stderr, hPutStrLn)
+import System.Timeout (timeout)
 
-import MonadU
+import TV
 import Constraint
 import Syntax hiding (tests)
+import Env
 import Util
+import qualified Rank
 
 ---
 --- Inference
 ---
 
-type Γ tv = [[Type tv]]
-type Δ tv = Map.Map Name (Type tv)
-
 -- | Infer the type of a term, given a type context
-infer0 ∷ forall m tv. (MonadU tv m, Show tv, Tv tv) ⇒
-         Γ tv → Term Empty → m (Type tv, SubtypeConstraint tv)
-infer0 γ e = do
-  (τ, c)  ← infer mempty γ e
-  gen (syntacticValue e) c γ τ
+inferTm ∷ (MonadTV tv r m, Show tv, Tv tv) ⇒
+          Γ tv → Term Empty → m (Type tv, String)
+inferTm γ e = do
+  δ0 ← mapM (newTVTy' . varianceToKind) (ftvPure e)
+  runConstraintT $ do
+    τ ← infer δ0 γ e
+    σ ← generalize (syntacticValue e) (rankΓ γ) τ
+    c ← showConstraint
+    return (σ, c)
 
 -- | To infer a type and constraint for a term
-infer ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
-        Δ tv → Γ tv → Term Empty → m (Type tv, c)
+infer ∷ MonadC tv r m ⇒ Δ tv → Γ tv → Term Empty → m (Type tv)
 infer δ γ e0 = case e0 of
   AbsTm π e                     → do
-    (δ', c1, τ1, τs) ← inferPatt δ π Nothing (countOccs e)
-    (τ2, c2)         ← infer δ' (τs:γ) e
-    -- qe               ← qvarexp . FreeVar <$> newTV
-    -- let cqe          = mconcat (map (⊏ qe) (termFreeTypes γ (AbsTm π e)))
+    (δ', τ1, τs)     ← inferPatt δ π Nothing (countOccsPatt π e)
+    γ'               ← γ &+&! π &:& τs
+    τ2               ← infer δ' γ' e
     qe               ← arrowQualifier γ (AbsTm π e)
-    let cqe          = (⊤)
-    return (arrTy τ1 qe τ2, c1 ⋀ c2 ⋀ cqe)
+    trace ("AbsTm", π, take 20 (show e), arrTy τ1 qe τ2)
+    return (arrTy τ1 qe τ2)
   LetTm π e1 e2                 → do
-    (τ1, c1)         ← infer δ γ e1
-    (δ', cπ, _, τs)  ← inferPatt δ π (Just τ1) (countOccs e2)
-    (τs', c')        ← genList (syntacticValue e1) (c1 ⋀ cπ) γ τs
-    (τ2, c2)         ← infer δ' (τs':γ) e2
-    return (τ2, c' ⋀ c2)
+    τ1               ← infer δ γ e1
+    (δ', _, τs)      ← inferPatt δ π (Just τ1) (countOccsPatt π e2)
+    τs'              ← generalizeList (syntacticValue e1) (rankΓ γ) τs
+    γ'               ← γ &+&! π &:& τs'
+    infer δ' γ' e2
   MatTm e1 bs                   → do
-    (τ1, c1) ← infer δ γ e1
-    (τ2, c2) ← inferMatch δ γ τ1 bs
-    return (τ2, c1 ⋀ c2)
+    τ1               ← infer δ γ e1
+    inferMatch δ γ τ1 bs
   RecTm bs e2                   → do
     αs               ← replicateM (length bs) newTVTy
-    cs               ← sequence
+    let ns           = map fst bs
+    γ'               ← γ &+&! ns &:& αs
+    sequence_
       [ do
           unless (syntacticValue ei) $
-            fail "In let rec, binding not a syntactic value"
-          (τi, ci) ← infer δ (αs:γ) ei
-          return (ci ⋀ αi ≤≥ τi ⋀ αi ⊏ U)
-      | (_, ei) ← bs
-      | αi      ← αs ]
-    (τs', c')        ← genList True (mconcat cs) γ αs
-    (τ2, c2)         ← infer δ (τs':γ) e2
-    return (τ2, c' ⋀ c2)
-  VarTm (FreeVar ff)            → elimEmpty ff
-  VarTm (BoundVar i j _)        → do
-    inst (γ !! i !! j)
+            fail $ "In let rec, binding for ‘" ++ ni ++
+                   "’ not a syntactic value"
+          τi ← infer δ γ' ei
+          αi =: τi
+          αi ⊏: U
+      | (ni, ei) ← bs
+      | αi       ← αs ]
+    τs'              ← generalizeList True (rankΓ γ) αs
+    γ'               ← γ &+&! ns &:& τs'
+    infer δ γ' e2
+  VarTm n                       → inst =<< γ &.& n
   ConTm n es                    → do
-    (τs, cs)         ← unzip <$> mapM (infer δ γ) es
-    return (ConTy n τs, mconcat cs)
+    τs               ← mapM (infer δ γ) es
+    return (ConTy n τs)
   LabTm b n                     → do
     let (n1, n2, j1, j2) = if b then ("α","r",0,1) else ("r","α",1,0)
     inst $ QuaTy AllQu [(Here n1, L), (Here n2, L)] $
              arrTy (bvTy 0 0 (Here n1)) (qlitexp U) $
                RowTy n (bvTy 0 j1 (Here "α")) (bvTy 0 j2 (Here "r"))
   AppTm e1 e2                   → do
-    (τ1, c1)         ← infer δ γ e1
-    (τ2, c2)         ← infer δ γ e2
+    τ1               ← infer δ γ e1
+    τ2               ← infer δ γ e2
     α                ← newTVTy
-    return (α, c1 ⋀ c2 ⋀ τ1 ≤ arrTy τ2 (qlitexp L) α)
+    τ1 <: arrTy τ2 (qlitexp L) α
+    return α
   AnnTm e annot                 → do
     (δ', τ', _)      ← instAnnot δ annot
-    (τ, c)           ← infer δ' γ e
-    return (τ', c ⋀ τ ≤ τ')
+    τ                ← infer δ' γ e
+    τ <: τ'
+    return τ'
 
 -- | To infer a type and constraint for a match form
-inferMatch ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
+inferMatch ∷ MonadC tv r m ⇒
              Δ tv → Γ tv → Type tv → [(Patt Empty, Term Empty)] →
-             m (Type tv, c)
-inferMatch _ _ _ [] = do
-  β ← newTVTy
-  return (β, (⊤))
+             m (Type tv)
+inferMatch _ _ _ [] = newTVTy
 inferMatch δ γ τ ((InjPa n πi, ei):bs) | totalPatt πi = do
   β               ← newTVTy
-  mαr             ← extractLabel n <$> derefAll τ
-  (α, r)          ← maybe ((,) <$> newTVTy <*> newTVTy) return mαr
-  (δ', ci, _, τs) ← inferPatt δ πi (Just α) (countOccs ei)
-  (τi, ci')       ← infer δ' (τs:γ) ei
-  (τk, ck)        ← if null bs
-                      then return (β, r ≤ endTy)
+  mαr             ← extractLabel n <$> substDeep τ
+  (α, r)          ← case mαr of
+    Just αr → return αr
+    Nothing → do
+      α ← newTVTy
+      r ← newTVTy
+      τ =: RowTy n α r
+      return (α, r)
+  (δ', _, τs)     ← inferPatt δ πi (Just α) (countOccsPatt πi ei)
+  γ'              ← γ &+&! πi &:& τs
+  τi              ← infer δ' γ' ei
+  τk              ← if null bs
+                      then do r <: endTy; return β
                       else inferMatch δ' γ r bs
-  let cτ = replicate (length τs) τ ⊏* ei
-         ⋀ if pattHasWild πi then τ ⊏ A else (⊤)
-  trace ("inferMatch", τs, ei)
-  return (β, ci ⋀ ci' ⋀ ck ⋀ cτ ⋀ τi ≤ β ⋀ τk ≤ β ⋀ τ ≤ RowTy n α r)
+  mapM_ (τ ⊏:) (countOccsPatt πi ei)
+  when (pattHasWild πi) (τ ⊏: A)
+  τi <: β
+  τk <: β
+  return β
 inferMatch δ γ τ ((πi, ei):bs) = do
   β               ← newTVTy
-  (δ', ci, _, τs) ← inferPatt δ πi (Just τ) (countOccs ei)
-  (τi, ci')       ← infer δ' (τs:γ) ei
-  (τk, ck)        ← inferMatch δ' γ τ bs
-  return (β, ci ⋀ ci' ⋀ ck ⋀ τi ≤ β ⋀ τk ≤ β)
+  (δ', _, τs)     ← inferPatt δ πi (Just τ) (countOccsPatt πi ei)
+  γ'              ← γ &+&! πi &:& τs
+  τi              ← infer δ' γ' ei
+  τk              ← inferMatch δ' γ τ bs
+  τi <: β
+  τk <: β
+  return β
 
-{-
-termFreeTypes ∷ Γ tv → Term a → [Type tv]
-termFreeTypes γ e =
-  [ σ
-  | (i, j) ← lfvTm e
-  , rib:_ ← [drop i γ]
-  , σ:_   ← [drop j rib] ]
--}
+-- | Extend the environment and update the ranks of the type variables
+(&+&!) ∷ MonadTV tv r m ⇒ Γ tv → Map.Map Name (Type tv) → m (Γ tv)
+γ &+&! m = do
+  lowerRank (Rank.inc (rankΓ γ)) (Map.elems m)
+  return (bumpΓ γ &+& m)
 
-arrowQualifier ∷ (MonadU tv m) ⇒ Γ tv → Term a → m (QExp tv)
+infixl 2 &+&!
+
+arrowQualifier ∷ MonadTV tv r m ⇒ Γ tv → Term a → m (QExp tv)
 arrowQualifier γ e =
   qualifier (ConTy "U" [ σ
-                       | (i, j) ← lfvTm e
-                       , rib:_ ← [drop i γ]
-                       , σ:_   ← [drop j rib] ])
-  where ?deref = readTV
+                       | n ← Set.toList (termFv e)
+                       , σ ← γ &.& n ])
 
 -- | Instantiate a prenex quantifier
-inst ∷ (MonadU tv m, Show c, Constraint c tv) ⇒
-       Type tv → m (Type tv, c)
+inst ∷ MonadC tv r m ⇒ Type tv → m (Type tv)
 inst σ0 = do
-  σ      ← deref σ0
-  (τ, c) ← case σ of
+  σ      ← substRoot σ0
+  τ      ← case σ of
     QuaTy AllQu nqs τ → do
-      (αs, cs) ← unzip <$> sequence
+      αs ← sequence
         [ do
-            α ← newTVTy
-            return (α, α ⊏ q)
-        | (_, q) ← nqs ]
-      return (openTy 0 αs τ, mconcat cs)
-    τ → return (τ, (⊤))
-  trace ("inst", σ, τ, c)
-  return (τ, c)
+            α ← newTVTy' kind
+            α ⊏: q
+            return α
+        | (_, q) ← nqs
+        | kind   ← inferKindsTy τ ]
+      return (openTy 0 αs τ)
+    τ → return τ
+  trace ("inst", σ, τ)
+  return τ
 
 -- | Given a type variable environment, a pattern, optionally an
 --   expected type, and a list of how each bound variable will be used,
 --   and compute an updated type variable environment, a constraint,
 --   a type for the whole pattern, and a type for each variable bound by
 --   the pattern.
-inferPatt ∷ (MonadU tv m, Constraint c tv) ⇒
-           Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
-           m (Δ tv, c, Type tv, [Type tv])
+inferPatt ∷ MonadC tv r m ⇒
+            Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
+            m (Δ tv, Type tv, [Type tv])
 inferPatt δ0 π0 mτ0 occs = do
-  (σ, δ, (c, τs)) ← runRWST (loop π0 mτ0) () δ0
-  let c' = mconcat (zipWith (⊏) τs occs)
-         ⋀ σ ⊏ bigJoin (take (length τs) occs)
-         ⋀ if pattHasWild π0 then σ ⊏ A else (⊤)
-  return (δ, c ⋀ c', σ, τs)
+  (σ, δ, τs) ← runRWST (loop π0 mτ0) () δ0
+  zipWithM (⊏:) τs occs
+  σ ⊏: bigJoin (take (length τs) occs)
+  when (pattHasWild π0) (σ ⊏: A)
+  return (δ, σ, τs)
   where
-  bind τ      = do tell ((⊤), [τ]); return τ
+  bind τ      = do tell [τ]; return τ
+  {-
   constrain c = tell (c, [])
+  -}
   loop (VarPa _)       mτ = do
     α ← maybe newTVTy return mτ
     bind α
   loop WldPa           mτ = do
     α ← maybe newTVTy return mτ
-    constrain (α ⊏ A)
+    α ⊏: A
     return α
   loop (ConPa name πs) mτ = do
     case mτ of
       Nothing → ConTy name <$> sequence [ loop πi Nothing | πi ← πs ]
       Just τ0 → do
-        τ ← deref τ0
+        τ ← substRoot τ0
         case τ of
           ConTy name' τs@(_:_) | length τs == length πs, name == name' →
             ConTy name <$> sequence
@@ -244,13 +259,13 @@ inferPatt δ0 π0 mτ0 occs = do
               | τi ← τs ]
           _ → do
             τ' ← ConTy name <$> sequence [ loop πi Nothing | πi ← πs ]
-            constrain (τ ≤ τ')
+            τ <: τ'
             return τ
   loop (InjPa name π)  mτ = do
     case mτ of
       Nothing → RowTy name <$> loop π Nothing <*> newTVTy
       Just τ0 → do
-        τ ← deref τ0
+        τ ← substRoot τ0
         case τ of
           -- XXX Need to permute?
           RowTy name' τ' τr | name == name' → do
@@ -258,7 +273,7 @@ inferPatt δ0 π0 mτ0 occs = do
             return τ'
           _ → do
             τ' ← RowTy name <$> loop π Nothing <*> newTVTy
-            constrain (τ ≤ τ')
+            τ <: τ'
             return τ
   loop (AnnPa π annot) mτ = do
     δ ← get
@@ -267,7 +282,7 @@ inferPatt δ0 π0 mτ0 occs = do
     τ ← loop π (Just τ')
     case mτ of
       Just τ'' → do
-        constrain (τ'' ≤ τ)
+        τ'' <: τ
         return τ''
       Nothing  → return τ
 
@@ -276,9 +291,8 @@ inferPatt δ0 π0 mτ0 occs = do
 --   some-bound names in the annotation and update the environment
 --   accordingly. Return the annotation instantiated to a type and the
 --   list of new universal tyvars.
-instAnnot ∷ MonadU tv m ⇒
-            Δ tv → Annot →
-            m (Δ tv, Type tv, [Type tv])
+instAnnot ∷ MonadTV tv r m ⇒
+            Δ tv → Annot → m (Δ tv, Type tv, [Type tv])
 instAnnot δ (Annot names σ0) = do
   αs ← mapM eachName names
   let δ' = foldr2 insert δ names αs
@@ -289,6 +303,8 @@ instAnnot δ (Annot names σ0) = do
     insert ('_':_) = const id
     insert k       = Map.insert k
     eachName name  = maybe newTVTy return (Map.lookup name δ)
+    {- Note that the newTVTy case shouldn't happen because we
+       create tyvars for every term up front in 'inferTm'. -}
 
 {-
 -- | If the pattern is fully annotated, extract the annotation.
@@ -317,453 +333,17 @@ check e = case showInfer (read e) of
 
 showInfer ∷ Term Empty → Either String (Type String, String)
 showInfer e = runU $ do
-  (τ, c) ← infer0 [elimEmpty <$$> γ0] e
+  (τ, c) ← inferTm (emptyΓ &+& Map.fromList γ0) e
   τ'     ← stringifyType τ
-  return (τ', show c)
+  return (τ', c)
 
-stringifyType ∷ (MonadU s m, Show s) ⇒ Type s → m (Type String)
+stringifyType ∷ MonadTV tv r m ⇒ Type tv → m (Type String)
 stringifyType = foldType (mkQuaF QuaTy) (mkBvF bvTy) (fvTy . show)
                          ConTy RowTy (mkRecF RecTy)
-  where ?deref = readTV
-
-{-
--- | Given a type, strip off the outermost quantifier and make the bound
---   tyvars (un-)unifiable.  Assumes that the given type is already
---   deferenced
-openQua ∷ MonadU s m ⇒ Bool → Bool → TypeR s → m (TypeR s, [TV s])
-openQua upos epos t = do
-  (t', tvs) ← openAll upos t
-  t''       ← openEx epos t'
-  return (t'', tvs)
-
-openAll ∷ MonadU s m ⇒ Bool → TypeR s → m (TypeR s, [TV s])
-openAll pos (QuaTy AllQu n t) = do
-  trace ("openAll", pos, n, t)
-  tvs ← replicateM n (newTV (determineFlavor Universal pos))
-  return (openTy 0 (map fvTy tvs) t, if pos then [] else tvs)
-openAll _ t = return (t, [])
-
-openEx ∷ MonadU s m ⇒ Bool → TypeR s → m (TypeR s)
-openEx pos (QuaTy ExQu n t) = do
-  trace ("openEx", pos, n, t)
-  tvs ← replicateM n (newTV (determineFlavor Existential pos))
-  return (openTy 0 (map fvTy tvs) t)
-openEx _ t = return t
-
-instantiate    ∷ MonadU s m ⇒ TypeR s → m (TypeR s)
-instantiate    = deref >=> openQua True True >=> return . fst
-
-instantiateNeg ∷ MonadU s m ⇒ TypeR s → m (TypeR s, [TV s])
-instantiateNeg = deref >=> openQua False False
-
--- | Instantiate only the universal quantifiers up front
-instantiateUni ∷ MonadU s m ⇒ TypeR s → m (TypeR s)
-instantiateUni σ0 = do
-  σ ← deref σ0
-  case σ of
-    QuaTy AllQu n ρ → do
-      tvs ← replicateM n (newTV Universal)
-      return (openTy 0 (map fvTy tvs) ρ)
-    _ → return σ
 
 ---
---- Unification
+--- Testing
 ---
-
--- | Assumption: tv1 is unifiable and empty
-unifyVar ∷ MonadU s m ⇒ TV s → TypeR s → m ()
-unifyVar tv1 t2 = do
-  trace ("unifyVar", tv1, t2)
-  when (not (lcTy t2)) $
-    fail "Could not unify: not locally closed (BUG?)"
-  tvs ← ftvFlavor Universal t2
-  when (tv1 `elem` tvs) $
-    fail "Could not unify: occurs check failed"
-  writeTV tv1 t2
-
-(=:) ∷ MonadU s m ⇒ TypeR s → TypeR s → m ()
-(=:) = unify
-
-unify ∷ MonadU s m ⇒ TypeR s → TypeR s → m ()
-unify t10 t20 = do
-  trace ("unify {", t10, t20)
-  t1 ← deref t10
-  t2 ← deref t20
-  case (t1, t2) of
-    (VarTy v1, VarTy v2)
-      | v1 == v2 → return ()
-    (ConTy c1 ts1, ConTy c2 ts2)
-      | c1 == c2 → zipWithM_ unify ts1 ts2
-    (QuaTy q1 n1 t1, QuaTy q2 n2 t2)
-      | q1 == q2 && n1 == n2 → do
-      tvs ← replicateM n1 (newTV Skolem)
-      let open = openTy 0 (map fvTy tvs)
-      unify (open t1) (open t2)
-      ftvs1 ← ftvFlavor Skolem t1
-      ftvs2 ← ftvFlavor Skolem t2
-      when (any (`elem` tvs) (ftvs1 ++ ftvs2)) $
-        fail "Could not unify: insufficiently polymorphic"
-    (VarTy (FreeVar tv1@TV { tvFlavor = Universal }), _)
-      → unifyVar tv1 t2
-    (_, VarTy (FreeVar tv2@TV { tvFlavor = Universal }))
-      → unifyVar tv2 t1
-    (_, _)
-      → fail $ "Could not unify ‘" ++ show t1 ++ "’ with ‘" ++ show t2 ++ "’"
-  trace ("} yfinu", t10, t20)
-
-{-
-  ∀α. α → α    ⊔    Int → Int      =       Int → Int
-  ∀α. α → Int  ⊔    Int → Int      =       Int → Int
-  ∀α. α → α    ⊔    ∀α. Int → α    =       Int → Int
-  ∀α. α → Int  ⊔    ∀α. Int → α    =       Int → Int
-  ∀α. α → Int  ⊔    ∀α. Bool → α   =       Bool → Int
-  ∀αβ. α → β   ⊔    ∀α. α → α      =       ∀α. α → α
-  ∀α. α → Int  ⊔    Int → Bool     =       Int → ⊤
-  ∀α. Int → α  ⊔    Bool → Int     =       ⊥ → Int
-
-  (∀α. α → α) → 1    ⊔  (Int → Int) → 1     = (∀α. α → α) → 1
-* (∀α. α → α) → 1    ⊔  (∀α. α → Int) → 1   = (∀αβ. α → β) → 1
-  (∀α. α → Int) → 1  ⊔  (Int → Int) → 1     = (∀α. α → Int) → 1
-
-  ∀α. α → α → 1      ⊔  Int → Bool → 1      = Int → ⊥    → 1
-                                            = ⊥   → Bool → 1
-                                            = ⊥   → ⊥    → 1
-
-  ∀α. α → α → 1      ⊔  Int → ∀β. β → 1     = Int → Int → 1
-
-  only instantiate up front?
-
--}
-
-{-
-unifyDir ∷ Variance → TypeR s → TypeR s → U s (TypeR s)
-unifyDir Invariant σ1 σ2   = σ1 <$ unify σ1 σ2
-unifyDir Omnivariant σ1 σ2 = return σ1 -- XXX arbitrary?
-unifyDir dir σ10 σ20 = do
-  trace ("unifyDir {", dir, σ10, σ20)
-  σ1 ← deref σ10
-  σ2 ← deref σ20
-  σ ← case (σ1, σ2) of
-    (VarTy v1, VarTy v2)
-      | v1 == v2 → return σ1
-    (ConTy c1 σs1, ConTy c2 σs2)
-      | c1 == c2 && length σs1 == length σs2 →
-      ConTy c1 <$>
-        sequence [ unifyDir (dir * dir') σ1 σ2
-                 | dir' ← getVariances c1 (length σs1)
-                 | σ1   ← σs1
-                 | σ2   ← σs2 ]
-                 {-
-    (VarTy (FreeVar tv@TV { tvFlavor = Universal }), _) → do
-    -}
-  trace ("} riDyfinu", dir, σ10, σ20)
-  return σ
--}
-
-(<:) ∷ MonadU s m ⇒ TypeR s → TypeR s → m ()
-σ1 <: σ2 = subsume σ2 σ1
-
--- | Is t1 subsumed by t2?
-subsume ∷ MonadU s m ⇒ TypeR s → TypeR s → m ()
-subsume σ1 σ2 = do
-  trace ("subsume {", σ1, σ2)
-  σ1' ← deref σ1
-  case σ1' of
-    VarTy (FreeVar tv@TV { tvFlavor = Universal }) → do
-      σ2' ← instantiateUni σ2
-      unifyVar tv σ2'
-    _ → do
-      (ρ1, tvs1) ← instantiateNeg σ1'
-      ρ2 ← instantiate σ2
-      unify ρ1 ρ2
-      ftvs1 ← ftvFlavor Skolem σ1
-      ftvs2 ← ftvFlavor Skolem σ2
-      when (any (`elem` tvs1) (ftvs1 ++ ftvs2)) $ do
-        trace (tvs1, ftvs1, ftvs2)
-        fail "Could not subsume: insufficiently polymorphic"
-  trace ("} emusbus", σ1, σ2)
-
-{-
-deepSubsume ∷ TypeR s → TypeR s → U s ()
-deepSubsume σ10 σ20 = do
-  trace ("subsume {", σ10, σ20)
-  σ1 ← deref σ10
-  σ2 ← deref σ20
-  case (σ1, σ2) of
-    (VarTy v1, VarTy v2)
-      | v1 == v2 → return ()
-    (ConTy c1 σs1, ConTy c2 σs2)
-      | c1 == c2 && length σs1 == length σs2 →
-      sequence_ [ σ1 `rel` σ2
-                | rel ← getRels c1 (length σs1)
-                | σ1  ← σs1
-                | σ2  ← σs2 ]
-    (VarTy (FreeVar tv1@TV {tvFlavor = Universal}), _) →
-      unifyVar tv1 σ2
-    (_, VarTy (FreeVar tv2@TV {tvFlavor = Universal})) →
-      unifyVar tv2 σ1
-    (QuaTy _ _ _, _) → do
-      (ρ1, tvs1) ← instantiateNeg σ1
-      deepSubsume ρ1 σ2
-      ftvs1 ← ftvS σ1
-      ftvs2 ← ftvS σ2
-      when (any (`elem` tvs1) (ftvs1 ++ ftvs2)) $ do
-        trace (tvs1, ftvs1, ftvs2)
-        fail "Could not subsume: insufficiently polymorphic"
-    (_, QuaTy _ _ _) → do
-      ρ2 ← instantiate σ2
-      deepSubsume σ1 ρ2
-    (_, _)
-      → fail $ "Could not subsume: ‘" ++
-          show σ1 ++ "’ ≥ ‘" ++ show σ2 ++ "’"
-  trace ("} emusbus", σ1, σ2)
-
-getRels ∷ Name → Int → [TypeR s → TypeR s → U s ()]
-getRels c i = map toRel (getVariances c i) where
-  toRel Omnivariant   = \_ _ -> return ()
-  toRel Covariant     = deepSubsume
-  toRel Contravariant = flip deepSubsume
-  toRel Invariant     = unify
--}
-
--- | Given a list of type/U-action pairs, run all the U actions, but
---   in an order that does all U-actions not assocated with tyvars
---   before those associated with tyvars. Checks dynamically after each
---   action, since an action can turn a tyvar into a non-tyvar.
-subsumeN ∷ MonadU s m ⇒ [(TypeR s, m ())] → m ()
-subsumeN [] = return ()
-subsumeN σs = subsumeOneOf σs >>= subsumeN
-  where
-    subsumeOneOf []             = return []
-    subsumeOneOf [(_, u1)]      = [] <$ u1
-    subsumeOneOf ((σ1, u1):σs)  = do
-      σ ← deref σ1
-      case σ of
-        VarTy (FreeVar TV { tvFlavor = Universal })
-          → ((σ, u1):) <$> subsumeOneOf σs
-        _ → σs <$ u1
-
--- | Given a function arity and a type, extracts a list of argument
---   types and a result type of at most the given arity.
-funmatchN ∷ MonadU s m ⇒ Int → TypeR s → m ([TypeR s], TypeR s)
-funmatchN n0 σ0 = do
-  σ0' ← deref σ0
-  case σ0' of
-    ConTy "->" [_, _] → unroll n0 σ0'
-    VarTy (FreeVar α@TV {tvFlavor = Universal}) → do
-      β1 ← newTVTy Universal
-      β2 ← newTVTy Universal
-      writeTV α (β1 ↦ β2)
-      return ([β1], β2)
-    _ → fail ("Expected function type, but got ‘" ++ show σ0' ++ "’")
-  where
-    unroll (n + 1) (ConTy "->" [σ1, σ']) = do
-      (σ2m, σ) ← unroll n =<< deref σ'
-      return (σ1:σ2m, σ)
-    unroll _ σ                           = return ([], σ)
-
-type Γ s = [[TypeR s]]
-type Δ s = Map.Map Name (TypeR s)
-
-infer ∷ MonadU s m ⇒ Δ s → Γ s → Term Empty → Maybe (TypeR s) → m (TypeR s)
-infer δ γ e0 mσ = do
-  trace ("infer {", δ, init γ, e0, mσ)
-  σ ← case e0 of
-    VarTm (FreeVar e) → elimEmpty e
-    VarTm (BoundVar i j _) → return (γ !! i !! j)
-    LetTm False π e1 e2 → do
-      let e1' = maybe e1 (AnnTm e1) (extractPattAnnot π)
-      σ1 ← infer δ γ e1' Nothing
-      (δ', _, σs, _) ← instPatt δ π (Just σ1)
-      infer δ' (σs:γ) e2 mσ
-    LetTm True π e1 e2 → do
-      unless (syntacticValue e1) $
-        fail "bound expr in let rec not a syntactic value"
-      (δ', σ0, σs, _) ← instPatt δ π Nothing
-      σ   ← infer δ' (σs:γ) e1 (Just σ0)
-      σ <: σ0
-      σs' ← mapM (generalize γ [Universal]) σs -- XXX Existential too?
-      infer δ' (σs':γ) e2 mσ
-    AbsTm π e → do
-      [mσ1, mσ2]      ← splitCon mσ "->" 2
-      (δ', σ, σs, αs) ← instPatt δ π mσ1
-      σ'              ← inferInst δ' (σs:γ) e mσ2
-      unlessM (allM isTauU αs) $
-        fail "used some unannotated parameter polymorphically"
-      generalize γ [Universal, Existential] (σ ↦ σ')
-    ConTm name es → do
-      mσs ← splitCon mσ name (length es)
-      ρs  ← zipWithM (inferInst δ γ) es mσs
-      let ρ    = ConTy name ρs
-          gens = if syntacticValue e0
-                   then [Universal, Existential]
-                   else [Existential]
-      generalize γ gens ρ
-    AppTm _ _ → do
-      let (e, es) = unfoldApp e0
-      σ1 ← infer δ γ e Nothing
-      σ  ← inferApp δ γ σ1 es
-      generalize γ [Existential] σ
-    AnnTm e annot → do
-      (δ', σ, _) ← instAnnot δ annot
-      σ'         ← infer δ' γ e (Just σ)
-      σ' <: σ
-      return σ
-  trace ("} refni", δ, init γ, e0, σ)
-  return σ
-
--- | Given (maybe) a type, a type constructor name, and its arity,
---   return a list of (maybe) parameter types.
-{-
-Instantiates both ∀ and ∃ to univars:
-  (λx.x) : A → A          ⇒       (λ(x:A). (x:A)) : A → A
-  (λx.x) : ∀α. α → α      ⇒       (λ(x:β). (x:β)) : ∀α. α → α
-  (λx.x) : ∀α. C α → C α  ⇒       (λ(x:C β). (x:C β)) : ∀α. C α → C α
-  (λx.x) : ∃α. α → α      ⇒       (λ(x:β). (x:β)) : ∃α. α → α
-  (λx.x) : ∃α. C α → C α  ⇒       (λ(x:C β). (x:C β)) : ∃α. C α → C α
--}
-splitCon ∷ MonadU s m ⇒ Maybe (TypeR s) → Name → Int → m [Maybe (TypeR s)]
-splitCon Nothing  _ arity = return (replicate arity Nothing)
-splitCon (Just σ) c arity = do
-  trace ("splitCon", σ, c, arity)
-  (ρ, _) ← openQua True False σ
-  return $ case ρ of
-    ConTy c' σs | c == c' && length σs == arity
-      → map Just σs
-    _ → replicate arity Nothing
-
--- infer; instantiate if not rigid
-inferInst ∷ MonadU s m ⇒
-            Δ s → Γ s → Term Empty → Maybe (TypeR s) → m (TypeR s)
-inferInst δ γ e mσ = do
-  σ ← infer δ γ e mσ
-  keepPoly ← maybe (return False) isSigmaU mσ
-  if isAnnotated e || keepPoly
-    then return σ
-    else instantiate σ >>= generalize γ [Existential]
-
-inferApp ∷ MonadU s m ⇒ Δ s → Γ s → TypeR s → [Term Empty] → m (TypeR s)
-inferApp δ γ σ0 e1n = do
-  ρ        ← instantiate σ0
-  (σ1m, σ) ← funmatchN (length e1n) ρ
-  σ1m'     ← sequence
-                [ do
-                    -- last arg to infer (Just σi) is for
-                    -- formal-to-actual propagation
-                    σi' ← infer δ γ ei (Just σi)
-                    return (σi, if isAnnotated ei
-                                  then σi' =: σi
-                                  else σi' <: σi)
-                | σi ← σ1m
-                | ei ← e1n ]
-  subsumeN σ1m'
-  if length σ1m < length e1n
-    then inferApp δ γ σ (drop (length σ1m) e1n)
-    else return σ
-
--- | Is the pattern annotated everywhere?
-fullyAnnotatedPatt ∷ Patt Empty → Bool
-fullyAnnotatedPatt VarPa        = False
-fullyAnnotatedPatt WldPa        = False
-fullyAnnotatedPatt (ConPa _ πs) = all fullyAnnotatedPatt πs
-fullyAnnotatedPatt (AnnPa _ _)  = True
-
--- | If the pattern is fully annotated, extract the annotation.
-extractPattAnnot ∷ Monad m ⇒ Patt Empty → m Annot
-extractPattAnnot π0 = do
-  (σ, ns) ← CMS.runStateT (loop π0) []
-  return (Annot ns σ)
-  where
-  loop VarPa                  = fail "Unannotated variable pattern"
-  loop WldPa                  = fail "Unannotated wildcard pattern"
-  loop (ConPa c πs)           = ConTy c <$> mapM loop πs
-  loop (AnnPa _ (Annot ns σ)) = do
-    CMS.modify (`List.union` ns)
-    return σ
-
--- | Generalize type variables not found in the context. Generalize
---   universal tyvars into universal quantifiers and existential tyvars
---   into existential quantifiers.
-generalize ∷ MonadU s m ⇒ Γ s → [Flavor] → TypeR s → m (TypeR s)
-generalize γ flavors σ = do
-  σ' ← derefAll σ
-  let fftv flav | flav `elem` flavors = ftvFlavor flav σ'
-                | otherwise           = return []
-  uftv ← fftv Universal
-  eftv ← fftv Existential
-  ftvγ ← ftv γ
-  let uαs = filter (`notElem` ftvγ) uftv
-      eαs = filter (`notElem` ftvγ) eftv
-  return (closeWith AllQu uαs (closeWith ExQu eαs σ'))
-
--- | Is the given type quantified? (A σ type?)
-isSigmaU ∷ MonadU s m ⇒ TypeR s → m Bool
-isSigmaU σ0 = do
-  σ ← deref σ0
-  return $ case σ of
-    QuaTy _ _ _ → True
-    _           → False
-
--- | Is the type quantifier-free? (A τ type?)
-isTauU ∷ MonadU s m ⇒ TypeR s → m Bool
-isTauU = foldType readTV (\_ _ _→ False) (\_ _ _→ True) (\_→ True) (\_→ and)
-
----
---- Testing and interactive
----
-
-relAnnot ∷ MonadU s m ⇒
-           (TypeR s → TypeR s → m a) →
-           Annot → Annot → m (TypeR s, TypeR s)
-relAnnot rel (Annot ns1 σ1) (Annot ns2 σ2) = do
-    αs1 ← replicateM (length ns1) (newTVTy Universal)
-    αs2 ← replicateM (length ns2) (newTVTy Universal)
-    let σ1'     = totalSubst ns1 αs1 =<< σ1
-        σ2'     = totalSubst ns2 αs2 =<< σ2
-    rel σ1' σ2'
-    return (σ1', σ2')
-
-unifyAnnot ∷ MonadU s m ⇒ Annot → Annot → m (TypeR s, TypeR s)
-unifyAnnot = relAnnot unify
-
-showUnifyAnnot ∷ Annot → Annot → Either String String
-showUnifyAnnot t1 t2 = runU $ do
-  (t1', t2') ← unifyAnnot t1 t2
-  t1'' ← derefAll t1'
-  t2'' ← derefAll t2'
-  return (show t1'' ++ " / " ++ show t2'')
-
-subsumeAnnot ∷ MonadU s m ⇒ Annot → Annot → m (TypeR s, TypeR s)
-subsumeAnnot = relAnnot subsume
-
-showSubsumeAnnot ∷ Annot → Annot → Either String String
-showSubsumeAnnot t1 t2 = runU $ do
-  (t1', t2') ← subsumeAnnot t1 t2
-  t1'' ← derefAll t1'
-  t2'' ← derefAll t2'
-  return (show t1'' ++ " ≥ " ++ show t2'')
-
-showInfer ∷ Term Empty → Either String (Type String)
-showInfer e = runU $ do
-  τ ← infer Map.empty [elimEmpty <$$> γ0] e Nothing
-  stringifyType τ
-
-u ∷ String → String → IO ()
-u a b = do
-  either putStrLn putStrLn $
-    showUnifyAnnot (normalizeAnnot (read a)) (normalizeAnnot (read b))
-
-s ∷ String → String → IO ()
-s a b = do
-  either putStrLn putStrLn $
-    showSubsumeAnnot (normalizeAnnot (read a)) (normalizeAnnot (read b))
-
-i ∷ String → IO ()
-i a = do
-  either putStrLn print $
-    showInfer (read a)
-
--}
 
 time ∷ IO a → IO (a, POSIXTime)
 time m = do
@@ -781,7 +361,8 @@ reportTime m = do
 tests, inferTests ∷ IO ()
 
 inferTests = tests
-tests      = reportTime $ do
+tests | debug     = fail "Don't run tests when debug == True"
+      | otherwise = reportTime $ do
   syntaxTests
   T.runTestTT inferFnTests
   return ()
@@ -833,6 +414,7 @@ inferFnTests = T.test
     \  Pair f g"
       -: "Pair (F → B) (G → B)"
   -- Occurs check
+  , te "let rec x = C x in x"
   , te "λf. f f"
   , te "let rec f = λ(C x).f (C (f x)) in f"
   -- Subtyping
@@ -1008,7 +590,7 @@ inferFnTests = T.test
   , "λx. match x with `A y → y | `A y → M y"
       -: "∀ α. [ A: M α | A: α ] → M α"
   , "λx. match x with `A y → y | `B y → y | _ → botU"
-      -: "∀ α r. [ A: α | B: α | r ] → α"
+      -: "∀ α, r:A. [ A: α | B: α | r ] → α"
   , "λx. match x with `A y → `B y | `B y → `A y | y → #A (#B y)"
       -: "∀ α β r. [ A: α | B: β | r ] → [ A: β | B: α | r]"
   , "λx. match x with `A y → `B y | `B y → `A y | y → #B (#A y)"
@@ -1034,10 +616,12 @@ inferFnTests = T.test
   , "let rec x = #B (`A x) in x"
       -: "∀β γ: U. μα. [ A: α | B: β | γ ]"
   , "λx. choose x (`A x)"
-      -: "∀γ: U. (μα. [ A: α | γ ]) → μα. [ A: α | γ ]"
+      -: "∀γ: R. (μα. [ A: α | γ ]) → μα. [ A: α | γ ]"
   , "λx. choose x (#B (`A x))"
-      -: "∀β γ: U. (μα. [ A: α | B: β | γ ]) → \
+      -: "∀β γ: R. (μα. [ A: α | B: β | γ ]) → \
          \         μα. [ A: α | B: β | γ ]"
+  , "let rec f = λz x. match x with `A x' -> f z x' | _ -> z in f"
+      -: "∀ α, β:A. α → (μγ. [ A: γ | β]) -α> α"
   , "let rec foldr = λf z xs.                   \
     \  match xs with                            \
     \  | `Cons (x, xs') → f x (foldr f z xs')   \
@@ -1412,7 +996,7 @@ inferFnTests = T.test
   -}
   ]
   where
-  a -: b = case readsPrec 0 a of
+  a -: b = limit a $ case readsPrec 0 a of
     [(e,[])] →
       let expect = standardize (read b)
           typing = showInfer e in
@@ -1422,8 +1006,13 @@ inferFnTests = T.test
            Left _       → False
            Right (τ, _) → τ == elimEmptyF expect)
     _  → T.assertBool ("Syntax error: " ++ a) False
-  te a   = T.assertBool ("¬⊢ " ++ a)
+  te a   = limit a $ T.assertBool ("¬⊢ " ++ a)
              (either (const True) (const False) (showInfer (read a)))
   pe a   = T.assertBool ("expected syntax error: " ++ a)
              (length (reads a ∷ [(Term Empty, String)]) /= 1)
+  limit a m = do
+    result ← timeout 1000000 m
+    case result of
+      Just () → return ()
+      Nothing → T.assertBool ("Timeout: " ++ a) False
 

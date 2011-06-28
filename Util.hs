@@ -1,50 +1,69 @@
 {-# LANGUAGE
       BangPatterns,
+      NoImplicitPrelude,
       TypeOperators,
       UnicodeSyntax
   #-}
 module Util (
-  module Perhaps,
-  module TupleClass,
   module Control.Arrow,
   module Control.Applicative,
   module Control.Monad,
-  module Data.List,
-  module Data.Monoid,
+  module Control.Monad.Error,
+  module Control.Monad.Identity,
+  module Control.Monad.List,
+  module Control.Monad.RWS,
+  module Control.Monad.Reader,
+  module Control.Monad.State,
+  module Control.Monad.Trans,
+  module Control.Monad.Writer,
+  module Data.Foldable,
   module Data.Maybe,
-  -- module Data.Foldable,
-  -- module Data.Traversable,
-  findLastIndex, listNth,
-  allM, whenM, unlessM, foldr2, ordNub, concatMapM, mconcatMapM, foldM1,
-  before,
+  module Data.Monoid,
+  module Data.Traversable,
+  module Perhaps,
+  module Prelude,
+  -- * Extra list operations
+  findLastIndex, listNth, ordNub,
+  -- * Extra 'Traversable' operations
+  mapHead, mapTail, mapInit, mapLast, foldr2,
+  -- * An 'Either' operation
   unEither,
+  -- * Monadic operations
+  allA, anyA, whenM, unlessM, concatMapM, foldM1,
+  before,
+  -- * Composition combinators
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
   (<$.>), (<$$.>), (<$$$.>), (<$$$$.>),
   (<->), (<-->), (<--->), (<---->), (<----->),
-  mapHead, mapTail, mapInit, mapLast,
 ) where
 
-{-
 import Prelude hiding ( (=<<), Functor(..), Maybe(..), Monad(..), all,
                         and, any, concat, concatMap, elem, foldl, foldl1,
                         foldr, foldr1, mapM, mapM_, maximum, maybe,
                         minimum, notElem, or, product, sequence, sequence_,
                         sum )
--}
-
-import Perhaps
-import TupleClass
 
 import Control.Arrow
 import Control.Applicative
-import Control.Monad 
-  {- hiding ( forM, forM_, mapM, mapM_, msum,
-              sequence, sequence_ ) -}
-import Data.List (foldl')
-import Data.Monoid
+import Control.Monad hiding ( forM, forM_, mapM_, mapM, msum,
+                              sequence, sequence_ )
+
+import Control.Monad.Error    ( MonadError(..), ErrorT(..) )
+import Control.Monad.Identity ( Identity(..) )
+import Control.Monad.List     ( ListT(..) )
+import Control.Monad.RWS      ( RWST(..), evalRWST )
+import Control.Monad.Reader   ( MonadReader(..), ReaderT(..) )
+import Control.Monad.State    ( MonadState(..), StateT(..), evalStateT,
+                                evalState, gets, modify )
+import Control.Monad.Trans    ( MonadTrans(..), MonadIO(..) )
+import Control.Monad.Writer   ( MonadWriter(..), WriterT(..), execWriter )
+
 import Data.Maybe
--- import Data.Foldable
--- import Data.Traversable
+import Data.Monoid
+import Data.Foldable
+import Data.Traversable
+
+import Perhaps
 
 import qualified Data.Set as Set
 
@@ -56,8 +75,11 @@ findLastIndex pred = loop 0 Nothing where
 listNth ∷ Int → [a] → Maybe a
 listNth i = foldr (const . Just) Nothing . drop i
 
-allM ∷ Monad m ⇒ (a → m Bool) → [a] → m Bool
-allM pred xs = mapM pred xs >>= return . all id
+allA ∷ (Applicative f, Traversable t) ⇒ (a → f Bool) → t a → f Bool
+allA pred xs = all id <$> traverse pred xs
+
+anyA ∷ (Applicative f, Traversable t) ⇒ (a → f Bool) → t a → f Bool
+anyA pred xs = any id <$> traverse pred xs
 
 whenM ∷ Monad m ⇒ m Bool → m () → m ()
 whenM test branch = test >>= flip when branch
@@ -65,8 +87,9 @@ whenM test branch = test >>= flip when branch
 unlessM ∷ Monad m ⇒ m Bool → m () → m ()
 unlessM test branch = test >>= flip unless branch
 
-foldr2 ∷ (a → b → c → c) → c → [a] → [b] → c
-foldr2 f z xs ys = foldr (uncurry f) z (zip xs ys)
+foldr2 ∷ (Foldable t1, Foldable t2) ⇒
+         (a → b → c → c) → c → t1 a → t2 b → c
+foldr2 f z xs ys = foldr (uncurry f) z (zip (toList xs) (toList ys))
 
 -- | Like nub, but O(n log n) instead of O(n^2)
 ordNub ∷ Ord a ⇒ [a] → [a]
@@ -76,15 +99,13 @@ ordNub = loop Set.empty where
     | otherwise           = x : loop (Set.insert x seen) xs
   loop _    []     = []
 
-concatMapM   ∷ Monad m ⇒ (a → m [b]) → [a] → m [b]
-concatMapM f = foldr (liftM2 (++) . f) (return [])
+concatMapM   ∷ (Foldable t, Monad m, Monoid b) ⇒ (a → m b) → t a → m b
+concatMapM f = foldr (liftM2 mappend . f) (return mempty)
 
-mconcatMapM   ∷ (Monad m, Monoid b) ⇒ (a → m b) → [a] → m b
-mconcatMapM f = foldr (liftM2 mappend . f) (return mempty)
-
-foldM1       ∷ Monad m ⇒ (a → a → m a) → [a] → m a
-foldM1 _ []     = fail "foldM1: empty"
-foldM1 f (x:xs) = foldM f x xs
+foldM1          ∷ (Foldable t, Monad m) ⇒ (a → a → m a) → t a → m a
+foldM1 f xs0    = loop (toList xs0) where
+  loop []     = fail "foldM1: empty"
+  loop (x:xs) = foldM f x xs
 
 before ∷ Monad m ⇒ m a → (a → m b) → m a
 before m k = do
@@ -168,19 +189,21 @@ f <-----> x = (<----> x) <$> f
 
 infixl 4 <->, <-->, <--->, <---->, <----->
 
-mapHead, mapTail, mapInit, mapLast ∷ (a → a) → [a] → [a]
+mapHead, mapTail, mapInit, mapLast ∷ Traversable t ⇒ (a → a) → t a → t a
 
-mapHead _ []     = []
-mapHead f (x:xs) = f x : xs
+mapHead f = snd . mapAccumL each True where
+  each True x = (False, f x)
+  each _    x = (False, x)
 
-mapTail _ []     = []
-mapTail f (x:xs) = x : map f xs
+mapTail f = snd . mapAccumL each True where
+  each True x = (False, x)
+  each _    x = (False, f x)
 
-mapInit _ []     = []
-mapInit _ [x]    = [x]
-mapInit f (x:xs) = f x : mapInit f xs
+mapInit f = snd . mapAccumR each True where
+  each True x = (False, x)
+  each _    x = (False, f x)
 
-mapLast _ []     = []
-mapLast f [x]    = [f x]
-mapLast f (x:xs) = x : mapLast f xs
+mapLast f = snd . mapAccumR each True where
+  each True x = (False, f x)
+  each _    x = (False, x)
 

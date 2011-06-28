@@ -39,6 +39,8 @@ import GHC.Conc (unsafeIOToSTM)
 
 import Defaultable
 import Eq1
+import qualified NodeMap as NM
+import qualified Graph as Gr
 
 -- | A class for monads with mutable references. Provides generic
 --   operations for creating, reading, writing, and modifying
@@ -233,6 +235,15 @@ instance (Monoid w, MonadRef p m) ⇒ MonadRef p (WriterT w m) where
   unsafeIOToRef    = lift . unsafeIOToRef
   maybeUnsafePerformRef = withUnsafePerformRef (\next →
     next . liftM fst . runWriterT)
+
+instance (Ord a, Gr.DynGraph g, MonadRef p m) ⇒
+         MonadRef p (NM.NodeMapT a b g m) where
+  newRef a     = lift $ newRef a
+  readRef r    = lift $ readRef r
+  writeRef r a = lift $ writeRef r a
+  unsafeIOToRef    = lift . unsafeIOToRef
+  maybeUnsafePerformRef = withUnsafePerformRef (\next →
+    next . liftM fst . NM.runNodeMapT NM.new Gr.empty)
 
 ---
 --- Unsafe reading of references
