@@ -92,7 +92,7 @@ inferTm γ e = do
 infer ∷ MonadC tv r m ⇒
         [Flavor] → Δ tv → Γ tv → Term Empty → Maybe (Type tv) → m (Type tv)
 infer φ0 δ γ e0 mσ = do
-  trace ("infer", φ0, δ, e0, mσ)
+  trace ("infer", φ0, δ, cleanΓ γ, e0, mσ)
   φ ← maybe return prenexFlavors mσ φ0
   case e0 of
     AbsTm π e                     → do
@@ -122,15 +122,13 @@ infer φ0 δ γ e0 mσ = do
             unless (syntacticValue ei) $
               fail $ "In let rec, binding for ‘" ++ ni ++
                      "’ not a syntactic value"
-            σi ← infer [Universal, Existential] δ γ' ei Nothing
-            αi =: σi
+            σi ← infer [] δ γ' ei Nothing
+            σi =: αi
             αi ⊏: U
         | (ni, ei) ← bs
         | αi       ← αs ]
-      {-
-      -- τs'              ← generalizeList True (rankΓ γ) αs
-      -}
-      γ'               ← γ &+&! ns &:& αs
+      σs               ← generalizeList True (rankΓ γ) αs
+      γ'               ← γ &+&! ns &:& σs
       infer φ δ γ' e2 mσ
     VarTm n                       → maybeInst e0 φ =<< γ &.& n
     ConTm n es                    → do
@@ -147,7 +145,9 @@ infer φ0 δ γ e0 mσ = do
       let (e, es) = unfoldApp e0
       σ1               ← infer [] δ γ e Nothing
       σ                ← inferApp δ γ σ1 es
-      maybeInstGen e0 φ γ σ
+      α                ← newTVTy
+      σ <: α
+      maybeInstGen e0 φ γ α
     AnnTm e annot                 → do
       (δ', σ, _)       ← instAnnot δ annot
       σ'               ← infer [] δ' γ e (Just σ)
@@ -187,7 +187,7 @@ maybeInstGen e φ γ = maybeInst e φ >=> maybeGen e φ γ
 genFlavors ∷ MonadC tv r m ⇒
              Bool → [Flavor] → Γ tv → Type tv → m (Type tv)
 genFlavors value φ γ σ = do
-  trace ("genFlavors", value, φ, σ)
+  trace ("genFlavors", value, φ, cleanΓ γ, σ)
   σ ← substRoot σ
   σ ← if Existential `elem` φ
         then do
@@ -310,6 +310,8 @@ funmatchN n0 σ = do
       β2 ← newTVTy
       σ' =: arrTy β1 (qvarexp (FreeVar qe)) β2
       return ([β1], β2)
+    RecTy _ σ1 →
+      funmatchN n0 (openTy 0 [σ'] σ1)
     _ → fail ("Expected function type, but got ‘" ++ show σ' ++ "’")
   where
     unroll n (ConTy "->" [σ1, _, σ']) | n > 0 = do
@@ -327,11 +329,13 @@ inferPatt ∷ MonadC tv r m ⇒
             Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
             m (Δ tv, Type tv, [Type tv], [Type tv])
 inferPatt δ0 π0 mτ0 occs = do
+  trace ("inferPatt {", δ0, π0, mτ0, occs)
   (σ, δ, (σs, αs)) ← runRWST (loop π0 mτ0) () δ0
   zipWithM_ (⊏:) σs occs
   σ ⊏: bigJoin (take (length σs) occs)
   when (pattHasWild π0) (σ ⊏: A)
   αs' ← filterM isMonoType αs
+  trace ("} inferPatt", δ, σ, σs, αs')
   return (δ, σ, σs, αs')
   where
   bind τ      = do tell ([τ], []); return τ
@@ -714,13 +718,15 @@ inferFnTests = T.test
   , "λ(x:α) (y:β). eat (P x y) ((cast B: (B -α> B) → B) (cast B: B -α β> B))"
       -: "∀α, β:U. α → β -α> B"
   --
-  , "let rec f = λg x. let _ = f ((λC.C) : C -R> C) in g x in f"
+  , "let rec f = λg x. let C = f ((λC.C) : C -R> C) C in g x in f"
       -: "∀α. (C -R α> C) → (C -R α> C)"
   --
-  , "λ(Ref A x). x"
-      -: "∀α. Ref A α → α"
-  , "λ(Ref L x). x"
-      -: "∀α. Ref L α → α"
+  , "λ(x : Ref U α). x"
+      -: "∀α. Ref U α → Ref U α"
+  , "λ(x : Ref A α). x"
+      -: "∀α. Ref A α → Ref A α"
+  , "λ(x : Ref L α). x"
+      -: "∀α. Ref L α → Ref L α"
   , "λ(r: Ref L α). r"
       -: "∀α. Ref L α → Ref L α"
   , "λ(f: Ref L α → α) (x: Ref L α). f x"

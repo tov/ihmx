@@ -922,6 +922,9 @@ termFv e0 = case e0 of
 γ0 ∷ [(Name, Type a)]
 γ0 = second (elimEmptyF . read) <$> γ0'
 
+unγ0 ∷ Map.Map Name a → Map.Map Name a
+unγ0 = (Map.\\ γmap) where γmap = Map.fromList γ0'
+
 ---
 --- Locally nameless operations
 ---

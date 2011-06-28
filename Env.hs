@@ -8,7 +8,7 @@
       #-}
 module Env (
   Δ,
-  Γ, rankΓ, emptyΓ, bumpΓ, MakeEnvMap(..), (&+&), (&.&)
+  Γ, rankΓ, emptyΓ, bumpΓ, cleanΓ, MakeEnvMap(..), (&+&), (&.&)
 ) where
 
 import Util
@@ -28,6 +28,9 @@ data Γ tv
 
 emptyΓ ∷ Γ tv
 emptyΓ = Γ Rank.zero M.empty
+
+cleanΓ ∷ Γ tv → Γ tv
+cleanΓ γ = γ { mapΓ = unγ0 (mapΓ γ) }
 
 infix  3 &:&
 infixl 2 &+&
