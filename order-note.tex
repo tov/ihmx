@@ -1,0 +1,516 @@
+\documentclass[11pt]{article}
+
+\usepackage{fixltx2e}
+\usepackage{type1cm}
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
+\usepackage{mathpartir}
+\usepackage{unicode-math}
+
+\newtheorem{thm}{Theorem}
+\newtheorem{defn}[thm]{Definition}
+\newtheorem{cor}[thm]{Corollary}
+
+\setlength{\parindent}{0cm}
+\setlength{\parskip}{0.5em}
+
+\defaultfontfeatures{
+  Mapping=tex-text,
+  Scale=MatchLowercase,
+}
+
+\setmathfont{Asana-Math.otf}
+\setmainfont{Palatino}
+
+\def\conj{\wedge}
+\def\Conj{\mathop{{\textstyle\bigwedge}}}
+
+\newcommand\refni[2]{\infer{#2}{#1}}
+\newcommand\fv{\mathop{\mathrm{fv}}}
+\newcommand\dom{\mathop{\mathrm{dom}}}
+
+\newcommand\infercom[5]{
+  \begin{array}{r@{}c@{}l}
+    #2&{}#1{}&#3 \\
+    \shortparallel\;&&\;\shortparallel\\
+    #4&{}#1{}&#5
+  \end{array}
+}
+\newcommand\refnicom[5]{\infercom{#1}{#4}{#5}{#2}{#3}}
+
+\title{An Interesting Order-Theoretic Situation}
+
+\begin{document}
+
+\maketitle
+
+\section*{The Setup}
+
+Let there be:
+\begin{itemize}
+  \item a poset $(T, ≤)$,
+  \item a lattice $(Q, ⊑)$, and
+  \item a set map $f\colon T → Q$.
+\end{itemize}
+
+We also want these additional properties:
+\begin{itemize}
+\item
+Let $\sim$ be the smallest equivalence relation containing $≤$,
+and let $S = T/{\sim}$. For each $t ∈ T$,
+we call $[t] = \{ t' ∈ T \mathrel\vert t' \sim t \}$ the \textbf{shape} of $t$.
+
+\emph{We require that each shape $([t], ≤)$ be a lattice.}
+(I don't know a name for this property, but it's like an extra strong
+form of coherence or Dedekind completeness.)
+
+Furthermore, we require that each lattice $[t]$ be \emph{modular}:
+for all $t₁, t₂, t₃ ∈ [t]$,
+if $t₁ ≤ t₃$ then $t₁ ⊔ (t₂ ⊓ t₃) = (t₁ ⊔ t₂) ⊓ t₃$.
+
+\item 
+  The map $f$ is \emph{not necessarily} monotone, but when
+  restricted to any shape $[t] ∈ S$, then
+  $f|_{[t]}\colon [t] → Q$ is either monotone or antitone.
+\end{itemize}
+
+\section*{A Constraint Language}
+
+What I want to do with these posets is constraint solving, where
+constraints have the following form,
+\[
+\begin{array}{rcl}
+    C & \mathop{::=} & ⊤ \\
+      & | & C₁ ⋀ C₂      \\
+      & | & x₁ ≤ x₂      \\
+      & | & q₁ ⊑ q₂      \\
+      & | & ∃ x.\, C     \\
+\end{array}
+\]
+where $q ∈ Q$ and
+variables $x$ stand for elements of $T$.
+(Constraints never involve \emph{concrete} elements of $T$.)
+Note that while existential quantification can always be pulled to the
+front, leaving them in constraints lets us operate on a portion of a
+constraint while knowing that some variables don't appear elsewhere.
+
+The meaning of constraints is given by a relation
+$ρ ⊢ C$, where $ρ$ is a partial map associating
+variables $x$ with elements of $t ∈ T$, defined inductively:
+\begin{mathpar}
+  \infer
+  { }
+  {ρ ⊢ ⊤}
+  \and
+  \infer
+  {ρ ⊢ C₁ \\ ρ ⊢ C₂}
+  {ρ ⊢ C₁ \mathbin{\textstyle ⋀} C₂}
+  \and
+  \infer
+  {ρ(x₁) ≤ ρ(x₂)}
+  {ρ ⊢ x₁ ≤ x₂}
+  \and
+  \infer
+  {\hat ρ(q₁) ⊑ \hat ρ(q₂)}
+  {ρ ⊢ q₁ ⊑ q₂}
+  \text{ (where $\hat ρ(f(x)) = f(ρ(x))$}
+  \and
+  \infer
+  {ρ[x ↦ t] ⊢ C}
+  {ρ ⊢ ∃x.\, C}
+\end{mathpar}
+If $ρ ⊢ C$ we say that $ρ$ \emph{satisfies} $C$.
+Let $⊢ C$ mean that $ρ ⊢ C$ for all $ρ$ such that
+$\fv(C) ⊆ \dom ρ$.
+
+Constraint solving (or simplification) is specified by a rewrite system
+that operates on constraints as a congruence.  A rewrite step $C₁
+\longmapsto C₂$ is sound if $⊢ C₂$ implies $⊢ C₁$.
+(We are also concerned with principality, which will mean that the
+we want implication to be in both directions, but I'm only concerned
+with soundness here.)
+
+The kind of simplification I'm concerned with in this note
+is existential elimination.
+To show that an existential elimination step
+of the form $(∃y.\, C) \longmapsto C'$ is sound, we show that for all $ρ$
+such that $ρ ⊢ C'$, we can find a $t_y ∈ T$ such that
+$ρ[y↦t_y] ⊢ C$.
+
+Here is a simple rule for eliminating existentials:
+\begin{equation}
+   (∃y.\, x ≤ y \conj y ≤ z)
+   ⟼
+   x ≤ z
+\end{equation}
+\begin{proof}
+Given a $ρ$ that satisfies $x ≤ z$, let $t_y = ρ(x)$.
+We know that $ρ(x) ≤ ρ(y)$.
+Then
+\[
+  \infer
+  {
+    \infer
+    {
+      ρ(x) ≤ ρ(x)
+    }
+    {ρ[y↦ρ(x)] ⊢ x ≤ y}
+    \\
+    \infer
+    {
+      ρ(x) ≤ ρ(z)
+    }
+    {ρ[y↦ρ(x)] ⊢ y ≤ z}
+  }
+  {
+    ρ[y↦ρ(x)] ⊢ x ≤ y \conj y ≤ z
+  }
+.
+\qedhere
+\]
+\end{proof}
+
+
+Now, here is a more general version of the previous rule:
+\begin{equation}
+  {∃y.\,
+    \big(\Conj_{i ∈ \{0,…,m\}} xᵢ ≤ y\big)
+    \conj
+    \big(\Conj_{j ∈ \{0,…,n\}} y ≤ z_j\big)
+   ⟼
+   \Conj_{i ∈ \{0,…,m\}}\Conj_{j ∈ \{0,…,n\}}
+    xᵢ ≤ z_j}
+\end{equation}
+\begin{proof}
+This is justified by the Riesz Interpolation Property.
+Given a satisfying $ρ$, we know that $ρ(xᵢ) ≤
+ρ(z_j)$ for all $i$ and $j$.  That means that all they all have the same
+shape: for all $i$ and $j$, $[ρ(xᵢ)] = [ρ(z_j)]$.
+By the partitioning property of $T$, this is a lattice, so it has finite
+joins.  Then let $t_y = \bigsqcup ᵢ ρ(xᵢ)$.
+Since each $ρ(z_j)$ is an upper bound for all of the $ρ(xᵢ)$, and $t_y$
+is their least upper bound, $t_y$ less than each $ρ(z_j)$.
+\end{proof}
+
+\section*{The Problem}
+
+So far so good.  When simplifying constraints, the first goal is to get
+rid of $≤$ constraints, while not worrying about getting rid of $⊑$
+constraints just yet. So consider a constraint of the following form:
+\begin{equation}
+  ∃y.\, x ≤ y \conj y ≤ z \conj C
+\end{equation}
+where $C$ contains no $≤$ constraints.
+We'd like to remove $y$ as before,
+but we can't because $C$ may contain some $⊑$ constraints on
+$f(y)$. For example, consider this constraint
+\begin{equation}
+    \label{eqn:hard}
+    ∃y.\, x ≤ y \conj y ≤ z \conj q₁ ⊑ f(y) \conj f(y) ⊑ q₂,
+\end{equation}
+where $y ∉ \fv(q₁, q₂)$.  We can't change this to
+\begin{equation}
+   x ≤ z \conj ∃y.\, q₁ ⊑ f(y) \conj f(y) ⊑ q₂
+   \label{eqn:hard:wrong}
+\end{equation}
+because the eventual choice for $y$ satisfying $f(y) ⊑ q$ and $q ⊑ f(y)$
+might not be between $x$ and $z$. In fact, there's no way we can reduce
+the number of $≤$ constraints even by adding $⊑$ constraints in this
+case, because we don't know enough about $f$.
+
+\section*{An Idea}
+
+One potential solution is to strengthen the properties of $f$:
+\begin{quote}
+  For each shape (equivalence class) $[t]$ of $T$,
+  \begin{itemize}
+  \item[(A)]
+    the restriction $f|_{[t]}\colon [t] → Q$ is continuous%
+    \footnote{This property means that $f$ is continuous, but we might
+    want to relax this a bit below.}, and
+  \item[(B)]
+    the image $f([t])$ is \emph{either} a single point in $Q$ or all of $Q$.
+  \end{itemize}
+\end{quote}
+
+We will need the following theorem about modular lattices:
+\begin{thm}[Intermediate Value\footnote{%
+  \label{thm:ivt}
+  How is this related to the Intermediate Value Theorem for
+  continuous functions in analysis? Their form is very similar.}]
+  Let $(A, ⊔, ⊓)$ be a modular lattice,
+  $(B, ⊔, ⊓)$ be a lattice,
+  and $g\colon A → B$ be surjective and continuous.
+  Then for all $a₁, a₂ ∈ A$ such that $a₁ ⊑ a₂$,
+  and for all $b ∈ B$ such that $g(a₁) ⊑ b ⊑ g(a₂)$,
+  there exists some $a' ∈ A$ such that
+  $g(a') = b$ and $a₁ ⊑ a' ⊑ a₂$.
+\end{thm}
+
+\begin{proof}
+Because $g$ is surjective, we can
+can pull back $b$ to its preimage $g^{-1}(b) \in A$.
+Let $a' = a₁ ⊔ (a_b ⊓ a₂)$, where $a_b$ is any element of
+$g^{-1}(b)$.
+Then:
+\begin{align*}
+g(a')
+  & = g(a₁ ⊔ (a_b ⊓ a₂))
+      && \text{definition of $a'$} \\
+  & = g(a₁) ⊔ (g(a_b) ⊓ g(a₂))
+      && \text{continuity of $g$}\\
+  & = g(a₁) ⊔ (b ⊓ g(a₂))
+      && \text{$a_b ∈ g^{-1}(b)$} \\
+  & = g(a₁) ⊔ b
+      && \text{$b ⊑ g(a₂)$}\\
+  & = b
+      && \text{$g(a₁) ⊑ b$.}
+\end{align*}
+
+Because $a' = a₁ ⊔ (a_b ⊓ a₂)$, clearly $a₁ ≤ a'$.
+By modularity of $A$, and because $a₁ ≤ a₂$, we know that
+$a₁ ⊔ (a_b ⊓ a₂) = (a₁ ⊔ a_b) ⊓ a₂$, and
+$(a₁ ⊔ a_b) ⊓ a₂ ≤ a₂$.  Thus, we have that $a₁ ≤ a' ≤ a₂$.
+\end{proof}
+
+A corollary will help us apply this theorem to the situation at hand:
+\begin{cor}
+  \label{cor:ivt}
+If $t₁ ≤ t₂$, then for all
+$q$ such that $f(t₁) ⊑ q ⊑ f(t₂)$,
+there exists some $t'$ such that $f(t') = q$ and $t₁ ≤ t' ≤ t₂$.
+\end{cor}
+
+\begin{proof}
+Since $t₁ ≤ t₂$, we know that
+$t₁$ and $t₂$ are in the same shape $[t₁]$, which is a
+modular lattice.
+According to the properties specified for $f$, the image $f([t])$ is
+either a single point or all of $Q$.
+If the image $f([t₁])$ is a single point,
+then $f(t₁) = q = f(t₂)$, so let $t' = t₁$.
+Otherwise, $f|_{[t₁]}\colon [t] → Q$ is continuous and surjective, so
+Theorem~\ref{thm:ivt}.
+\end{proof}
+
+Now we can formulate a rule for rewriting the constraint in
+\eqref{eqn:hard}:
+\begin{multline}
+  ∃y.\, x ≤ y \conj y ≤ z \conj q₁ ⊑ f(y) \conj f(y) ⊑ q₂
+  \hfill
+  \\
+  ⟼
+  \\
+  x ≤ z \conj ∃y'.\,
+    f(x) ⊑ f(y') \conj f(y') ⊑ f(z) \conj q₁ ⊑ f(y') \conj f(y') ⊑ q₂
+  \label{rule:good}
+\end{multline}
+
+\begin{proof}
+If $ρ$ satisfies the result of the rule, then
+we know that $ρ(x) ≤ ρ(y)$, and furthermore, there must be
+some $t_{y'}$ such that
+{
+\small
+\[
+\refni
+{
+  \refni
+  {
+    \refni
+    {
+      \refnicom{⊑}
+      {f(ρ(x))} {f(t_{y'})}
+      {f(ρ'(x))} {f(ρ'(y'))}
+    }
+    {
+      ρ' ⊢ f(x) ⊑ f(y')
+    }\;
+    \refni
+    {
+      \refnicom{⊑}
+      {f(t_{y'})} {f(ρ(z))}
+      {f(ρ'(y'))} {f(ρ'(z))}
+    }
+    {
+      ρ' ⊢ f(y') ⊑ f(z)
+    }\;
+    \refni
+    {
+      \refnicom{⊑}
+      {\hat{ρ}(q₁)} {f(t_{y'})}
+      {\hat{ρ'}(q₁)} {f(ρ'(y'))}
+    }
+    {
+      ρ' ⊢ q₁ ⊑ f(y')
+    }\;
+    \refni
+    {
+      \refnicom{⊑}
+      {f(t_{y'})} {\hat{ρ}(q₂)}
+      {f(ρ'(y'))} {\hat{ρ'}(q₂)}
+    }
+    {
+      ρ' ⊢ f(y') ⊑ q₂
+    }
+  }
+  {
+    ρ' ⊢ f(x) ⊑ f(y') \conj
+      f(y') ⊑ f(z) \conj
+      q₁ ⊑ f(y') \conj
+      f(y') ⊑ q₂
+  }
+}
+{
+  ρ ⊢ ∃y'.\,
+    f(x) ⊑ f(y') \conj f(y') ⊑ f(z) \conj q₁ ⊑ f(y') \conj f(y') ⊑ q₂
+},
+\]%
+}%
+where $ρ' = ρ[y'↦t_{y'}]$.
+We assume that the rule respects scope, which means that
+$y, y' ∉ \fv(x, z, q₁, q₂)$.
+Thus we know that $ρ[y'→t](x) = ρ[y↦t](x)$ for any $t$,
+and likewise for $z$, $q₁$, and $q₂$.
+
+Since
+$ρ(x) ≤ ρ(z)$
+and
+$f(ρ(x)) ⊑ f(t_{y'}) ⊑ f(ρ(z))$, we can apply
+Corollary~\ref{cor:ivt} with $t₁ = ρ(x)$, $t₂ = ρ(z)$, and $q =
+f(t_{y'})$; then there is some $t_y$ such that
+such that $f(t_y) = f(t_{y'})$ and $ρ(x) ≤ t_y ≤ ρ(y)$.
+Let $ρ'' = ρ[y↦t_y]$.
+Note that $ρ''(x) = ρ(x)$, $ρ''(y) = ρ(y)$,
+$\hat{ρ''}(q₁) = \hat ρ(q₁)$, and
+$\hat{ρ''}(q₂) = \hat ρ(q₂)$ by our freshness assumptions.
+Then,
+{\small
+\[
+\infer
+{
+  \infer
+  {
+    \infercom{≤}
+      {ρ(x)} {t_y}
+      {ρ''(x)} {ρ''(y)}
+  }
+  {
+    ρ'' ⊢ x ≤ y
+  }
+  \quad
+  \infer
+  {
+    \infercom{≤}
+      {t_y} {ρ(z)}
+      {ρ''(y)} {ρ''(z)}
+  }
+  {
+    ρ'' ⊢ y ≤ z
+  }
+  \quad
+  \infer
+  {
+    \infercom{⊑}
+      {\hat ρ(q₁)} {f(t_{y'})}
+      {\hat{ρ''}(q₁)} {f(ρ''(y))}
+  }
+  {
+    ρ'' ⊢ q₁ ⊑ f(y)
+  }
+  \quad
+  \infer
+  {
+    \infercom{⊑}
+      {f(t_{y'})} {\hat ρ(q₂)}
+      {f(ρ''(y))} {\hat{ρ''}(q₂)}
+  }
+  {
+    ρ'' ⊢ f(y) ⊑ q₂
+  }
+}
+{
+  ρ'' ⊢ x ≤ y \conj y ≤ z \conj q₁ ⊑ f(y) \conj f(y) ⊑ q₂
+}
+.
+\]
+}
+\end{proof}
+
+The rule should generalize, with a simple proof by induction on $i$ and
+$j$:
+\begin{multline}
+  ∃y.\,
+    \big(\Conj_{i } xᵢ ≤ y\big)
+    \conj
+    \big(\Conj_{j } y ≤ z_j\big)
+    \conj C
+    \\
+    \text{(when $C$ contains no $≤$ constraints)}
+    \\
+   ⟼
+    \\
+   \big(\Conj_{i }\Conj_{j }
+          xᵢ ≤ z_j\big)
+   \conj
+  ∃y.\,
+    \big(\Conj_{i } f(xᵢ) ⊑ f(y)\big)
+    \conj
+    \big(\Conj_{j } f(y) ⊑ f(z_j)\big)
+    \conj
+    C
+\end{multline}
+
+\section*{Discussion}
+
+In the application at hand,
+$(T, ≤)$ is a subtyping order for types, and
+$(Q, ⊑)$ is a subsumption order for a property of types, namely,
+substructural qualifiers.  The map $f$ is a judgment assigning
+qualifiers $q$ to types $t$.  The constraints are produced by type
+inference, which reduces subtyping on types to a set of subtyping
+constraints on type variables and some subqualifier constraints on
+qualifiers.
+
+The condition on $T$---in particular, that it partition to a family of
+modular lattices---is reasonable in the context of atomic structural
+subtyping.  In such a setting, types are related only if they differ at
+some leaves (atoms), which means that each shape represents a set of
+types with the same tree structure but different leaves.  Modularity
+means that we can factor the potential variance in a shape into a
+product of the variances of the leaves.
+
+The original condition on $f$ is also reasonable: it means that for any
+shape lattice of types, the qualifier property varies either with
+subtyping or against it.  Where $f$ is monotone, this corresponds to a
+setting of linear or affine types, where the restrictions on a value may
+be strengthened by dereliction.  Antitonicity of $f$ gives uniqueness
+types, where subsuming a unique type to a non-unique type
+\emph{increases} what we may do with it.  When $f$ is constant on each
+shape, we have Wadler's ``steadfast types.'' Allowing $f$ to be monotone
+on some shapes and antitone on others is the current state of my type
+system, but the flexibility impedes type inference.
+
+The solution to our problem was two conditions: (A) $f$ is continuous,
+and therefore monotone, precluding uniqueness types; (B) that for each
+shape, $f$ is trivial or onto, which amounts to saying that for any type
+shape that can take on multiple qualifiers, that shape can take on
+\emph{any} qualifier. The latter seems reasonable, but the former may
+unnecessarily preclude expressiveness by forbidding uniquness types.  As
+far as I know, this isn't necessary for type system soundness overall
+(though anti-monotonicity does make type soundness harder to state and
+prove), but it seems to be extremely helpful for constraint solving.
+Dually, we could have made $f$ continuous to the dual of $Q$ ($f(t ⊔ t')
+= f(t) ⊓ f(t')$), which gives us only uniqueness types, but not
+linearity.  Is there a way to get both?
+
+Suppose we relax the restriction that $f$ be continuous on each shape,
+and instead require that for each shape $f$ be either continuous or
+anti-continuous, as in the original condition.  Then we can still use
+rule \eqref{rule:good} when the type variables at hand live in a
+monotone (linear/affine) shape (and they all live in the same shape,
+because they are related). For antitone (uniqueness) shapes, there is a
+dual rule that flips the direction so that $x ≤ y$ turns into $f(y) ⊑
+f(x)$, and so one.  This should be sound if we can figure out when to
+apply which version of the rule.
+
+\end{document}
