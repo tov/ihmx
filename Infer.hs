@@ -1,5 +1,6 @@
 {-#
   LANGUAGE
+    FlexibleContexts,
     ImplicitParams,
     NoImplicitPrelude,
     ParallelListComp,
@@ -92,16 +93,17 @@ inferTm γ e = do
 infer ∷ MonadC tv r m ⇒
         [Flavor] → Δ tv → Γ tv → Term Empty → Maybe (Type tv) → m (Type tv)
 infer φ0 δ γ e0 mσ = do
-  trace ("infer {", φ0, δ, cleanΓ γ, e0, mσ)
+  traceN 1 (TraceIn ("infer", φ0, δ, γ, e0, mσ))
   φ ← maybe return prenexFlavors mσ φ0
   σ ← case e0 of
     AbsTm π e                     → do
-      [mσ1, _, mσ2]    ← splitCon mσ "->" 3
-      (δ', σ1, σs, αs) ← inferPatt δ π mσ1 (countOccsPatt π e)
+      ([mσ1,_,mσ2],αs) ← splitCon (<:) mσ "->" 3
+      (δ', σ1, σs, βs) ← inferPatt δ π mσ1 (countOccsPatt π e)
+      αs'              ← filterM isMonoType (αs++βs)
       γ'               ← γ &+&! π &:& σs
       σ2               ← infer [Existential] δ' γ' e mσ2
       qe               ← arrowQualifier γ (AbsTm π e)
-      unlessM (allA isMonoType αs) $
+      unlessM (allA isMonoType αs') $
         fail "used some unannotated parameter polymorphically"
       maybeGen e0 φ γ (arrTy σ1 qe σ2)
     LetTm π e1 e2                 → do
@@ -132,7 +134,7 @@ infer φ0 δ γ e0 mσ = do
       infer φ δ γ' e2 mσ
     VarTm n                       → maybeInst e0 φ =<< γ &.& n
     ConTm n es                    → do
-      mσs              ← splitCon mσ n (length es)
+      (mσs, _)         ← splitCon (flip (<:)) mσ n (length es)
       ρs               ← zipWithM (infer [Existential] δ γ) es mσs
       maybeGen e0 φ γ (ConTy n ρs)
     LabTm b n                     → do
@@ -153,7 +155,7 @@ infer φ0 δ γ e0 mσ = do
       σ'               ← infer [] δ' γ e (Just σ)
       σ' ≤ σ
       return σ
-  trace ("} infer", σ)
+  traceN 1 (TraceOut ("infer", σ))
   return σ
 
 -- | Determine which quantifiers may appear at the beginning of
@@ -189,7 +191,7 @@ maybeInstGen e φ γ = maybeInst e φ >=> maybeGen e φ γ
 genFlavors ∷ MonadC tv r m ⇒
              Bool → [Flavor] → Γ tv → Type tv → m (Type tv)
 genFlavors value φ γ σ = do
-  trace ("genFlavors", value, φ, cleanΓ γ, σ)
+  traceN 4 ("genFlavors", value, φ, γ, σ)
   σ ← substRoot σ
   σ ← if Existential `elem` φ
         then do
@@ -263,18 +265,18 @@ infixl 2 &+&!
 inferApp ∷ MonadC tv r m ⇒
            Δ tv → Γ tv → Type tv → [Term Empty] → m (Type tv)
 inferApp δ γ ρ e1n = do
-  trace ("inferApp", δ, cleanΓ γ, ρ, e1n)
+  traceN 2 ("inferApp", δ, γ, ρ, e1n)
   (σ1m, σ) ← funmatchN (length e1n) ρ
   withPinnedTVs ρ $
     subsumeN [ -- last arg to infer (Just σi) is for
                -- formal-to-actual propagation
                (σi, do
-                      trace ("subsumeI", i)
                       σi' ← infer [Existential] δ γ ei (Just σi)
+                      traceN 2 ("subsumeI", i, ei, σi', σi)
                       if isAnnotated ei
                         then σi' <: σi
                         else σi' ≤  σi)
-             | i  ← [0..]
+             | i  ← [0 ∷ Int ..]
              | σi ← σ1m
              | ei ← e1n ]
   if length σ1m < length e1n
@@ -323,75 +325,103 @@ funmatchN n0 σ = do
     unroll _ σ                           = return ([], σ)
 
 
--- | Given a type variable environment, a pattern, optionally an
---   expected type, and a list of how each bound variable will be used,
---   and compute an updated type variable environment, a constraint,
+-- | Given a type variable environment, a pattern, maybe a type to
+--   match, and a list of how each bound variable will be used,
+--   and compute an updated type variable environment,
 --   a type for the whole pattern, a type for each variable bound by
 --   the pattern, and a list of some-quantified type variables.
 inferPatt ∷ MonadC tv r m ⇒
             Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
             m (Δ tv, Type tv, [Type tv], [Type tv])
-inferPatt δ0 π0 mτ0 occs = do
-  trace ("inferPatt {", δ0, π0, mτ0, occs)
-  (σ, δ, (σs, αs)) ← runRWST (loop π0 mτ0) () δ0
+inferPatt δ0 π0 σ0 occs = do
+  traceN 1 (TraceIn ("inferPatt", δ0, π0, σ0, occs))
+  (σ, δ, (σs, αs)) ← runRWST (loop π0 σ0) () δ0
   zipWithM_ (⊏:) σs occs
-  σ ⊏: bigJoin (take (length σs) occs)
-  when (pattHasWild π0) (σ ⊏: A)
-  αs' ← filterM isMonoType αs
-  trace ("} inferPatt", δ, σ, σs, αs')
-  return (δ, σ, σs, αs')
+  traceN 1 (TraceOut ("inferPatt", σ, σs, δ, αs))
+  return (δ, σ, σs, αs)
   where
-  bind τ      = do tell ([τ], []); return τ
-  some α      = do tell ([], [α]); return α
   loop (VarPa _)       mσ = do
-    σ ← instM mσ
+    σ ← maybeFresh mσ 
     bind σ
+    return σ
   loop WldPa           mσ = do
-    σ ← instM mσ
+    σ ← maybeFresh mσ
     σ ⊏: A
     return σ
   loop (ConPa name πs) mσ = do
-    σ  ← instM mσ
-    αs ← mapM (const newTVTy) πs
-    mapM_ some αs
-    σ ≤ ConTy name αs
-    zipWithM_ loop πs (Just <$> αs)
-    return σ
+    (mαs, αs) ← splitCon (<:) mσ name (length πs)
+    traverse_ some αs
+    case mσ of
+      Nothing → do
+        σs ← zipWithM loop πs mαs
+        return (ConTy name σs)
+      Just σ  → do
+        σs ← zipWithM loop πs mαs
+        σ ≤ ConTy name σs
+        return σ
   loop (InjPa name π)  mσ = do
-    σ  ← instM mσ
-    α  ← instM Nothing
-    β  ← instM Nothing
-    σ ≤ RowTy name α β
-    loop π (Just α)
-    return σ
+    (mα, mβ, αs) ← splitRow (<:) mσ name
+    traverse_ some αs
+    case mσ of
+      Nothing → do
+        σ1 ← loop π mα
+        β  ← maybeFresh mβ
+        return (RowTy name σ1 β)
+      Just σ  → do
+        σ1 ← loop π mα
+        σ2 ← maybeFresh mβ
+        σ ≤ RowTy name σ1 σ2
+        return σ
   loop (AnnPa π annot) mσ = do
     δ ← get
-    (δ', σ, αs) ← instAnnot δ annot
+    (δ', σ', αs) ← instAnnot δ annot
     put δ'
     mapM_ some αs
-    σ' ← case mσ of
-      Nothing → return σ
-      Just σ' → do σ' ≤ σ; return σ'
-    loop π (Just σ)
-    return σ'
-  -- make a new unification variable if given @Nothing@
-  instM = maybe (newTVTy >>= some) return
+    case mσ of
+      Nothing → do
+        loop π (Just σ')
+        return σ'
+      Just σ  → do
+        σ ≤ σ'
+        loop π (Just σ')
+        return σ
+  --
+  bind τ      = tell ([τ], [])
+  some α      = tell ([], [α])
+  maybeFresh  = maybe fresh return
+  fresh       = newTVTy `before` some
+  --
+  mcmp _    Nothing  σ' = return σ'
+  mcmp (<*) (Just σ) σ' = do σ <* σ'; return σ
 
-(≤) ∷ MonadC tv r m ⇒ Type tv → Type tv → m ()
-σ1 ≤ σ2 = do
-  trace ("<=", σ1, σ2)
+(≤)   ∷ MonadC tv r m ⇒ Type tv → Type tv → m ()
+σ1 ≤ σ2 = do
+  traceN 2 ("≤", σ1, σ2)
+  subsumeBy (<:) σ1 σ2
+
+(≤|≥) ∷ MonadC tv r m ⇒ Type tv → Type tv → m ()
+σ1 ≤|≥ σ2 = do
+  traceN 2 ("≤|≥", σ1, σ2)
+  subsumeBy (=:) σ1 σ2
+
+subsumeBy ∷ MonadC tv r m ⇒
+            (Type tv → Type tv → m ()) → Type tv → Type tv → m ()
+subsumeBy (<*) σ1 σ2 = do
+  σ1' ← substRoot σ1
   σ2' ← substRoot σ2
-  case σ2' of
-    VarTy (FreeVar α) | tvFlavorIs Universal α → do
-      σ1' ← fst <$> instAll True σ1
-      σ1' <: σ2'
+  case (σ1', σ2') of
+    (VarTy (FreeVar α), _) | tvFlavorIs Universal α → do
+      σ1' <* σ2'
+    (_, VarTy (FreeVar α)) | tvFlavorIs Universal α → do
+      σ1' ← fst <$> instAll True σ1'
+      σ1' <* σ2'
     _ → do
+      ρ1 ← instantiate σ1'
       (ρ2, αs2) ← instantiateNeg σ2'
-      ρ1 ← instantiate σ1
-      ρ1 <: ρ2
+      ρ1 <* ρ2
       skolems ← Set.filter (tvFlavorIs Skolem) <$> ftvSet (σ1, σ2)
       when (any (`Set.member` skolems) αs2) $ do
-        trace (αs2, skolems)
+        traceN 3 (αs2, skolems)
         fail "Could not subsume: insufficiently polymorphic"
 
 -- | Given a tyvar environment (mapping some-bound names to tyvars) and
@@ -405,7 +435,7 @@ instAnnot δ (Annot names σ0) = do
   αs ← mapM eachName names
   let δ' = foldr2 insert δ names αs
       σ  = totalSubst names αs =<< σ0
-  trace ("instAnnot", δ, δ', σ, αs)
+  traceN 4 ("instAnnot", δ, δ', σ, αs)
   return (δ', σ, αs)
   where
     insert ('_':_) = const id
@@ -435,7 +465,8 @@ extractPattAnnot δ0 π0
 ---
 
 -- | Given (maybe) a type, a type constructor name, and its arity,
---   return a list of (maybe) parameter types.
+--   return a list of (maybe) parameter types.  Also returns a list of
+--   any new type variables.
 {-
 Instantiates both ∀ and ∃ to univars:
   (λx.x) : A → A          ⇒       (λ(x:A). (x:A)) : A → A
@@ -445,15 +476,51 @@ Instantiates both ∀ and ∃ to univars:
   (λx.x) : ∃α. C α → C α  ⇒       (λ(x:C β). (x:C β)) : ∃α. C α → C α
 -}
 splitCon ∷ MonadC tv r m ⇒
-           Maybe (Type tv) → Name → Int → m [Maybe (Type tv)]
-splitCon Nothing  _ arity = return (replicate arity Nothing)
-splitCon (Just σ) c arity = do
-  trace ("splitCon", σ, c, arity)
+           (Type tv → Type tv → m ()) →
+           Maybe (Type tv) → Name → Int →
+           m ([Maybe (Type tv)], [Type tv])
+splitCon _    Nothing  _ arity = return (replicate arity Nothing, [])
+splitCon (<*) (Just σ) c arity = do
+  traceN 4 ("splitCon", σ, c, arity)
   (ρ, _) ← instAllEx True False σ
-  return $ case ρ of
-    ConTy c' σs | c == c' && length σs == arity
-      → map Just σs
-    _ → replicate arity Nothing
+  case ρ of
+    ConTy c' σs       | c == c', length σs == arity
+      → return (Just <$> σs, [])
+    ConTy c' []
+      → do
+          ρ <* ConTy c []
+          return ([], [])
+    VarTy (FreeVar α) | tvFlavorIs Universal α
+      → do
+          αs ← replicateM arity newTVTy
+          ρ <* ConTy c αs
+          return (Just <$> αs, αs)
+    _ → fail $ "got " ++ show σ ++ " where " ++ c ++ " expected"
+
+splitRow ∷ MonadC tv r m ⇒
+           (Type tv → Type tv → m ()) →
+           Maybe (Type tv) → Name →
+           m (Maybe (Type tv), Maybe (Type tv), [Type tv])
+splitRow _    Nothing  _    = return (Nothing, Nothing, [])
+splitRow (<*) (Just σ) name = do
+  traceN 4 ("splitRow", σ, name)
+  (ρ, _) ← instAllEx True False σ
+  loop ρ
+  where
+  loop ρ = case ρ of
+    RowTy name' τ1 τ2 | name' == name
+      → return (Just τ1, Just τ2, [])
+                      | otherwise
+      → do
+        (mτ1, mτ2, αs) ← loop τ2
+        return (mτ1, RowTy name' τ1 <$> mτ2, αs)
+    VarTy (FreeVar α) | tvFlavorIs Universal α
+      → do
+          τ1 ← newTVTy
+          τ2 ← newTVTy
+          ρ <* RowTy name τ1 τ2
+          return (Just τ1, Just τ2, [τ1, τ2])
+    _ → fail $ "got " ++ show σ ++ " where `" ++ name ++ " expected"
 
 -- | What kind of type variable to create when instantiating
 --   a given quantifier in a given polarity:
@@ -475,14 +542,14 @@ instAllEx upos epos σ = do
 -- | Instantiate an outer universal quantifier.
 instAll ∷ MonadC tv r m ⇒ Bool → Type tv → m (Type tv, [tv])
 instAll pos (QuaTy AllQu αqs σ) = do
-  trace ("instAll", pos, αqs, σ)
+  traceN 4 ("instAll", pos, αqs, σ)
   instGeneric (determineFlavor Universal pos) αqs σ
 instAll _ σ = return (σ, [])
 
 -- | Instantiate an outer existential quantifier.
 instEx ∷ MonadC tv r m ⇒ Bool → Type tv → m (Type tv, [tv])
 instEx pos (QuaTy ExQu αqs σ) = do
-  trace ("instEx", pos, αqs, σ)
+  traceN 4 ("instEx", pos, αqs, σ)
   instGeneric (determineFlavor Existential pos) αqs σ
 instEx _ σ = return (σ, [])
 
@@ -573,7 +640,8 @@ inferFnTests = T.test
   -- Patterns
   , "λC. B"     -: "C → B"
   , "λA. B"     -: "A → B"
-  , "λ(L:U). B" -: "U → B"
+  , "λ(L:U). B"   -: "U → B"
+  , "λ(L:L:U). B" -: "U → B"
   , te "λ(R:A). B"
   , "λ(B x). x"
                 -: "∀α. B α → α"
@@ -808,9 +876,9 @@ inferFnTests = T.test
   , "let rec x = #B (`A x) in x"
       -: "∀β γ: U. μα. [ A: α | B: β | γ ]"
   , "λx. choose x (`A x)"
-      -: "∀γ: R. (μα. [ A: α | γ ]) → μα. [ A: α | γ ]"
+      -: "∀γ: U. (μα. [ A: α | γ ]) → μα. [ A: α | γ ]"
   , "λx. choose x (#B (`A x))"
-      -: "∀β γ: R. (μα. [ A: α | B: β | γ ]) → \
+      -: "∀β γ: U. (μα. [ A: α | B: β | γ ]) → \
          \         μα. [ A: α | B: β | γ ]"
   , "let rec f = λz x. match x with `A x' -> f z x' | _ -> z in f"
       -: "∀ α, β:A. α → (μγ. [ A: γ | β]) -α> α"
@@ -902,25 +970,42 @@ inferFnTests = T.test
                 -: "T"
   , "let r = ref (`Nil T) in writeRef (r, `Cons (A, `Nil T))"
                 -: "T"
+  , "let r = ref nil in let t = writeRef (r, cons T nil) in r"
+                -: "Ref U (List T)"
+  , "let r = ref nil in let t = writeRef (r, cons T (readRef r)) in r"
+                -: "Ref U (List T)"
+  , "let r = ref nil in \
+   \ let t = writeRef (r, cons T nil) in \
+   \ let t = writeRef (r, cons T nil) in r"
+                -: "Ref U (List T)"
+  , te "let r = ref nil in \
+      \ let t = writeRef (r, cons S nil) in \
+      \ let t = writeRef (r, cons T nil) in r"
+  , "let r = ref nil in \
+   \ let t = writeRef (r, cons T (readRef r)) in \
+   \ let t = writeRef (r, cons T (readRef r)) in r"
+                -: "Ref U (List T)"
+  , te "let r = ref nil in \
+      \ let t = writeRef (r, cons S (readRef r)) in \
+      \ let t = writeRef (r, cons T (readRef r)) in r"
+  , "let r = ref' L in (r, r)"
+                -: "Ref R L × Ref R L"
+  , "let r = ref' L in (swapRef (r, L), r)"
+                -: "Ref R L × L × Ref R L"
+  , "let r = ref' L in (swapRef (r, A), r)"
+                -: "Ref R L × L × Ref R L"
+  , "let r = ref' L in (swapRef (r, U), r)"
+                -: "Ref R L × L × Ref R L"
+  , "let r = ref' R in (swapRef (r, A), r)"
+                -: "Ref R L × L × Ref R L"
+  , "let r = ref' U in (swapRef (r, L), r)"
+                -: "Ref R L × L × Ref R L"
   {-
-  , "let r = ref nil in let t = writeRef r (cons A nil) in r"
-                -: "Ref (List A)"
-  , "let r = ref nil in let t = writeRef r (cons A (readRef r)) in r"
-                -: "Ref (List A)"
-  , "let r = ref nil in \
-   \ let t = writeRef r (cons A nil) in \
-   \ let t = writeRef r (cons A nil) in r"
-                -: "Ref (List A)"
-  , te "let r = ref nil in \
-      \ let t = writeRef r (cons A nil) in \
-      \ let t = writeRef r (cons B nil) in r"
-  , "let r = ref nil in \
-   \ let t = writeRef r (cons A (readRef r)) in \
-   \ let t = writeRef r (cons A (readRef r)) in r"
-                -: "Ref (List A)"
-  , te "let r = ref nil in \
-      \ let t = writeRef r (cons A (readRef r)) in \
-      \ let t = writeRef r (cons B (readRef r)) in r"
+  , "let r = ref' nil in \
+   \ let (r', List T) = swapRef (r, cons T nil) in \
+   \   swapRef (r', cons T nil)"
+                -: "Ref R (List T) × T"
+
   -- Scoped type variables
   , "λ (x : α) (y : β). pair x y"
                 -: "∀ α β. α → β → α × β"

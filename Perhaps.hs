@@ -9,6 +9,9 @@ import Control.Monad
 import Control.Monad.Fix
 import Data.Monoid
 
+import Ppr
+import qualified Text.PrettyPrint as Ppr
+
 class Functor f => Optional f where
   foldOptional :: b -> (a -> b) -> f a -> b
   optionalSome :: a -> f a
@@ -50,6 +53,9 @@ data Perhaps a
   = Nope
   | Here a
   deriving Functor
+
+instance Ppr a => Ppr (Perhaps a) where
+  pprPrec = perhaps Ppr.empty . pprPrec
 
 instance Optional Perhaps where
   foldOptional = perhaps

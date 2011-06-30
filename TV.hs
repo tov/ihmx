@@ -30,7 +30,8 @@ module TV (
   -- ** Pure
   U, runU,
   -- * Debugging
-  warn, trace, debug,
+  module Trace,
+  warn,
 ) where
 
 import Control.Monad.ST
@@ -47,6 +48,7 @@ import Util
 import MonadRef
 import qualified NodeMap as NM
 import qualified Graph as Gr
+import Trace
 
 ---
 --- A unification monad
@@ -56,7 +58,7 @@ import qualified Graph as Gr
 --   Minimal definition: @newTV@, @writeTV_@, @readTV_@, @setTVRank_@,
 --   @getTVRank_@,
 --   @hasChanged@, @setChanged@, @unsafePerformTV@, and @unsafeIOToTV@
-class (Functor m, Applicative m, Monad m,
+class (Functor m, Applicative m, Monad m, MonadTrace m,
        Tv tv, MonadRef r m, MonadReadTV tv m) ⇒
       MonadTV tv r m | m → tv r where
   -- | Allocate a new, empty type variable with the give properties
@@ -94,7 +96,7 @@ class (Functor m, Applicative m, Monad m,
   tvOf ∷ Type tv → m tv
   tvOf (VarTy (FreeVar α)) = reprTV α
   tvOf τ = do
-    trace ("tvOf", τ)
+    traceN 4 ("tvOf", τ)
     α ← newTV
     writeTV_ α τ
     return α
@@ -103,7 +105,7 @@ class (Functor m, Applicative m, Monad m,
   writeTV α τ = do
     setChanged
     (α', mτα) ← rootTV α
-    trace ("writeTV", (α', mτα), τ)
+    traceN 2 ("writeTV", (α', mτα), τ)
     case mτα of
       Nothing → do
         Just rank ← getTVRank_ α'
@@ -115,7 +117,7 @@ class (Functor m, Applicative m, Monad m,
   rewriteTV α τ = do
     setChanged
     (α', mτα) ← rootTV α
-    trace ("rewriteTV", (α', mτα), τ)
+    traceN 2 ("rewriteTV", (α', mτα), τ)
     writeTV_ α' τ
   -- | Allocate a new type variable and wrap it in a type
   newTVTy   ∷ m (Type tv)
@@ -264,11 +266,14 @@ instance Ppr (TV s) where
 
 instance Show (TV s) where
   showsPrec _p tv = case (debug, unsafeReadTV tv) of
-    (True, Just t) → showsPrec _p t
-                     -- shows (tvId tv) . showChar '=' .
-                     -- showsPrec 2 t
-    _              → showChar (flavorSigil (tvFlavor tv))
-                   . (if tvKindIs QualKd tv then showChar '*' else id)
+    (True, Just t) →
+      if debugLevel > 4
+        then shows (tvId tv) . showChar '=' .  showsPrec 2 t
+        else showsPrec _p t
+    _              → (if tvKindIs QualKd tv then showChar '`' else id)
+                   . (if debugLevel > 2
+                        then showChar (flavorSigil (tvFlavor tv))
+                        else id)
                    . shows (tvId tv)
 
 instance Ftv (TV s) (TV s) where
@@ -286,7 +291,8 @@ newtype UT (s ∷ * → *) m a = UT { unUT ∷ StateT UTState m a }
 data UTState
   = UTState {
       utsGensym  ∷ !Int,
-      utsChanged ∷ !Bool
+      utsChanged ∷ !Bool,
+      utsTrace   ∷ !Int
     }
 
 -- | 'UT' over 'IO'
@@ -307,6 +313,10 @@ instance MonadRef s m ⇒ MonadRef s (UT s m) where
   writeRef      = lift <$$> writeRef
   unsafeIOToRef = lift . unsafeIOToRef
 
+instance MonadRef r m ⇒ MonadTrace (UT r m) where
+  getTraceIndent   = UT (gets utsTrace)
+  putTraceIndent n = UT (modify (\uts → uts { utsTrace = n }))
+
 instance MonadTV tv r m ⇒ MonadReadTV tv m where
   readTV = liftM (uncurry (flip maybe Right . Left)) . rootTV
 
@@ -315,7 +325,7 @@ instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
     uts ← UT get
     let i = utsGensym uts
     UT $ put uts { utsGensym = succ i }
-    trace ("new", flavor, kind, i)
+    traceN 2 ("new", flavor, kind, i)
     TV i kind <$> case flavor of
       Universal   → lift $ UniFl <$> newRef (Left Rank.infinity)
       Existential → lift $ ExiFl <$> newRef Rank.infinity
@@ -347,7 +357,7 @@ instance Defaultable UTState where
   getDefault = error "BUG! getDefault[UTState]: can't gensym here"
 
 runUT ∷ (Functor m, Monad m) ⇒ UT s m a → m a
-runUT m = evalStateT (unUT m) (UTState 0 False)
+runUT m = evalStateT (unUT m) (UTState 0 False 0)
 
 type U a = ∀ s m. (Functor m, MonadRef s m) ⇒ UT s m a
 
@@ -415,6 +425,11 @@ instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
+instance (MonadTrace m, Ord a, Gr.DynGraph g) ⇒
+         MonadTrace (NM.NodeMapT a b g m) where
+  getTraceIndent = lift getTraceIndent
+  putTraceIndent = lift . putTraceIndent
+
 ---
 --- Debugging
 ---
@@ -425,14 +440,5 @@ unsafeReadTV TV { tvRep = UniFl r } = (const Nothing ||| Just) (unsafeReadRef r)
 unsafeReadTV TV { tvRep = SkoFl }   = Nothing
 unsafeReadTV TV { tvRep = ExiFl _ } = Nothing
 
-debug ∷ Bool
--- debug = True
-debug = False
-
 warn ∷ MonadTV tv r m ⇒ String → m ()
 warn = unsafeIOToTV . hPutStrLn stderr
-
-trace ∷ (MonadTV tv r m, Show a) ⇒ a → m ()
-trace = if debug
-          then unsafeIOToTV . print
-          else const (return ())

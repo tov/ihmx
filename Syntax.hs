@@ -88,6 +88,8 @@ data QLit = U | R | A | L
   -- NB: Ord instance is not the subsumption order, but merely an order
   -- used for binary search trees.
 
+instance Ppr QLit where ppr = Ppr.text . show
+
 readQLit ∷ String → Maybe QLit
 readQLit "U" = Just U
 readQLit "R" = Just R
@@ -222,6 +224,8 @@ isQVariance QInvariant     = True
 isQVariance QCovariant     = True
 isQVariance QContravariant = True
 isQVariance _              = False
+
+instance Ppr Variance where ppr = Ppr.text . show
 
 -- | Variances are a four point lattice with Invariant on top and
 --   Omnivariant on the bottom
@@ -395,6 +399,8 @@ data Kind
 
 varianceToKind ∷ Variance → Kind
 varianceToKind var = if isQVariance var then QualKd else TypeKd
+
+instance Ppr Kind where ppr = Ppr.text . show
 
 ---
 --- Representation of types and type annotations
@@ -667,6 +673,9 @@ newtype REC_TYPE a = REC_TYPE { unREC_TYPE ∷ Type a }
 
 instance Ppr a ⇒ Show (REC_TYPE a) where
   showsPrec = showsPrec <$.> unREC_TYPE
+
+instance Ppr a ⇒ Ppr (REC_TYPE a) where
+  pprPrec = pprPrec <$.> unREC_TYPE
 
 instance Ord a ⇒ Eq (REC_TYPE a) where
   a == b   = compare a b == EQ
@@ -1118,6 +1127,8 @@ data Occurrence
   | EO
   deriving (Eq, Show)
 
+instance Ppr Occurrence where ppr = Ppr.text . show
+
 -- | Convert an occurrence to a representative list of numbers
 occToInts ∷ Occurrence → [Int]
 occToInts UO = [0, 1, 2]
@@ -1356,6 +1367,9 @@ data Flavor
   | Existential
   | Skolem
   deriving (Eq, Ord, Show)
+
+instance Ppr Flavor where
+  ppr = Ppr.char . flavorSigil
 
 -- | Shorthand for indicating a flavor
 flavorSigil ∷ Flavor → Char
@@ -1715,11 +1729,8 @@ parseTypeArrow tyvarp typep = flip arrTy <$> choice
 -- the list of names bound by the patern.
 parsePatt ∷ Int → P (Patt a)
 parsePatt p = withState [] (level p) where
-  level 0 = do
-              π ← level 1
-              option π $ do
-                reservedOp tok ":"
-                AnnPa π <$> genParser
+  level 0 = foldl' AnnPa <$> level 1
+                         <*> many (reservedOp tok ":" *> genParser)
   level 1 = ConPa <$> upperIdentifier <*> many (level 2)
         <|> InjPa <$  char '`' <*> upperIdentifier <*> level 1
         <|> level 2
@@ -1782,11 +1793,8 @@ parseTerm = level0 where
                e ← level0
                return (foldr AbsTm e πs)
          <|> level1
-  level1   = do
-               e ← level2
-               option e $ do
-                 reservedOp tok ":"
-                 AnnTm e <$> genParser
+  level1   = foldl' AnnTm <$> level2
+                          <*> many (reservedOp tok ":" *> genParser)
   level2   = ConTm <$> upperIdentifier <*> many level3
          <|> chainl1 level3 (return AppTm)
   level3   = VarTm <$> lowerIdentifier

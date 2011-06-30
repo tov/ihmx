@@ -51,7 +51,8 @@ import Control.Monad hiding ( forM, forM_, mapM_, mapM, msum,
 import Control.Monad.Error    ( MonadError(..), ErrorT(..), mapErrorT )
 import Control.Monad.Identity ( Identity(..) )
 import Control.Monad.List     ( ListT(..), mapListT )
-import Control.Monad.RWS      ( RWST(..), evalRWST, mapRWST )
+import Control.Monad.RWS      ( RWST(..), runRWST, execRWST, evalRWST,
+                                mapRWST )
 import Control.Monad.Reader   ( MonadReader(..), ReaderT(..), mapReaderT )
 import Control.Monad.State    ( MonadState(..), StateT(..), evalStateT,
                                 evalState, gets, modify, mapStateT )

@@ -55,9 +55,11 @@ Let there be:
 We also want these additional properties:
 \begin{itemize}
 \item
-Let $\sim$ be the smallest equivalence relation containing $≤$,
-and let $S = T/{\sim}$. For each $t ∈ T$,
-we call $[t] = \{ t' ∈ T \mathrel\vert t' \sim t \}$ the \textbf{shape} of $t$.
+
+Let $\sim$ be the smallest equivalence relation containing $≤$, and
+consider the equivalence classes $[t] = \{ t' ∈ T \mathrel\vert t' \sim
+t \}$.  For each $t ∈ T$, we call $[t] ∈ T/{\sim}$.  the \textbf{shape}
+of $t$.
 
 \emph{We require that each shape $([t], ≤)$ be a lattice.}
 (I don't know a name for this property, but it's like an extra strong
@@ -69,14 +71,14 @@ if $t₁ ≤ t₃$ then $t₁ ⊔ (t₂ ⊓ t₃) = (t₁ ⊔ t₂) ⊓ t₃$.
 
 \item 
   The map $f$ is \emph{not necessarily} monotone, but when
-  restricted to any shape $[t] ∈ S$, then
+  restricted to any shape $[t] ∈ T/{\sim}$, then
   $f|_{[t]}\colon [t] → Q$ is either monotone or antitone.
 \end{itemize}
 
 \section*{A Constraint Language}
 
-What I want to do with these posets is constraint solving, where
-constraints have the following form,
+What I want to do with these posets is constraint solving. 
+Constraints have the following form
 \[
 \begin{array}{rcl}
     C & \mathop{::=} & ⊤ \\
@@ -89,13 +91,17 @@ constraints have the following form,
 where $q ∈ Q$ and
 variables $x$ stand for elements of $T$.
 (Constraints never involve \emph{concrete} elements of $T$.)
+We consider constraints as a commutative monoid on $\conj$ with unit
+$⊤$, and modulo scope extrusion and $α$ conversion.
 Note that while existential quantification can always be pulled to the
-front, leaving them in constraints lets us operate on a portion of a
-constraint while knowing that some variables don't appear elsewhere.
+front, leaving them in allows expressing a notion of freshness locally on
+a portion of a constraint.
 
+An \emph{assignment} $ρ$ is a partial map associating variables $x$ with
+elements $t$ of $T$.  An assignment $ρ'$ \emph{extends} $ρ$, written $ρ'
+≥ ρ$, if $ρ(x) = ρ'(x)$ for all $x ∈ \dom ρ$.
 The meaning of constraints is given by a relation
-$ρ ⊢ C$, where $ρ$ is a partial map associating
-variables $x$ with elements of $t ∈ T$, defined inductively:
+$⋅ ⊢ ⋅$ between assignments and constraints, defined inductively:
 \begin{mathpar}
   \infer
   { }
@@ -119,22 +125,20 @@ variables $x$ with elements of $t ∈ T$, defined inductively:
   {ρ ⊢ ∃x.\, C}
 \end{mathpar}
 If $ρ ⊢ C$ we say that $ρ$ \emph{satisfies} $C$.
-Let $⊢ C$ mean that $ρ ⊢ C$ for all $ρ$ such that
-$\fv(C) ⊆ \dom ρ$.
 
 Constraint solving (or simplification) is specified by a rewrite system
-that operates on constraints as a congruence.  A rewrite step $C₁
-\longmapsto C₂$ is sound if $⊢ C₂$ implies $⊢ C₁$.
-(We are also concerned with principality, which will mean that the
-we want implication to be in both directions, but I'm only concerned
-with soundness here.)
+that operates on constraints as a congruence.
+A rewrite step $C₁ \longmapsto C₂$ is sound if for all $ρ$ such that $ρ ⊢ C₂$,
+there is an
+extension $ρ' ≥ ρ$ such that $ρ' ⊢ C₁$.  (We are also concerned with
+principality, which will mean that the we want implication to be in both
+directions, but I'm only concerned with soundness here.)
 
-The kind of simplification I'm concerned with in this note
-is existential elimination.
-To show that an existential elimination step
-of the form $(∃y.\, C) \longmapsto C'$ is sound, we show that for all $ρ$
-such that $ρ ⊢ C'$, we can find a $t_y ∈ T$ such that
-$ρ[y↦t_y] ⊢ C$.
+The kind of simplification I'm concerned with in this note is
+existential elimination.  To show that an existential elimination step
+of the form $(∃y.\, C) \longmapsto C'$ is sound, it is sufficient to
+show that for all $ρ$ such that $ρ ⊢ C'$, we can find a $t_y ∈ T$ such
+that $ρ[y↦t_y] ⊢ C$.
 
 Here is a simple rule for eliminating existentials:
 \begin{equation}
@@ -183,7 +187,7 @@ Now, here is a more general version of the previous rule:
 \begin{proof}
 This is justified by the Riesz Interpolation Property.
 Given a satisfying $ρ$, we know that $ρ(xᵢ) ≤
-ρ(z_j)$ for all $i$ and $j$.  That means that all they all have the same
+ρ(z_j)$ for all $i$ and $j$.  That means that they all have the same
 shape: for all $i$ and $j$, $[ρ(xᵢ)] = [ρ(z_j)]$.
 By the partitioning property of $T$, this is a lattice, so it has finite
 joins.  Then let $t_y = \bigsqcup ᵢ ρ(xᵢ)$.
@@ -499,8 +503,9 @@ unnecessarily preclude expressiveness by forbidding uniquness types.  As
 far as I know, this isn't necessary for type system soundness overall
 (though anti-monotonicity does make type soundness harder to state and
 prove), but it seems to be extremely helpful for constraint solving.
-Dually, we could have made $f$ continuous to the dual of $Q$ ($f(t ⊔ t')
-= f(t) ⊓ f(t')$), which gives us only uniqueness types, but not
+Dually, we could have made $f$ continuous to the dual of $Q$
+(\emph{i.e.,} $f(t ⊔ t') = f(t) ⊓ f(t')$),
+which gives us only uniqueness types, but not
 linearity.  Is there a way to get both?
 
 Suppose we relax the restriction that $f$ be continuous on each shape,

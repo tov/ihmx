@@ -14,8 +14,10 @@ module Env (
 import Util
 import Syntax
 import qualified Rank
+import Ppr
 
 import Data.Map as M
+import qualified Text.PrettyPrint as Ppr
 
 type Δ tv = Map Name (Type tv)
 
@@ -60,3 +62,8 @@ bumpΓ γ = γ { rankΓ = Rank.inc (rankΓ γ) }
 
 instance Tv tv ⇒ Ftv (Γ tv) tv where
   ftvTree = ftvTree . mapΓ
+
+instance Ppr tv ⇒ Ppr (Γ tv) where
+  pprPrec p γ = parensIf (p > 10) $
+    Ppr.char 'Γ' Ppr.<+> ppr (rankΓ γ) Ppr.<+> ppr (mapΓ (cleanΓ γ))
+

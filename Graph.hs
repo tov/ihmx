@@ -141,8 +141,8 @@ instance (Graph gr, Show v) ⇒ Show (ShowGraph gr v) where
   showsPrec _ (ShowGraph gr) =
     showChar '{' .
     foldr (.) id
-      (List.intersperse (showString " ⋀ ")
-         [ shows n1 . showChar '≤' . shows n2
+      (List.intersperse (showString ", ")
+         [ shows n1 . showString "<:" . shows n2
          | (n1, n2) ← labNodeEdges gr ])
     . showChar '}'
 
