@@ -92,10 +92,11 @@ inferTm γ e = do
 -- | To infer the type of a term
 infer ∷ MonadC tv r m ⇒
         [Flavor] → Δ tv → Γ tv → Term Empty → Maybe (Type tv) → m (Type tv)
-infer φ0 δ γ e0 mσ = do
-  traceN 1 (TraceIn ("infer", φ0, δ, γ, e0, mσ))
-  φ ← maybe return prenexFlavors mσ φ0
-  σ ← case e0 of
+infer φ0 δ γ e0 mσ0 = do
+  traceN 1 (TraceIn ("infer", φ0, δ, γ, e0, mσ0))
+  mσ ← mapM substDeep mσ0
+  let φ = fromMaybe id (prenexFlavors <$> mσ) φ0
+  σ  ← case e0 of
     AbsTm π e                     → do
       ([mσ1,_,mσ2],αs) ← splitCon (<:) mσ "->" 3
       (δ', σ1, σs, βs) ← inferPatt δ π mσ1 (countOccsPatt π e)
@@ -161,14 +162,13 @@ infer φ0 δ γ e0 mσ = do
 -- | Determine which quantifiers may appear at the beginning of
 --   a type scheme, given a list of quantifiers that may be presumed
 --   to belong to an unsubstituted variable.
-prenexFlavors ∷ MonadTV tv r m ⇒ Type tv → [Flavor] → m [Flavor]
-prenexFlavors σ φ = do
-  σ' ← substRoot σ
-  case σ' of
-    QuaTy AllQu _ σ'' → (Universal :) <$> prenexFlavors σ'' φ
-    QuaTy ExQu  _ _   → return [Existential]
-    VarTy _           → return φ
-    _                 → return []
+prenexFlavors ∷ Type tv → [Flavor] → [Flavor]
+prenexFlavors σ φ =
+  case σ of
+    QuaTy AllQu _ σ' → Universal : prenexFlavors σ' φ
+    QuaTy ExQu  _ _  → [Existential]
+    VarTy _          → φ
+    _                → []
 
 -- | Generalize the requested flavors, 
 maybeGen ∷ MonadC tv r m ⇒
@@ -182,7 +182,7 @@ maybeInst e0 _
 maybeInst _ []          = instantiate
 maybeInst _ φ
   | Universal `elem` φ  = return
-  | otherwise           = fst <$$> instAll True
+  | otherwise           = fst <$$> instAll True <=< substDeep
 
 maybeInstGen ∷ MonadC tv r m ⇒
                Term Empty → [Flavor] → Γ tv → Type tv → m (Type tv)
@@ -330,18 +330,19 @@ funmatchN n0 σ = do
 --   and compute an updated type variable environment,
 --   a type for the whole pattern, a type for each variable bound by
 --   the pattern, and a list of some-quantified type variables.
+--   PRECONDITION: mσ0 is fully substituted
 inferPatt ∷ MonadC tv r m ⇒
             Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
             m (Δ tv, Type tv, [Type tv], [Type tv])
-inferPatt δ0 π0 σ0 occs = do
-  traceN 1 (TraceIn ("inferPatt", δ0, π0, σ0, occs))
-  (σ, δ, (σs, αs)) ← runRWST (loop π0 σ0) () δ0
+inferPatt δ0 π0 mσ0 occs = do
+  traceN 1 (TraceIn ("inferPatt", δ0, π0, mσ0, occs))
+  (σ, δ, (σs, αs)) ← runRWST (loop π0 mσ0) () δ0
   zipWithM_ (⊏:) σs occs
   traceN 1 (TraceOut ("inferPatt", σ, σs, δ, αs))
   return (δ, σ, σs, αs)
   where
   loop (VarPa _)       mσ = do
-    σ ← maybeFresh mσ 
+    σ ← maybeFresh mσ
     bind σ
     return σ
   loop WldPa           mσ = do
@@ -351,58 +352,35 @@ inferPatt δ0 π0 σ0 occs = do
   loop (ConPa name πs) mσ = do
     (mαs, αs) ← splitCon (<:) mσ name (length πs)
     traverse_ some αs
-    case mσ of
-      Nothing → do
-        σs ← zipWithM loop πs mαs
-        return (ConTy name σs)
-      Just σ  → do
-        σs ← zipWithM loop πs mαs
-        σ ≤ ConTy name σs
-        return σ
+    σs ← zipWithM loop πs mαs
+    mσ ?≤ ConTy name σs
   loop (InjPa name π)  mσ = do
     (mα, mβ, αs) ← splitRow (<:) mσ name
     traverse_ some αs
-    case mσ of
-      Nothing → do
-        σ1 ← loop π mα
-        β  ← maybeFresh mβ
-        return (RowTy name σ1 β)
-      Just σ  → do
-        σ1 ← loop π mα
-        σ2 ← maybeFresh mβ
-        σ ≤ RowTy name σ1 σ2
-        return σ
+    σ1 ← loop π mα
+    σ2 ← maybeFresh mβ
+    mσ ?≤ RowTy name σ1 σ2
   loop (AnnPa π annot) mσ = do
     δ ← get
     (δ', σ', αs) ← instAnnot δ annot
     put δ'
     mapM_ some αs
-    case mσ of
-      Nothing → do
-        loop π (Just σ')
-        return σ'
-      Just σ  → do
-        σ ≤ σ'
-        loop π (Just σ')
-        return σ
+    σ ← mσ ?≤ σ'
+    loop π (Just σ)
+    return σ
   --
   bind τ      = tell ([τ], [])
   some α      = tell ([], [α])
-  maybeFresh  = maybe fresh return
+  maybeFresh  = fromMaybeA fresh
   fresh       = newTVTy `before` some
   --
-  mcmp _    Nothing  σ' = return σ'
-  mcmp (<*) (Just σ) σ' = do σ <* σ'; return σ
+  Nothing ?≤ σ' = return σ'
+  Just σ  ?≤ σ' = do σ ≤ σ'; return σ
 
 (≤)   ∷ MonadC tv r m ⇒ Type tv → Type tv → m ()
 σ1 ≤ σ2 = do
   traceN 2 ("≤", σ1, σ2)
   subsumeBy (<:) σ1 σ2
-
-(≤|≥) ∷ MonadC tv r m ⇒ Type tv → Type tv → m ()
-σ1 ≤|≥ σ2 = do
-  traceN 2 ("≤|≥", σ1, σ2)
-  subsumeBy (=:) σ1 σ2
 
 subsumeBy ∷ MonadC tv r m ⇒
             (Type tv → Type tv → m ()) → Type tv → Type tv → m ()
@@ -440,7 +418,7 @@ instAnnot δ (Annot names σ0) = do
   where
     insert ('_':_) = const id
     insert k       = Map.insert k
-    eachName name  = maybe newTVTy return (Map.lookup name δ)
+    eachName name  = fromMaybeA newTVTy (Map.lookup name δ)
     {- Note that the newTVTy case shouldn't happen because we
        create tyvars for every term up front in 'inferTm'. -}
 
@@ -464,9 +442,13 @@ extractPattAnnot δ0 π0
 --- Instantiation operations
 ---
 
--- | Given (maybe) a type, a type constructor name, and its arity,
---   return a list of (maybe) parameter types.  Also returns a list of
---   any new type variables.
+-- | Given a type relation, (maybe) a type, a type constructor name,
+--   and its arity, return a list of (maybe) parameter types and returns
+--   a list of any new type variables.  The output types are @Nothing@
+--   iff the input type is @Nothign@.  If the input type is a type
+--   variable, it gets unified with the requested shape over fresh type
+--   variables using the given type relation.
+--   PRECONDITION: σ is fully substituted.
 {-
 Instantiates both ∀ and ∃ to univars:
   (λx.x) : A → A          ⇒       (λ(x:A). (x:A)) : A → A
@@ -486,7 +468,7 @@ splitCon (<*) (Just σ) c arity = do
   case ρ of
     ConTy c' σs       | c == c', length σs == arity
       → return (Just <$> σs, [])
-    ConTy c' []
+    ConTy _ []
       → do
           ρ <* ConTy c []
           return ([], [])
@@ -497,6 +479,8 @@ splitCon (<*) (Just σ) c arity = do
           return (Just <$> αs, αs)
     _ → fail $ "got " ++ show σ ++ " where " ++ c ++ " expected"
 
+-- | Like 'splitCon', but for rows.
+--   PRECONDITION: σ is fully substituted.
 splitRow ∷ MonadC tv r m ⇒
            (Type tv → Type tv → m ()) →
            Maybe (Type tv) → Name →
@@ -533,6 +517,7 @@ determineFlavor Skolem      _       = error "BUG! determineFlavor Skolem"
 
 -- | Instantiate the outermost universal and existential quantifiers
 --   at the given polarities.
+--   PRECONDITION: σ is fully substituted.
 instAllEx ∷ MonadC tv r m ⇒ Bool → Bool → Type tv → m (Type tv, [tv])
 instAllEx upos epos σ = do
   (σ', αs)  ← instAll upos σ
@@ -540,6 +525,7 @@ instAllEx upos epos σ = do
   return (σ'', αs ++ βs)
 
 -- | Instantiate an outer universal quantifier.
+--   PRECONDITION: σ is fully substituted.
 instAll ∷ MonadC tv r m ⇒ Bool → Type tv → m (Type tv, [tv])
 instAll pos (QuaTy AllQu αqs σ) = do
   traceN 4 ("instAll", pos, αqs, σ)
@@ -547,6 +533,7 @@ instAll pos (QuaTy AllQu αqs σ) = do
 instAll _ σ = return (σ, [])
 
 -- | Instantiate an outer existential quantifier.
+--   PRECONDITION: σ is fully substituted.
 instEx ∷ MonadC tv r m ⇒ Bool → Type tv → m (Type tv, [tv])
 instEx pos (QuaTy ExQu αqs σ) = do
   traceN 4 ("instEx", pos, αqs, σ)
@@ -556,6 +543,7 @@ instEx _ σ = return (σ, [])
 -- | Instantiate type variables and use them to open a type, given
 --   a flavor and list of qualifier literal bounds.  Along with the
 --   instantiated type, returns any new type variables.
+--   PRECONDITION: σ is fully substituted.
 instGeneric ∷ MonadC tv r m ⇒
               Flavor → [(a, QLit)] → Type tv →
               m (Type tv, [tv])
@@ -572,12 +560,13 @@ instGeneric flav αqs σ = do
 
 -- | To instantiate a prenex quantifier with fresh type variables.
 instantiate ∷ MonadC tv r m ⇒ Type tv → m (Type tv)
-instantiate = instAllEx True True >=> return . fst
+instantiate = substDeep >=> instAllEx True True >=> return . fst
 
 -- | To instantiate a prenex quantifier with fresh type variables, in
 --   a negative position
 instantiateNeg ∷ MonadC tv r m ⇒ Type tv → m (Type tv, [tv])
-instantiateNeg = instAllEx False False
+instantiateNeg = substDeep >=> instAllEx False False
+
 ---
 --- Testing functions
 ---

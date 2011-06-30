@@ -26,8 +26,8 @@ module Util (
   findLastIndex, listNth, ordNub,
   -- * Extra 'Traversable' operations
   mapHead, mapTail, mapInit, mapLast, foldr2,
-  -- * An 'Either' operation
-  unEither,
+  -- * 'Maybe' and 'Either' operations
+  fromMaybeA, unEither,
   -- * Monadic operations
   allA, anyA, whenM, unlessM, concatMapM, foldM1,
   before,
@@ -116,6 +116,10 @@ before m k = do
   return a
 
 infixl 8 `before`
+
+fromMaybeA ∷ Applicative f ⇒ f a → Maybe a → f a
+fromMaybeA _ (Just a) = pure a
+fromMaybeA f Nothing  = f
 
 unEither ∷ Either a a → a
 unEither = either id id
