@@ -284,17 +284,18 @@ data TV r
 
 data TVRep r
   = UniFl !(r (Either Rank (Type (TV r))))
-  | ExiFl !(r Rank)
+  | ExiFl !QLit !(r Rank)
   | SkoFl !QLit
 
 instance Tv (TV r) where
   tvUniqueID = tvId
   tvKind     = tvKind_
-  tvFlavor TV { tvRep = UniFl _ } = Universal
-  tvFlavor TV { tvRep = ExiFl _ } = Existential
-  tvFlavor TV { tvRep = SkoFl _ } = Skolem
-  tvQual   TV { tvRep = SkoFl q } = Just q
-  tvQual   _                      = Nothing
+  tvFlavor TV { tvRep = UniFl _ }   = Universal
+  tvFlavor TV { tvRep = ExiFl _ _ } = Existential
+  tvFlavor TV { tvRep = SkoFl _ }   = Skolem
+  tvQual   TV { tvRep = SkoFl q }   = Just q
+  tvQual   TV { tvRep = ExiFl q _ } = Just q
+  tvQual   _                        = Nothing
 
 instance Eq (TV s) where
   TV { tvId = i1 } == TV { tvId = i2 } = i1 == i2
@@ -371,24 +372,24 @@ instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
     traceN 2 ("new", flavor, kind, i)
     TV i kind <$> case flavor of
       Universal   → lift $ UniFl <$> newRef (Left Rank.infinity)
-      Existential → lift $ ExiFl <$> newRef Rank.infinity
+      Existential → lift $ ExiFl bound <$> newRef Rank.infinity
       Skolem      → return $ SkoFl bound
   --
-  writeTV_ TV { tvRep = UniFl r } t = lift (writeRef r (Right t))
-  writeTV_ TV { tvRep = ExiFl _ } _ = fail "BUG! writeTV_ got ex."
-  writeTV_ TV { tvRep = SkoFl _ } _ = fail "BUG! writeTV_ got skolem"
+  writeTV_ TV { tvRep = UniFl r }   t = lift (writeRef r (Right t))
+  writeTV_ TV { tvRep = ExiFl _ _ } _ = fail "BUG! writeTV_ got ex."
+  writeTV_ TV { tvRep = SkoFl _ }   _ = fail "BUG! writeTV_ got skolem"
   readTV_ TV { tvRep = UniFl r } = (const Nothing ||| Just) <$> UT (readRef r)
-  readTV_ TV { tvRep = _ }       = return Nothing
+  readTV_ _                      = return Nothing
   --
   getTVRank_ TV { tvRep = UniFl r }
     = (Just ||| const Nothing ) <$> UT (readRef r)
-  getTVRank_ TV { tvRep = ExiFl r }
+  getTVRank_ TV { tvRep = ExiFl _ r }
     = Just <$> UT (readRef r)
   getTVRank_ TV { tvRep = SkoFl _ }
     = return Nothing
-  setTVRank_ rank TV { tvRep = UniFl r } = UT (writeRef r (Left rank))
-  setTVRank_ rank TV { tvRep = ExiFl r } = UT (writeRef r rank)
-  setTVRank_ _    TV { tvRep = SkoFl _ } = return ()
+  setTVRank_ rank TV { tvRep = UniFl r }   = UT (writeRef r (Left rank))
+  setTVRank_ rank TV { tvRep = ExiFl _ r } = UT (writeRef r rank)
+  setTVRank_ _    TV { tvRep = SkoFl _ }   = return ()
   --
   hasChanged   = UT $ gets utsChanged
   putChanged b = UT $ modify $ \uts → uts { utsChanged = b }
@@ -480,8 +481,7 @@ instance (MonadTrace m, Ord a, Gr.DynGraph g) ⇒
 -- | Super sketchy!
 unsafeReadTV ∷ TV s → Maybe (Type (TV s))
 unsafeReadTV TV { tvRep = UniFl r } = (const Nothing ||| Just) (unsafeReadRef r)
-unsafeReadTV TV { tvRep = SkoFl _ } = Nothing
-unsafeReadTV TV { tvRep = ExiFl _ } = Nothing
+unsafeReadTV _                      = Nothing
 
 warn ∷ MonadTV tv r m ⇒ String → m ()
 warn = unsafeIOToTV . hPutStrLn stderr

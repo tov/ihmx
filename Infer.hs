@@ -31,12 +31,8 @@
    - Free type variables in annotations are considered to be bound
      by the "some" quantifier
 
-   - Scoped type variables: some-bound type variables from a lambda
-     or annotation are in scope in the body.  (This means that
-     (e : σ) is different from (\x:σ.x) e, because scoped type variables
-     bound by σ are in scope for e in the former but not the latter.)
-     Note that because there is no explicit quantifier for scoped type
-     variables, they do not allow shadowing.
+   - Scoped type variables: all some-bound type variables in an
+     expression denote the same unification variable.
 
    - Binder patterns with type annotations for λ and let
 
@@ -50,6 +46,7 @@
 
    - Existentials with automatic unpack/pack.
 
+   - Substructural types and subtyping.
 -}
 module Infer (
   inferTm, infer,
