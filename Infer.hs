@@ -5,6 +5,7 @@
     NoImplicitPrelude,
     ParallelListComp,
     ScopedTypeVariables,
+    TupleSections,
     UnicodeSyntax
   #-}
 {- |
@@ -82,9 +83,10 @@ import Util
 inferTm ∷ (MonadTV tv r m, Show tv, Tv tv) ⇒
           Γ tv → Term Empty → m (Type tv, String)
 inferTm γ e = do
-  δ0 ← mapM (newTVTy' . varianceToKind) (ftvPure e)
+  δ ← mapM (newTVTy' . varianceToKind) (ftvPure e)
+  traceN 2 ("inferTm", δ, γ, e)
   runConstraintT $ do
-    τ ← infer [Universal, Existential] δ0 γ e Nothing
+    τ ← infer [Universal, Existential] δ γ e Nothing
     σ ← generalize False (rankΓ γ) τ
     c ← showConstraint
     return (σ, c)
@@ -93,45 +95,45 @@ inferTm γ e = do
 infer ∷ MonadC tv r m ⇒
         [Flavor] → Δ tv → Γ tv → Term Empty → Maybe (Type tv) → m (Type tv)
 infer φ0 δ γ e0 mσ0 = do
-  traceN 1 (TraceIn ("infer", φ0, δ, γ, e0, mσ0))
+  traceN 1 (TraceIn ("infer", φ0, γ, e0, mσ0))
   mσ ← mapM substDeep mσ0
   let φ = fromMaybe id (prenexFlavors <$> mσ) φ0
   σ  ← case e0 of
     AbsTm π e                     → do
       ([mσ1,_,mσ2],αs) ← splitCon (<:) mσ "->" 3
-      (δ', σ1, σs, βs) ← inferPatt δ π mσ1 (countOccsPatt π e)
+      (σ1, σs, βs)     ← inferPatt δ π mσ1 (countOccsPatt π e)
       αs'              ← filterM isMonoType (αs++βs)
       γ'               ← γ &+&! π &:& σs
-      σ2               ← infer [Existential] δ' γ' e mσ2
+      σ2               ← infer [Existential] δ γ' e mσ2
       qe               ← arrowQualifier γ (AbsTm π e)
       unlessM (allA isMonoType αs') $
         fail "used some unannotated parameter polymorphically"
       maybeGen e0 φ γ (arrTy σ1 qe σ2)
     LetTm π e1 e2                 → do
-      (δ', mσ1)        ← extractPattAnnot δ π
-      σ1               ← infer [Universal, Existential] δ' γ e1 mσ1
-      (δ'', _, σs, _)  ← inferPatt δ' π (Just σ1) (countOccsPatt π e2)
+      mσ1              ← extractPattAnnot δ π
+      σ1               ← infer [Universal, Existential] δ γ e1 mσ1
+      (_, σs, _)       ← inferPatt δ π (Just σ1) (countOccsPatt π e2)
       γ'               ← γ &+&! π &:& σs
-      infer φ δ'' γ' e2 mσ
+      infer φ δ γ' e2 mσ
     MatTm e1 bs                   → do
       σ1               ← infer [] δ γ e1 Nothing
       inferMatch φ δ γ σ1 bs mσ
     RecTm bs e2                   → do
-      αs               ← mapM (const newTVTy) bs
-      let ns           = map fst bs
-      γ'               ← γ &+&! ns &:& αs
-      sequence_
+      σs               ← mapM (maybe newTVTy (fst <$$> instAnnot δ) . sel2) bs
+      let ns           = map sel1 bs
+      γ'               ← γ &+&! ns &:& σs
+      σs'              ← sequence
         [ do
             unless (syntacticValue ei) $
               fail $ "In let rec, binding for ‘" ++ ni ++
                      "’ not a syntactic value"
-            σi ← infer [] δ γ' ei Nothing
-            σi =: αi
-            αi ⊏: U
-        | (ni, ei) ← bs
-        | αi       ← αs ]
-      σs               ← generalizeList True (rankΓ γ) αs
-      γ'               ← γ &+&! ns &:& σs
+            σi ⊏: U
+            infer [] δ γ' ei (σi <$ mai)
+        | (ni, mai, ei) ← bs
+        | σi            ← σs ]
+      zipWithM (<:) σs' σs
+      σs''             ← generalizeList True (rankΓ γ) σs'
+      γ'               ← γ &+&! ns &:& σs''
       infer φ δ γ' e2 mσ
     VarTm n                       → maybeInst e0 φ =<< γ &.& n
     ConTm n es                    → do
@@ -139,21 +141,16 @@ infer φ0 δ γ e0 mσ0 = do
       ρs               ← zipWithM (infer [Existential] δ γ) es mσs
       maybeGen e0 φ γ (ConTy n ρs)
     LabTm b n                     → do
-      let (n1, n2, j1, j2) = if b then ("α","r",0,1) else ("r","α",1,0)
-      instantiate $
-        QuaTy AllQu [(Here n1, L), (Here n2, L)] $
-          arrTy (bvTy 0 0 (Here n1)) (qlitexp U) $
-            RowTy n (bvTy 0 j1 (Here "α")) (bvTy 0 j2 (Here "r"))
+      instantiate . elimEmptyF . read $
+        "∀α r. " ++ (if b then 'α' else 'r') : " → [ " ++ n ++ " : α | r ]"
     AppTm _ _                     → do
       let (e, es) = unfoldApp e0
       σ1               ← infer [] δ γ e Nothing
       σ                ← inferApp δ γ σ1 es
-      α                ← newTVTy
-      σ <: α
-      maybeInstGen e0 φ γ α
+      maybeInstGen e0 φ γ σ
     AnnTm e annot                 → do
-      (δ', σ, _)       ← instAnnot δ annot
-      σ'               ← infer [] δ' γ e (Just σ)
+      (σ, _)           ← instAnnot δ annot
+      σ'               ← infer [] δ γ e (Just σ)
       σ' ≤ σ
       return σ
   traceN 1 (TraceOut ("infer", σ))
@@ -228,12 +225,12 @@ inferMatch φ δ γ σ ((InjPa n πi, ei):bs) mσ | totalPatt πi = do
       σ2 ← newTVTy
       σ =: RowTy n σ1 σ2
       return (σ1, σ2)
-  (δ', _, σs, _)  ← inferPatt δ πi (Just σ1) (countOccsPatt πi ei)
+  (_, σs, _)      ← inferPatt δ πi (Just σ1) (countOccsPatt πi ei)
   γ'              ← γ &+&! πi &:& σs
-  σi              ← infer φ δ' γ' ei mσ
+  σi              ← infer φ δ γ' ei mσ
   σk              ← if null bs
                       then do σ2 <: endTy; return β
-                      else inferMatch φ δ' γ σ2 bs mσ
+                      else inferMatch φ δ γ σ2 bs mσ
   mapM_ (σ ⊏:) (countOccsPatt πi ei)
   when (pattHasWild πi) (σ ⊏: A)
   if (isAnnotated ei)
@@ -243,10 +240,10 @@ inferMatch φ δ γ σ ((InjPa n πi, ei):bs) mσ | totalPatt πi = do
   return β
 inferMatch φ δ γ σ ((πi, ei):bs) mσ = do
   β               ← newTVTy
-  (δ', _, σs, _)  ← inferPatt δ πi (Just σ) (countOccsPatt πi ei)
+  (_, σs, _)      ← inferPatt δ πi (Just σ) (countOccsPatt πi ei)
   γ'              ← γ &+&! πi &:& σs
-  σi              ← infer φ δ' γ' ei mσ
-  σk              ← inferMatch φ δ' γ σ bs mσ
+  σi              ← infer φ δ γ' ei mσ
+  σk              ← inferMatch φ δ γ σ bs mσ
   if (isAnnotated ei)
     then σi <: β
     else σi ≤  β
@@ -333,13 +330,13 @@ funmatchN n0 σ = do
 --   PRECONDITION: mσ0 is fully substituted
 inferPatt ∷ MonadC tv r m ⇒
             Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
-            m (Δ tv, Type tv, [Type tv], [Type tv])
+            m (Type tv, [Type tv], [Type tv])
 inferPatt δ0 π0 mσ0 occs = do
   traceN 1 (TraceIn ("inferPatt", δ0, π0, mσ0, occs))
   (σ, δ, (σs, αs)) ← runRWST (loop π0 mσ0) () δ0
   zipWithM_ (⊏:) σs occs
   traceN 1 (TraceOut ("inferPatt", σ, σs, δ, αs))
-  return (δ, σ, σs, αs)
+  return (σ, σs, αs)
   where
   loop (VarPa _)       mσ = do
     σ ← maybeFresh mσ
@@ -362,11 +359,10 @@ inferPatt δ0 π0 mσ0 occs = do
     mσ ?≤ RowTy name σ1 σ2
   loop (AnnPa π annot) mσ = do
     δ ← get
-    (δ', σ', αs) ← instAnnot δ annot
-    put δ'
+    (σ', αs) ← instAnnot δ annot
     mapM_ some αs
     σ ← mσ ?≤ σ'
-    loop π (Just σ)
+    loop π (Just σ')
     return σ
   --
   bind τ      = tell ([τ], [])
@@ -391,7 +387,7 @@ subsumeBy (<*) σ1 σ2 = do
     (VarTy (FreeVar α), _) | tvFlavorIs Universal α → do
       σ1' <* σ2'
     (_, VarTy (FreeVar α)) | tvFlavorIs Universal α → do
-      σ1' ← fst <$> instAll True σ1'
+      (σ1', _) ← instAll True σ1'
       σ1' <* σ2'
     _ → do
       ρ1 ← instantiate σ1'
@@ -408,35 +404,29 @@ subsumeBy (<*) σ1 σ2 = do
 --   accordingly. Return the annotation instantiated to a type and the
 --   list of universal tyvars.
 instAnnot ∷ MonadTV tv r m ⇒
-            Δ tv → Annot → m (Δ tv, Type tv, [Type tv])
+            Δ tv → Annot → m (Type tv, [Type tv])
 instAnnot δ (Annot names σ0) = do
   αs ← mapM eachName names
-  let δ' = foldr2 insert δ names αs
-      σ  = totalSubst names αs =<< σ0
-  traceN 4 ("instAnnot", δ, δ', σ, αs)
-  return (δ', σ, αs)
+  let σ  = totalSubst names αs =<< σ0
+  traceN 4 ("instAnnot", δ, σ, αs)
+  return (σ, αs)
   where
-    insert ('_':_) = const id
-    insert k       = Map.insert k
-    eachName name  = fromMaybeA newTVTy (Map.lookup name δ)
-    {- Note that the newTVTy case shouldn't happen because we
-       create tyvars for every term up front in 'inferTm'. -}
+    eachName ('_':_) = newTVTy
+    eachName name    = case Map.lookup name δ of
+      Just σ  → return σ
+      Nothing → fail "BUG! (instAnnot): type variable not found"
 
 extractPattAnnot ∷ MonadTV tv r m ⇒
-                   Δ tv → Patt Empty → m (Δ tv, Maybe (Type tv))
-extractPattAnnot δ0 π0
-  | pattHasAnnot π0 = (snd &&& Just . fst) <$> runStateT (loop π0) δ0
-  | otherwise       = return (δ0, Nothing)
+                   Δ tv → Patt Empty → m (Maybe (Type tv))
+extractPattAnnot δ π0
+  | pattHasAnnot π0 = Just <$> loop π0
+  | otherwise       = return Nothing
   where
   loop (VarPa _)    = newTVTy
   loop WldPa        = newTVTy
   loop (ConPa n πs) = ConTy n <$> mapM loop πs
   loop (InjPa n π)  = RowTy n <$> loop π <*> newTVTy
-  loop (AnnPa _ an) = do
-    δ ← get
-    (δ', σ, _) ← instAnnot δ an
-    put δ'
-    return σ
+  loop (AnnPa _ an) = fst <$> instAnnot δ an
 
 ---
 --- Instantiation operations
@@ -549,13 +539,7 @@ instGeneric ∷ MonadC tv r m ⇒
               m (Type tv, [tv])
 instGeneric flav αqs σ = do
   σ' ← substDeep σ
-  αs ← sequence
-    [ do
-        α ← newTV' (kind, flav)
-        fvTy α ⊏: q
-        return α
-    | (_, q) ← αqs
-    | kind   ← inferKindsTy σ' ]
+  αs ← zipWithM (newTV' <$$> (,flav,) . snd) αqs (inferKindsTy σ')
   return (openTy 0 (fvTy <$> αs) σ', αs)
 
 -- | To instantiate a prenex quantifier with fresh type variables.
@@ -938,9 +922,20 @@ inferFnTests = T.test
                 -: "Int × Bool"
   , "revapp (single (id : ∀ α. α → α)) single"
                 -: "List (List (∀ α. α → α))"
-  , "(cast X : (X → all a : U. a → a) → Y) (cast X : (X → all a. a → a))"
+  , "(cast X : (X → ∀α:U. α → α) → Y) (cast X : (X → ∀α. α → α))"
                 -: "Y"
-  , te "(cast X : (X → all a. a → a) → Y) (cast X : (X → all a : U. a → a))"
+  , te "(cast X : (X → ∀α. α → α) → Y) (cast X : (X → ∀α:U. α → α))"
+  , "bot : ∀α. α → α : ∀α. α → α"
+                -: "∀α. α → α"
+  , "bot : ∀α. α → α : ∀α:U. α → α"
+                -: "∀α:U. α → α"
+  , te "bot : ∀α:U. α → α : ∀α. α → α"
+  -- polymorphic recursion
+  , te "let rec f = λx. f (B x) in f"
+  , "let rec f : ∀α. B α → Z = λx. f (B x) in f"
+                -: "∀α. B α → Z"
+  , "let rec f : ∀α. B α → Z = λx. f (B (f (B x))) in f"
+                -: "∀α. B α → Z"
   -- ST Monad
   , "runST (λ_. returnST X)"
                 -: "X"
@@ -1000,20 +995,19 @@ inferFnTests = T.test
    \     let (r', List T) = swapRef (r, cons T nil) in \
    \       swapRef (r', cons T nil)"
                 -: "∀α. T → Ref (R α) (List T) × List T"
-  {-
   -- Scoped type variables
-  , "λ (x : α) (y : β). pair x y"
-                -: "∀ α β. α → β → α × β"
-  , "λ (x : α) (y : α). pair x y"
-                -: "∀ α. α → α → α × α"
-  , "λ (x : α) (y : β). pair x (y : α)"
-                -: "∀ α. α → α → α × α"
-  , "λ (x : α) (y : β). pair x y : β × α"
-                -: "∀ α. α → α → α × α"
-  , "λ (x : α) (y : β). pair x y : β × γ"
-                -: "∀ α. α → α → α × α"
-  , "λ (x : α) (y : β). pair x y : γ × α"
-                -: "∀ α. α → α → α × α"
+  , "λ (x : α) (y : β). (x, y)"
+                -: "∀ α β. α → β -α> α × β"
+  , "λ (x : α) (y : α). (x, y)"
+                -: "∀ α. α → α -α> α × α"
+  , "λ (x : α) (y : β). (x, (y : α))"
+                -: "∀ α. α → α -α> α × α"
+  , "λ (x : α) (y : β). (x, y) : β × α"
+                -: "∀ α. α → α -α> α × α"
+  , "λ (x : α) (y : β). (x, y) : β × γ"
+                -: "∀ α. α → α -α> α × α"
+  , "λ (x : α) (y : β). (x, y) : γ × α"
+                -: "∀ α. α → α -α> α × α"
   -- Type annotations
   , "(λx.x) : ∀ α. α → α"
                 -: "∀α. α → α"
@@ -1027,14 +1021,14 @@ inferFnTests = T.test
   , te "((λx.x) : Z → Z) : ∀α. α → α"
   , te "(λ(x : Z).x) : ∀α. α → α"
   -- Type annotation propagation
-  , te "λ f . P (f A) (f B)"
-  , "λ(f : ∀ α. α → α). P (f A) (f B)"
-                -: "(∀ α. α → α) → P A B"
-  , "(λf. P (f A) (f B)) : (∀ α. α → α) → P A B"
-                -: "(∀ α. α → α) → P A B"
-  , "(λf. P (f A) (f B)) : (∀ α. α → α) → β"
-                -: "(∀ α. α → α) → P A B"
-  , te "(λf. P (f A) (f B)) : ∀ β. (∀ α. α → α) → β"
+  , te "λ f . (f A, f B)"
+  , "λ(f : ∀ α. α → α). (f A, f B)"
+                -: "(∀ α. α → α) → A × B"
+  , "(λf. (f A, f B)) : (∀ α. α → α) → A × B"
+                -: "(∀ α. α → α) → A × B"
+  , "(λf. (f A, f B)) : (∀ α. α → α) → β"
+                -: "(∀ α. α → α) → A × B"
+  , te "(λf. (f A, f B)) : ∀ β. (∀ α. α → α) → β"
   , "List (λx.x)"
                 -: "∀ α. List (α → α)"
   , "List ((λx. x) : ∀ α. α → α)"
@@ -1043,8 +1037,8 @@ inferFnTests = T.test
                 -: "∀ α. List (α → α)"
   , "List (λx. x) : List (∀ α. α → α)"
                 -: "List (∀ α. α → α)"
-  , "λx. (List (λx.x) : List α)"
-                -: "∀ α β. α → List (β → β)"
+  , "λ_. (List (λx.x) : List α)"
+                -: "∀ α:A, β. α → List (β → β)"
   , "List (λ(x: ∀ α. α → α). x)"
                 -: "∀ α. List ((∀ α. α → α) → α → α)"
   , "List (λ(x: ∀ α. α → α). (x : ∀ α. α → α))"
@@ -1073,97 +1067,118 @@ inferFnTests = T.test
                 -: "Z"
   , "((λpoly. poly (λx.x)) : ((∀ α. α → α) → β) → β) (λf. f Z)"
                 -: "Z"
-  , "λ(A α (B β γ) (C δ (D e f g))). (E α g : E m m)"
-                -: "∀ α β γ δ e f. A α (B β γ) (C δ (D e f α)) → E α α"
-  , "λ(A α (B β γ)). (C α (B β γ) : C m m)"
+  , "λ(B a (C b c) (D d (E e f g))). (F g a : F m m)"
+                -: "∀ α, β γ δ e f:A. B α (C β γ) (D δ (E e f α)) → F α α"
+  , "λ(A a (B b c)). (C a (B b c) : C α α)"
                 -: "∀ α β. A (B α β) (B α β) → C (B α β) (B α β)"
-  , "λ(A α (B β γ)). (C α (B (β:α) γ) : C α bc)"
+  , "λ(A a (B b c)). (C a (B (b:α) c) : C α β)"
                 -: "∀ α β. A α (B α β) → C α (B α β)"
-  , te "λ(A α (B β γ)). C α (B (β:α) γ : α)"
+  , te "λ(A a (B b c)). C a (B (b:α) c : α)"
   -- Patterns with type annotations
-  , "λ(x:A). x"
-                -: "A → A"
-  , "λ(x: A α). x"
-                -: "∀ α. A α → A α"
-  , "λ(x: A (∀ α. α → α)). (λ(A f). f) x B"
-                -: "A (∀ α. α → α) → B"
-  , "λ(A x: α). x"
-                -: "∀ α. A α → α"
-  , "λ(A x: α) (A y: α). x"
-                -: "∀ α. A α → A α → α"
-  , "λ(A x: α) (y: α). x"
-                -: "∀ α. A α → A α → α"
-  , "λ(A x: A α) (y: α). x"
-                -: "∀ α. A α → α → α"
-  , "λ(A (x: α)) (y: α). x"
-                -: "∀ α. A α → α → α"
-  , te "λ(A x: α) (B y: α). x"
-  , te "λ(f: (∀ α. α) → A) (K k). k f"
-  , "λ(f: (∀ α. α) → A) (K (k : ((∀ α. α) → A) → Z)). k f"
-                -: "((∀ α. α) → A) → (K (((∀ α. α) → A) → Z)) → Z"
-  , "λ(f: (∀ α. α) → A) (K k : K (((∀ α. α) → A) → Z)). k f"
-                -: "((∀ α. α) → A) → (K (((∀ α. α) → A) → Z)) → Z"
-  , "λ(x : α) (y : β) ((z : β) : α). U"
-                -: "∀ α. α → α → α → U"
+  , "λ(x:B). x"
+                -: "B → B"
+  , "λ(x: B α). x"
+                -: "∀ α. B α → B α"
+  , "λ(x: B (∀ α. α → α)). (λ(B f). f) x C"
+                -: "B (∀ α. α → α) → C"
+  , "λ(B x: α). x"
+                -: "∀ α. B α → α"
+  , "λ(B x: α) (B _: α). x"
+                -: "∀ α:A. B α → B α -α> α"
+  , "λ(B x: α) (B _: β). x"
+                -: "∀ α, β:A. B α → B β -α> α"
+  , "λ(B x: α) (_: α). x"
+                -: "∀ α:A. B α → B α -α> α"
+  , "λ(B x: α) (_: β). x"
+                -: "∀ α, β:A. B α → β -α> α"
+  , "λ(B x: B α) (_: α). x"
+                -: "∀ α:A. B α → α -α> α"
+  , "λ(B (x: α)) (_: α). x"
+                -: "∀ α:A. B α → α -α> α"
+  , te "λ(B x: α) (C _: α). x"
+  , te "λ(f: (∀ α. α) → B) (K k). k f"
+  , "λ(f: (∀ α. α) → B) (K (k : ((∀ α. α) → B) → Z)). k f"
+                -: "((∀ α. α) → B) → (K (((∀ α. α) → B) → Z)) → Z"
+  , "λ(f: (∀ α. α) → B) (K k : K (((∀ α. α) → B) → Z)). k f"
+                -: "((∀ α. α) → B) → (K (((∀ α. α) → B) → Z)) → Z"
+  , "λ(x : α) (y : β) ((z : β) : α). T"
+                -: "∀ α:A. α → α → α → T"
   , "λ(x : α) (y : β) (z : β). (z : α)"
-                -: "∀ α. α → α → α → α"
-  , "λ(x : A (∀ α. α → α)). x"
-                -: "A (∀ α. α → α) → A (∀ α. α → α)"
-  , "λ(A x : A (∀ α. α → α)). P (x A) (x B)"
-                -: "A (∀ α. α → α) → P A B"
-  , "(λ(A x). P (x A) (x B)) : A (∀ α. α → α) → P A B"
-                -: "A (∀ α. α → α) → P A B"
+                -: "∀ α:A. α → α → α → α"
+  , "λ(x : B (∀ α. α → α)). x"
+                -: "B (∀ α. α → α) → B (∀ α. α → α)"
+  , "λ(B x : B (∀ α. α → α)). (x M, x N)"
+                -: "B (∀ α. α → α) → M × N"
+  , "(λ(B x). (x M, x N)) : B (∀ α. α → α) → M × N"
+                -: "B (∀ α. α → α) → M × N"
   , "(λ(A x). P (x A) (x B)) : A (∀ α. α → α) → β"
                 -: "A (∀ α. α → α) → P A B"
-  , te "(λ(A x). P (x A) (x B))"
-  , "λ(A x : ∀ α. A (α → α)). x"
-                -: "∀ α. (∀ β. A (β → β)) → α → α"
-  , "λZ.(λ(A x). x) : (∀ β. A (β → β)) → z"
-                -: "∀ α. Z → (∀ β. A (β → β)) → α → α"
-  , "λ((A x y : A β C) : A B γ). D"
-                -: "A B C → D"
-  , "(λ(A x y : A β C). D) : A B γ → δ"
-                -: "A B C → D"
-  -- Let pattern annotations
-  , "let f : (∀α. α → α) → Z → Z = λx.x in f"
-                -: "(∀α. α → α) → Z → Z"
-  , "λZ. let P f g = P (λx.x) (λx.x) in P f g"
-                -: "∀α β. Z → P (α → α) (β → β)"
-  , "λZ. let P f g : P α α = P (λx.x) (λx.x) in P f g"
-                -: "∀α. Z → P (α → α) (α → α)"
-  , "λZ. let P (f:α) (g:β) = P (λx.x) (λx.x) in P f g"
-                -: "∀α β. Z → P (α → α) (β → β)"
-  , "λZ. let P (f:α) (g:α) = P (λx.x) (λx.x) in P f g"
-                -: "∀α. Z → P (α → α) (α → α)"
-  , "let P (f: ∀α. α → α) (g: ∀α. α → α) = P (λx.x) (λx.x) in \
-    \ Q (f A) (g A) (f B) (g B)"
-                -: "Q A A B B"
-  , "let P (f: ∀α. α → α) (g: ∀α. α → α) = P (λx.x) (λx.x) in \
-    \ P (f A) (f B)"
-                -: "P A B"
-  , te "let P (f: ∀α. α → α) g = P (λx.x) (λx.x) in \
-       \ P (f A) (f B)"
-  , te "let P (f: ∀α. α → α) g = P (λx.x) ((λx.x) : ∀a. a → a) in \
-       \ P (f A) (f B)"
-  , "let P (f: ∀α. α → α) g = P ((λx.x) : ∀a. a → a) \
-    \                           ((λx.x) : ∀a. a → a) in \
-    \ P (f A) (f B)"
-                -: "P A B"
-  , "let P f g = P ((λx.x) : ∀a. a → a) ((λx.x) : ∀a. a → a) in \
-    \ P (f A) (f B)"
-                -: "P A B"
+  , te "(λ(B x). P (x A) (x B))"
+  , "λ(B x : ∀ α. B (α → α)). x"
+                -: "∀ α. (∀ β. B (β → β)) → α → α"
+  , "λZ.(λ(B x). x) : (∀ β. B (β → β)) → z"
+                -: "∀ α. Z → (∀ β. B (β → β)) → α → α"
+  , "λ((B x y : B β D) : B C γ). E"
+                -: "B C D → E"
+  , "(λ(B x y : B β D). E) : B C γ → δ"
+                -: "B C D → E"
+  -- Let pattern annotations and propagation
+  , te "let f = λx.(x M, x N) in f"
+  , "let f : (∀α. α → α) → M × N = λg.(g M, g N) in f"
+                -: "(∀α. α → α) → M × N"
+  , "let f : (∀α. α → α) × β → M × N =  \
+    \   λ(g, h : ∀α. α → α). (h (g M), h (g N)) in f"
+                -: "(∀α. α → α) × (∀α. α → α) → M × N"
+  , "let f : (∀α. α → α) × β → M × N =  \
+    \   λ(g, h : ∀α. α → α). (h (g M), h (g N)) in f"
+                -: "(∀α. α → α) × (∀α. α → α) → M × N"
+  , "let f : β × γ → M × N =  \
+    \   λ(g : ∀α. α → α, h : β). (h (g M), h (g N)) in f"
+                -: "(∀α. α → α) × (∀α. α → α) → M × N"
+  , "let f : β × β → M × N =  \
+    \   λ(g : β, h : ∀α. α → α). (h (g M), h (g N)) in f"
+                -: "(∀α. α → α) × (∀α. α → α) → M × N"
+  , te "let f : γ × β → M × N =  \
+       \   λ(g : ∀α. α → α, h : β). (h (g M), h (g N)) in f"
+  , "λZ. let (f, g) = (λx.x, λx.x) in (f, g)"
+                -: "∀α β. Z → (α → α) × (β → β)"
+  , "λZ. let (f, g) : α × α = (λx.x, λx.x) in (f, g)"
+                -: "∀α. Z → (α → α) × (α → α)"
+  , "λZ. let (f:α, g:β) = (λx.x, λx.x) in (f, g)"
+                -: "∀α β. Z → (α → α) × (β → β)"
+  , "λZ. let (f:α, g:α) = (λx.x, λx.x) in (f, g)"
+                -: "∀α. Z → (α → α) × (α → α)"
+  , "let (f: ∀α. α → α, g: ∀α. α → α) = (λx.x, λx.x) in \
+    \ (f B, f C)"
+                -: "B × C"
+  , "let (f: ∀α. α → α, g) = (λx.x, λx.x) in (f B, f C, g C)"
+                -: "B × C × C"
+  , te "let (f: ∀α. α → α, g) = (λx.x, λx.x) in (f B, f C, g B, g C)"
+  , "let (f: ∀α. α → α, g) = (λx.x, (λx.x) : ∀α. α → α) in \
+    \  (f B, f C, g B, g C)"
+                -: "B × C × B × C"
+  , "let (f: ∀α. α → α, g) = (((λx.x) : ∀α. α → α), \
+    \                         ((λx.x) : ∀α. α → α)) in \
+    \  (f B, f C, g B, g C)"
+                -: "B × C × B × C"
+  , "let (f, g) = ((λx.x) : ∀a. a → a, (λx.x) : ∀a. a → a) in \
+    \ (f B, f C, g B, g C)"
+                -: "B × C × B × C"
   -- Let rec
   , "let rec f = λx y z. f x z y in f"
-                -: "∀α β γ. α → β → β → γ"
+                -: "∀α β γ. α → β -α> β -α β> γ"
   , "let rec f = λx. app x (f x) in f"
-                -: "∀α. List α → List α"
-  , "let rec f = λx. app x (f x) in P (f (List A)) (f (List B))"
-                -: "P (List A) (List B)"
-  , "let rec f : ∀α. List α → List α = λx. app x (f x) in f"
-                -: "∀α. List α → List α"
-  , "let rec f : ∀α. List α → List α = λx. app x (f x) \
-    \ in P (f (List A)) (f (List B))"
-                -: "P (List A) (List B)"
+                -: "∀α:R. List α → List α"
+  , "let rec f = λx. app x (f x) in (f (List B), f (List C))"
+                -: "List B × List C"
+  , te "let rec f : ∀α. List α → List α = (λx. app x (f x)) in f"
+  , "let rec f : ∀α:R. List α → List α = (λx. app x (f x)) in f"
+                -: "∀α:R. List α → List α"
+  , "let rec f : ∀α:R. List α → List α = (λx. app x (f x)) \
+    \ in (f (List B), f (List C))"
+                -: "List B × List C"
+  {-
+------
   , te "let rec f = (λx.x) (λx. app x (f x)) in f"
   , "let rec P f g = P (λx. app x (g x)) (λy. app (f y) y) \
     \ in P f g"

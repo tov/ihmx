@@ -828,7 +828,7 @@ data Term a
   = AbsTm (Patt a) (Term a)
   | LetTm (Patt a) (Term a) (Term a)
   | MatTm (Term a) [(Patt a, Term a)]
-  | RecTm [(Name, Term a)] (Term a)
+  | RecTm [(Name, Maybe Annot, Term a)] (Term a)
   | VarTm Name
   | ConTm Name [Term a]
   | LabTm Bool Name
@@ -866,8 +866,8 @@ termFv e0 = case e0 of
   AbsTm π e      → mask π e
   MatTm e bs     → Set.unions (termFv e : map (uncurry mask) bs)
   LetTm π e1 e2  → termFv e1 `Set.union` mask π e2
-  RecTm bs e2    → Set.unions (termFv e2 : map (termFv . snd) bs)
-                     Set.\\ Set.fromList (map fst bs)
+  RecTm bs e2    → Set.unions (termFv e2 : map (termFv . sel3) bs)
+                     Set.\\ Set.fromList (map sel1 bs)
   VarTm n        → Set.singleton n
   ConTm _ es     → Set.unions (map termFv es)
   LabTm _ _      → Set.empty
@@ -1209,8 +1209,8 @@ countOccs x = loop where
                                               | (πi, ei) ← bs
                                               , x `notElem` pattBv πi ]
   loop (RecTm bs e2)
-    | x `elem` map fst bs = 0
-    | otherwise           = loop e2 + sum (map (loop . snd) bs)
+    | x `elem` map sel1 bs= 0
+    | otherwise           = loop e2 + sum (map (loop . sel3) bs)
   loop (VarTm x')
     | x == x'             = 1
     | otherwise           = 0
@@ -1350,39 +1350,12 @@ instance Ftv (Term Empty) Name where
     AbsTm π e      → ftvTree (π, e)
     MatTm e bs     → ftvTree (e, bs)
     LetTm π e1 e2  → ftvTree (π, e1, e2)
-    RecTm bs e2    → ftvTree (map snd bs, e2)
+    RecTm bs e2    → ftvTree (map sel2 bs, map sel3 bs, e2)
     VarTm _        → return mempty
     ConTm _ es     → ftvTree es
     LabTm _ _      → return mempty
     AppTm e1 e2    → ftvTree (e1, e2)
     AnnTm e annot  → ftvTree (e, annot)
-
--- | A class for type variables (which are free in themselves).
-class (Ftv v v, Show v, Ppr v) ⇒ Tv v where
-  tvUniqueID ∷ v → Int
-  tvKind     ∷ v → Kind
-  tvFlavor   ∷ v → Flavor
-
-data Flavor
-  = Universal
-  | Existential
-  | Skolem
-  deriving (Eq, Ord, Show)
-
-instance Ppr Flavor where
-  ppr = Ppr.char . flavorSigil
-
--- | Shorthand for indicating a flavor
-flavorSigil ∷ Flavor → Char
-flavorSigil Universal   = '@'
-flavorSigil Existential = '#'
-flavorSigil Skolem      = '$'
-
-tvFlavorIs ∷ Tv v ⇒ Flavor → v → Bool
-tvFlavorIs flavor v = tvFlavor v == flavor
-
-tvKindIs ∷ Tv v ⇒ Kind → v → Bool
-tvKindIs kind v = tvKind v == kind
 
 ---
 --- Some-quantified type variable names in annotations
@@ -1774,9 +1747,10 @@ parseTerm = level0 where
                 [ reserved tok "rec" *>
                   (RecTm
                     <$> sepBy1
-                          ((,) <$> lowerIdentifier
-                               <*  reservedOp tok "="
-                               <*> level0)
+                          ((,,) <$> lowerIdentifier
+                                <*> optional (colon tok *> genParser)
+                                <*  reservedOp tok "="
+                                <*> level0)
                           (reserved tok "and")
                     <*  reserved tok "in"
                     <*> level0)
@@ -2030,11 +2004,13 @@ instance Ppr (Term a) where
           Ppr.vcat
             [ Ppr.text kw Ppr.<+>
               Ppr.hang
-                (Ppr.text ni Ppr.<+> Ppr.char '=')
+                (Ppr.text ni Ppr.<+>
+                 maybe Ppr.empty ((Ppr.char ':' Ppr.<+>) . ppr) mai
+                 Ppr.<+> Ppr.char '=')
                 2
                 (loop 0 ei)
-            | (ni,ei)  ← bs
-            | kw       ← "rec" : repeat "and" ]
+            | (ni,mai,ei) ← bs
+            | kw          ← "rec" : repeat "and" ]
           Ppr.$$ Ppr.text " in" Ppr.<+> loop 0 e2
       VarTm name          → Ppr.text name
       ConTm name es       → parensIf (p > 2 && not (null es)) $

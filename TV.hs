@@ -15,6 +15,8 @@
     UnicodeSyntax
   #-}
 module TV (
+  -- * Type variables
+  Tv(..), Flavor(..), tvKindIs, tvFlavorIs,
   -- * Unification monad
   MonadTV(..), MonadReadTV(..), NewTV(..), Substitutable(..),
   -- ** Rank management
@@ -51,6 +53,38 @@ import qualified Graph as Gr
 import Trace
 
 ---
+--- Abstract type variables
+---
+
+-- | A class for type variables (which are free in themselves).
+class (Ftv v v, Show v, Ppr v) ⇒ Tv v where
+  tvUniqueID ∷ v → Int
+  tvKind     ∷ v → Kind
+  tvFlavor   ∷ v → Flavor
+  tvQual     ∷ v → Maybe QLit
+
+data Flavor
+  = Universal
+  | Existential
+  | Skolem
+  deriving (Eq, Ord, Show)
+
+instance Ppr Flavor where
+  ppr = Ppr.char . flavorSigil
+
+-- | Shorthand for indicating a flavor
+flavorSigil ∷ Flavor → Char
+flavorSigil Universal   = '@'
+flavorSigil Existential = '#'
+flavorSigil Skolem      = '$'
+
+tvFlavorIs ∷ Tv v ⇒ Flavor → v → Bool
+tvFlavorIs flavor v = tvFlavor v == flavor
+
+tvKindIs ∷ Tv v ⇒ Kind → v → Bool
+tvKindIs kind v = tvKind v == kind
+
+---
 --- A unification monad
 ---
 
@@ -61,8 +95,8 @@ import Trace
 class (Functor m, Applicative m, Monad m, MonadTrace m,
        Tv tv, MonadRef r m, MonadReadTV tv m) ⇒
       MonadTV tv r m | m → tv r where
-  -- | Allocate a new, empty type variable with the give properties
-  newTV_    ∷ Flavor → Kind → m tv
+  -- | Allocate a new, empty type variable with the given properties
+  newTV_    ∷ (Flavor, Kind, QLit) → m tv
   -- | Allocate a new, empty (unifiable) type variable
   newTV     ∷ m tv
   newTV     = newTV' ()
@@ -144,16 +178,21 @@ class (Functor m, Applicative m, Monad m, MonadTrace m,
   unsafePerformTV ∷ m a → a
   unsafeIOToTV    ∷ IO a → m a
 
-class    NewTV a              where
+class NewTV a where
+  newTVArg ∷ a → (Flavor, Kind, QLit) → (Flavor, Kind, QLit)
   newTV'   ∷ MonadTV tv r m ⇒ a → m tv
+  newTV' a = newTV_ (newTVArg a (Universal, TypeKd, L))
   newTVTy' ∷ MonadTV tv r m ⇒ a → m (Type tv)
   newTVTy' = fvTy <$$> newTV'
 
-instance NewTV (Flavor, Kind) where newTV' = uncurry newTV_
-instance NewTV (Kind, Flavor) where newTV' = uncurry (flip newTV_)
-instance NewTV Kind           where newTV' = newTV_ Universal
-instance NewTV Flavor         where newTV' = flip newTV_ TypeKd
-instance NewTV ()             where newTV' = \_ → newTV_ Universal TypeKd
+instance (NewTV a, NewTV b, NewTV c) ⇒ NewTV (a, b, c) where
+  newTVArg (a, b, c) = newTVArg a . newTVArg b . newTVArg c
+instance (NewTV a, NewTV b) ⇒ NewTV (a, b) where
+  newTVArg (a, b) = newTVArg a . newTVArg b
+instance NewTV Flavor         where newTVArg = upd1
+instance NewTV Kind           where newTVArg = upd2
+instance NewTV QLit           where newTVArg = upd3
+instance NewTV ()             where newTVArg = const id
 
 class Monad m ⇒ Substitutable a m where
   -- | Fully dereference a sequence of TV indirections, with path
@@ -246,14 +285,16 @@ data TV r
 data TVRep r
   = UniFl !(r (Either Rank (Type (TV r))))
   | ExiFl !(r Rank)
-  | SkoFl
+  | SkoFl !QLit
 
 instance Tv (TV r) where
   tvUniqueID = tvId
   tvKind     = tvKind_
   tvFlavor TV { tvRep = UniFl _ } = Universal
   tvFlavor TV { tvRep = ExiFl _ } = Existential
-  tvFlavor TV { tvRep = SkoFl }   = Skolem
+  tvFlavor TV { tvRep = SkoFl _ } = Skolem
+  tvQual   TV { tvRep = SkoFl q } = Just q
+  tvQual   _                      = Nothing
 
 instance Eq (TV s) where
   TV { tvId = i1 } == TV { tvId = i2 } = i1 == i2
@@ -321,7 +362,9 @@ instance MonadTV tv r m ⇒ MonadReadTV tv m where
   readTV = liftM (uncurry (flip maybe Right . Left)) . rootTV
 
 instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
-  newTV_ flavor kind = do
+  newTV_ (flavor, kind, bound) = do
+    when (flavor == Universal && bound /= L) $
+      fail "newTV_ (BUG!): universal tyvars cannot have non-L bound"
     uts ← UT get
     let i = utsGensym uts
     UT $ put uts { utsGensym = succ i }
@@ -329,11 +372,11 @@ instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
     TV i kind <$> case flavor of
       Universal   → lift $ UniFl <$> newRef (Left Rank.infinity)
       Existential → lift $ ExiFl <$> newRef Rank.infinity
-      Skolem      → return SkoFl
+      Skolem      → return $ SkoFl bound
   --
   writeTV_ TV { tvRep = UniFl r } t = lift (writeRef r (Right t))
   writeTV_ TV { tvRep = ExiFl _ } _ = fail "BUG! writeTV_ got ex."
-  writeTV_ TV { tvRep = SkoFl }   _ = fail "BUG! writeTV_ got skolem"
+  writeTV_ TV { tvRep = SkoFl _ } _ = fail "BUG! writeTV_ got skolem"
   readTV_ TV { tvRep = UniFl r } = (const Nothing ||| Just) <$> UT (readRef r)
   readTV_ TV { tvRep = _ }       = return Nothing
   --
@@ -341,11 +384,11 @@ instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
     = (Just ||| const Nothing ) <$> UT (readRef r)
   getTVRank_ TV { tvRep = ExiFl r }
     = Just <$> UT (readRef r)
-  getTVRank_ TV { tvRep = SkoFl }
+  getTVRank_ TV { tvRep = SkoFl _ }
     = return Nothing
   setTVRank_ rank TV { tvRep = UniFl r } = UT (writeRef r (Left rank))
   setTVRank_ rank TV { tvRep = ExiFl r } = UT (writeRef r rank)
-  setTVRank_ _    TV { tvRep = SkoFl }   = return ()
+  setTVRank_ _    TV { tvRep = SkoFl _ } = return ()
   --
   hasChanged   = UT $ gets utsChanged
   putChanged b = UT $ modify $ \uts → uts { utsChanged = b }
@@ -369,7 +412,7 @@ runU m = runST (runErrorT (runUT m))
 ---
 
 instance (MonadTV tv r m, Monoid w) ⇒ MonadTV tv r (WriterT w m) where
-  newTV_   = lift <$$> newTV_
+  newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
   getTVRank_ = lift <$> getTVRank_
@@ -380,7 +423,7 @@ instance (MonadTV tv r m, Monoid w) ⇒ MonadTV tv r (WriterT w m) where
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
 instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (StateT s m) where
-  newTV_   = lift <$$> newTV_
+  newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
   getTVRank_ = lift <$> getTVRank_
@@ -391,7 +434,7 @@ instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (StateT s m) where
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
 instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (ReaderT r m) where
-  newTV_   = lift <$$> newTV_
+  newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
   getTVRank_ = lift <$> getTVRank_
@@ -403,7 +446,7 @@ instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (ReaderT r m) where
 
 instance (MonadTV tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
          MonadTV tv p (RWST r w s m) where
-  newTV_   = lift <$$> newTV_
+  newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
   getTVRank_ = lift <$> getTVRank_
@@ -415,7 +458,7 @@ instance (MonadTV tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
 
 instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
          MonadTV tv s (NM.NodeMapT a b g m) where
-  newTV_   = lift <$$> newTV_
+  newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
   getTVRank_ = lift <$> getTVRank_
@@ -437,7 +480,7 @@ instance (MonadTrace m, Ord a, Gr.DynGraph g) ⇒
 -- | Super sketchy!
 unsafeReadTV ∷ TV s → Maybe (Type (TV s))
 unsafeReadTV TV { tvRep = UniFl r } = (const Nothing ||| Just) (unsafeReadRef r)
-unsafeReadTV TV { tvRep = SkoFl }   = Nothing
+unsafeReadTV TV { tvRep = SkoFl _ } = Nothing
 unsafeReadTV TV { tvRep = ExiFl _ } = Nothing
 
 warn ∷ MonadTV tv r m ⇒ String → m ()

@@ -21,10 +21,11 @@ module Util (
   module Data.Maybe,
   module Data.Monoid,
   module Data.Traversable,
+  module Data.Tuple.All,
   module Perhaps,
   module Prelude,
   -- * Extra list operations
-  findLastIndex, listNth, ordNub,
+  findLastIndex, listNth, ordNub, partitionJust,
   -- * Extra 'Traversable' operations
   mapHead, mapTail, mapInit, mapLast, foldr2,
   -- * 'Maybe' and 'Either' operations
@@ -66,6 +67,7 @@ import Data.Monoid
 import Data.Foldable
 import Data.Function ( on )
 import Data.Traversable
+import Data.Tuple.All
 
 import Perhaps
 
@@ -102,6 +104,12 @@ ordNub = loop Set.empty where
     | x `Set.member` seen = loop seen xs
     | otherwise           = x : loop (Set.insert x seen) xs
   loop _    []     = []
+
+partitionJust ∷ (a → Maybe b) → [a] → ([a], [b])
+partitionJust f = foldr each ([], []) where
+  each x (xs, ys) = case f x of
+    Nothing → (x:xs, ys)
+    Just y →  (xs, y:ys)
 
 concatMapM   ∷ (Foldable t, Monad m, Monoid b) ⇒ (a → m b) → t a → m b
 concatMapM f = foldr (liftM2 mappend . f) (return mempty)

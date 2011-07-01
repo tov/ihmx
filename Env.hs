@@ -60,7 +60,7 @@ bumpΓ γ = γ { rankΓ = Rank.inc (rankΓ γ) }
   Just t  → return t
   Nothing → fail $ "Unbound variable ‘" ++ n ++ "’"
 
-instance Tv tv ⇒ Ftv (Γ tv) tv where
+instance Ftv tv tv ⇒ Ftv (Γ tv) tv where
   ftvTree = ftvTree . mapΓ
 
 instance Ppr tv ⇒ Ppr (Γ tv) where

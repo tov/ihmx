@@ -250,7 +250,11 @@ instance MonadRef r m ⇒ MonadRef r (ConstraintT tv r m) where
 
 -- | Pass through for unification operations
 instance MonadTV tv r m ⇒ MonadTV tv r (ConstraintT tv r m) where
-  newTV_        = lift <$$> newTV_
+  newTV_ (Universal, kind, bound) = do
+    α ← lift (newTV' kind)
+    fvTy α ⊏: bound
+    return α
+  newTV_ attrs  = lift (newTV' attrs)
   writeTV_      = lift <$$> writeTV_
   readTV_       = lift <$> readTV_
   getTVRank_    = lift <$> getTVRank_
@@ -1228,7 +1232,7 @@ solveQualifiers value αs qc τ = do
     each state (QE q1 γs1, QE q2 γs2) = do
       let γs'  = γs1 Set.\\ γs2
           βs'  = Set.filter flex γs2
-          flex = (||) <$> tvKindIs QualKd <*> (`Set.notMember` sq_αs state)
+          flex = (||) <$> unifiable state <*> (`Set.notMember` sq_αs state)
       fβlst ← case q1 \-\ q2 of
         -- (BOT-SAT)
         U  →   return id
@@ -1246,7 +1250,7 @@ solveQualifiers value αs qc τ = do
             | Map.lookup γ (sq_τftv state) == Just Covariant
             , γ `Set.member` sq_αs state
                                 = qemSingleton maxBound
-            | tvKindIs QualKd γ = qemSingleton (QE q2 γs2)
+            | unifiable state γ = qemSingleton (QE q2 γs2)
             | otherwise         = qemSingleton (QE q2 βs')
       return state {
                sq_βlst = fβlst (sq_βlst state),
@@ -1272,7 +1276,7 @@ solveQualifiers value αs qc τ = do
       minBound <$
         Map.filterWithKey
           (\β qem → case qem of
-            QEMeet [QE U γs] → tvKindIs QualKd β && Set.null γs
+            QEMeet [QE U γs] → unifiable state β && Set.null γs
             _                → False)
           (sq_vmap state)
   --
@@ -1283,7 +1287,7 @@ solveQualifiers value αs qc τ = do
   substNeg doLossy state =
     subst who state $ Map.fromDistinctAscList $ do
       δ ← Set.toAscList (sq_αs state)
-      guard (tvKindIs QualKd δ
+      guard (unifiable state δ
              && Map.lookup δ (sq_τftv state) ⊑ Just QContravariant)
       case Map.lookup δ (sq_vmap state) of
         Nothing            → return (δ, maxBound)
@@ -1302,7 +1306,7 @@ solveQualifiers value αs qc τ = do
         add _  (QE _ βs)
           = Map.union (setToMap Nothing βs)
         lbs0 = setToMap (Just minBound)
-                        (Set.filter (tvKindIs QualKd) (sq_αs state))
+                        (Set.filter (unifiable state) (sq_αs state))
                  Map.\\ sq_vmap state
         lbs1 = Map.foldrWithKey each lbs0 (sq_vmap state) where
           each γ (QEMeet qem) = foldr (add (QE U (Set.singleton γ))) <-> qem
@@ -1396,7 +1400,7 @@ solveQualifiers value αs qc τ = do
                     --        " for type variable " ++ show δ
                     return (δ, QE q slack)
                 | δ ← Set.toAscList (sq_αs state)
-                , tvKindIs QualKd δ
+                , unifiable state δ
                 , let (q, var) = decodeSatVar δ (sq_τftv state) sat
                 , q /= U || var /= QInvariant ]
       _   → return state
@@ -1409,7 +1413,7 @@ solveQualifiers value αs qc τ = do
         (πa τftv (FreeVar α) ==> πa τftv (q,αs))
       | (α, QEMeet qes) ← Map.toList (sq_vmap state)
       , QE q αs         ← qes
-      , tvKindIs QualKd α ]
+      , unifiable state α ]
     where
       p ==> q = SAT.Not p SAT.:||: q
       τftv    = sq_τftv state
@@ -1441,10 +1445,13 @@ solveQualifiers value αs qc τ = do
   --
   makeQE q = do
     QExp ql γs ← qualifier (toQualifierType q)
-    return (QE ql (Set.fromList (fromVar <$> γs)))
+    let (γs', qls) = partitionJust tvQual (fromVar <$> γs)
+    return (QE (ql ⊔ bigJoin qls) (Set.fromList γs'))
   --
   fromVar (FreeVar α) = α
   fromVar _           = error "BUG! solveQualifiers got bound tyvar"
+  --
+  unifiable _ α = tvKindIs QualKd α
 
 -- | Update a type variable variance map as a result of substituting a
 --   qualifier expression for a type variable.
