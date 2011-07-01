@@ -930,12 +930,6 @@ inferFnTests = T.test
   , "bot : ∀α. α → α : ∀α:U. α → α"
                 -: "∀α:U. α → α"
   , te "bot : ∀α:U. α → α : ∀α. α → α"
-  -- polymorphic recursion
-  , te "let rec f = λx. f (B x) in f"
-  , "let rec f : ∀α. B α → Z = λx. f (B x) in f"
-                -: "∀α. B α → Z"
-  , "let rec f : ∀α. B α → Z = λx. f (B (f (B x))) in f"
-                -: "∀α. B α → Z"
   -- ST Monad
   , "runST (λ_. returnST X)"
                 -: "X"
@@ -1177,26 +1171,32 @@ inferFnTests = T.test
   , "let rec f : ∀α:R. List α → List α = (λx. app x (f x)) \
     \ in (f (List B), f (List C))"
                 -: "List B × List C"
-  {-
-------
-  , te "let rec f = (λx.x) (λx. app x (f x)) in f"
-  , "let rec P f g = P (λx. app x (g x)) (λy. app (f y) y) \
-    \ in P f g"
-                -: "∀α β. P (List α → List α) (List β → List β)"
-  , "let rec P f g = P (λx. app x (g x)) (λy. app (f y) y) \
-    \ in P (f: ∀α. List α → List α) (g: ∀α. List α → List α)"
-                -: "P (∀α. List α → List α) (∀β. List β → List β)"
+  , te "let rec f = (λx.x) (λx y z. f x z y) in f"
+  , "let rec f = λx. app x (g x) \
+    \    and g = λy. app (f y) y \
+    \ in (f, g)"
+                -: "∀α β:R. (List α → List α) × (List β → List β)"
+  , "let rec f = λx. app x (g x) \
+    \    and g = λy. app (f y) y \
+    \ in (f: ∀α:R. List α → List α, g: ∀α:R. List α → List α)"
+                -: "(∀α:R. List α → List α) × (∀β:R. List β → List β)"
   , "let rec y = λf. f (y f) in y"
-                -: "∀α. (α → α) → α"
+                -: "∀α. (α -R> α) → α"
   , "let rec y = λf x. f (y f) x in y"
-                -: "∀α β. ((α → β) → α → β) → α → β"
-  , "let rec C f = C (λx. f (f x)) in f"
-                -: "∀α. α → α"
+                -: "∀α β, γ:R. ((α -γ> β) -γ> α -L> β) → α -γ> β"
+  , "let rec cf = C (λx. let C f = cf in f (f x)) in cf"
+                -: "∀α. C (α → α)"
   -- (Let rec polymorphic recursion:)
+  , te "let rec f = λx. f (B x) in f"
+  , "let rec f : ∀α. B α → Z = λx. f (B x) in f"
+                -: "∀α. B α → Z"
+  , "let rec f : ∀α. B α → Z = λx. f (B (f (B x))) in f"
+                -: "∀α. B α → Z"
   , te "let rec f = λx. choose (single x) (head (f (single x))) in f"
-  , "let rec f : ∀α. α → List α = \
+  , "let rec f : ∀α:U. α → List α = \
     \       λx. choose (single x) (head (f (single x))) in f"
-                -: "∀α. α → List α"
+                -: "∀α:U. α → List α"
+  {-
   ----
   ---- Existential quantification
   ----
