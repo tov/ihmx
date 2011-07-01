@@ -861,9 +861,9 @@ inferFnTests = T.test
   , "(botU : μa. M → [ A: a ]) M"
       -: "μβ. [ A: M → β ]"
   , "let rec x = `A x in x"
-      -: "∀γ:U. μα. [ A: α | γ ]"
+      -: "∀γ. μα. [ A: α | γ ]"
   , "let rec x = #B (`A x) in x"
-      -: "∀β γ: U. μα. [ A: α | B: β | γ ]"
+      -: "∀β γ. μα. [ A: α | B: β | γ ]"
   , "λx. choose x (`A x)"
       -: "∀γ: U. (μα. [ A: α | γ ]) → μα. [ A: α | γ ]"
   , "λx. choose x (#B (`A x))"
@@ -938,6 +938,9 @@ inferFnTests = T.test
                 -: "Int × Bool"
   , "revapp (single (id : ∀ α. α → α)) single"
                 -: "List (List (∀ α. α → α))"
+  , "(cast X : (X → all a : U. a → a) → Y) (cast X : (X → all a. a → a))"
+                -: "Y"
+  , te "(cast X : (X → all a. a → a) → Y) (cast X : (X → all a : U. a → a))"
   -- ST Monad
   , "runST (λ_. returnST X)"
                 -: "X"
@@ -989,12 +992,15 @@ inferFnTests = T.test
                 -: "Ref R L × L × Ref R L"
   , "let r = ref' U in (swapRef (r, L), r)"
                 -: "Ref R L × L × Ref R L"
-  {-
   , "let r = ref' nil in \
    \ let (r', List T) = swapRef (r, cons T nil) in \
-   \   swapRef (r', cons T nil)"
-                -: "Ref R (List T) × T"
-
+   \   swapRef (r', cons T nil) : Ref R (List T) × List T"
+                -: "Ref R (List T) × List T"
+  , "λT. let r = ref' nil in \
+   \     let (r', List T) = swapRef (r, cons T nil) in \
+   \       swapRef (r', cons T nil)"
+                -: "∀α. T → Ref (R α) (List T) × List T"
+  {-
   -- Scoped type variables
   , "λ (x : α) (y : β). pair x y"
                 -: "∀ α β. α → β → α × β"

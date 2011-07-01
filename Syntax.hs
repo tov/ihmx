@@ -571,7 +571,8 @@ mkRecF f pn k = k (0, 0) (f pn)
 qualifier ∷ MonadReadTV v m ⇒ Type v → m (QExp v)
 qualifier = foldType fquant fbvar ffvar fcon frow frec
   where
-  fquant _ αs k          = k (map snd αs) bumpQExp
+  fquant AllQu αs k      = k (U <$ αs) bumpQExp
+  fquant ExQu  αs k      = k (snd <$> αs) bumpQExp
   fbvar _ _    (Just ql) = qlitexp ql
   fbvar (i,j) n Nothing  = qvarexp (BoundVar i j n)
   ffvar                  = qvarexp . FreeVar

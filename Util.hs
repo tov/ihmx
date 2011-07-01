@@ -17,6 +17,7 @@ module Util (
   module Control.Monad.Trans,
   module Control.Monad.Writer.Strict,
   module Data.Foldable,
+  module Data.Function,
   module Data.Maybe,
   module Data.Monoid,
   module Data.Traversable,
@@ -63,6 +64,7 @@ import Control.Monad.Writer.Strict ( MonadWriter(..), WriterT(..), execWriter,
 import Data.Maybe
 import Data.Monoid
 import Data.Foldable
+import Data.Function ( on )
 import Data.Traversable
 
 import Perhaps
@@ -78,10 +80,10 @@ listNth ∷ Int → [a] → Maybe a
 listNth i = foldr (const . Just) Nothing . drop i
 
 allA ∷ (Applicative f, Traversable t) ⇒ (a → f Bool) → t a → f Bool
-allA pred xs = all id <$> traverse pred xs
+allA pred xs = and <$> traverse pred xs
 
 anyA ∷ (Applicative f, Traversable t) ⇒ (a → f Bool) → t a → f Bool
-anyA pred xs = any id <$> traverse pred xs
+anyA pred xs = or <$> traverse pred xs
 
 whenM ∷ Monad m ⇒ m Bool → m () → m ()
 whenM test branch = test >>= flip when branch

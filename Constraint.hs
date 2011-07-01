@@ -17,7 +17,7 @@
     ViewPatterns
   #-}
 module Constraint (
-  MonadC(..), runConstraintT, tyConLe,
+  MonadC(..), runConstraintT
 ) where
 
 import qualified Data.List  as List
@@ -375,8 +375,14 @@ subtypeTypes unify τ10 τ20 = do
       τ1' ← lift $ occursCheck r2 τ1 >>= if unify then return else copyType
       unifyVar r2 τ1'
       unless unify (check τ1 τ1')
-    (QuaTy q1 αs1 τ1', QuaTy q2 αs2 τ2')
-      | q1 == q2 && αs1 == αs2 →
+    (QuaTy AllQu αs1 τ1', QuaTy AllQu αs2 τ2')
+      | if unify
+          then αs1 == αs2
+          else length αs1 == length αs2
+            && and (zipWith ((⊒)`on`snd) αs1 αs2) →
+      check τ1' τ2'
+    (QuaTy ExQu αs1 τ1', QuaTy ExQu αs2 τ2')
+      | αs1 == αs2 →
       check τ1' τ2'
     (ConTy c1 [], ConTy c2 [])
       | not unify, c1 `tyConLe` c2 → return ()
@@ -1237,6 +1243,9 @@ solveQualifiers value αs qc τ = do
                     then id     -- (TOP-SAT)
                     else Map.unionWith mappend (setToMapWith bound γs')
           bound γ
+            | Map.lookup γ (sq_τftv state) == Just Covariant
+            , γ `Set.member` sq_αs state
+                                = qemSingleton maxBound
             | tvKindIs QualKd γ = qemSingleton (QE q2 γs2)
             | otherwise         = qemSingleton (QE q2 βs')
       return state {
