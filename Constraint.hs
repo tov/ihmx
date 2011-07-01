@@ -839,7 +839,7 @@ tyConNode  ∷ String → Gr.Node
 tyConOrder ∷ Gr String ()
 (tyConNode, tyConOrder) = (Gr.nmLab nm, Gr.trcnr g)
   where
-    (_, (nm, g)) = NM.run Gr.empty $ do
+    (_, (nm, g)) = runIdentity $ NM.runNodeMapT NM.new Gr.empty $ do
       NM.insMapNodesM ["U", "R", "A", "L"]
       NM.insMapEdgesM [("U","R",()), ("U","A",()), ("R","L",()), ("A","L",())]
 
@@ -1220,8 +1220,9 @@ solveQualifiers value αs qc τ = do
   -- This implements DECOMPOSE, BOT-SAT, TOP-SAT, and BOT-UNSAT.
   decompose qc state0 = foldM each state0 qc where
     each state (QE q1 γs1, QE q2 γs2) = do
-      let γs' = γs1 Set.\\ γs2
-          βs' = Set.filter (tvKindIs QualKd) γs2
+      let γs'  = γs1 Set.\\ γs2
+          βs'  = Set.filter flex γs2
+          flex = (||) <$> tvKindIs QualKd <*> (`Set.notMember` sq_αs state)
       fβlst ← case q1 \-\ q2 of
         -- (BOT-SAT)
         U  →   return id
@@ -1259,7 +1260,7 @@ solveQualifiers value αs qc τ = do
   -- Substitute U for qualifier variables upper bounded by U (FORCE-U).
   forceU state =
     subst "forceU" state $
-      const minBound <$>
+      minBound <$
         Map.filterWithKey
           (\β qem → case qem of
             QEMeet [QE U γs] → tvKindIs QualKd β && Set.null γs
@@ -1274,7 +1275,7 @@ solveQualifiers value αs qc τ = do
     subst who state $ Map.fromDistinctAscList $ do
       δ ← Set.toAscList (sq_αs state)
       guard (tvKindIs QualKd δ
-             && Map.findWithDefault 0 δ (sq_τftv state) ⊑ QContravariant)
+             && Map.lookup δ (sq_τftv state) ⊑ Just QContravariant)
       case Map.lookup δ (sq_vmap state) of
         Nothing            → return (δ, maxBound)
         Just (QEMeet [])   → return (δ, maxBound)
@@ -1288,7 +1289,7 @@ solveQualifiers value αs qc τ = do
   substPosInv state = do
     let add qe (QE U (Set.toList → [β]))
           | β `Set.member` sq_αs state
-          = Map.insertWith (liftM2 (⊔)) β (Just qe)
+          = Map.insertWith (liftA2 (⊔)) β (Just qe)
         add _  (QE _ βs)
           = Map.union (setToMap Nothing βs)
         lbs0 = setToMap (Just minBound)
@@ -1370,13 +1371,9 @@ solveQualifiers value αs qc τ = do
   -- As a last ditch effort, use a simple SAT solver to find a
   -- decent literal-only substitution.
   runSat state doIt = do
-    let τftv    = sq_τftv state
-        keep α  = tvKindIs QualKd α
-               || tvFlavorIs Universal α && Map.lookup α τftv ⊑ Just 0
-        βs      = Set.filter keep (sq_αs state)
-        formula = toSat βs state
+    let formula = toSat state
         sols    = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
-    traceN 4 ("runSat", formula, sols, βs)
+    traceN 4 ("runSat", formula, sols)
     case sols of
       []  → fail "Qualifier constraints unsatisfiable"
       sat:_ | doIt
@@ -1389,12 +1386,13 @@ solveQualifiers value αs qc τ = do
                     -- warn $ "\nSAT: substituting " ++ show (QE q slack) ++
                     --        " for type variable " ++ show δ
                     return (δ, QE q slack)
-                | δ ← Set.toAscList βs
+                | δ ← Set.toAscList (sq_αs state)
+                , tvKindIs QualKd δ
                 , let (q, var) = decodeSatVar δ (sq_τftv state) sat
                 , q /= U || var /= QInvariant ]
       _   → return state
   --
-  toSat βs state = foldr (SAT.:&&:) SAT.Yes $
+  toSat state = foldr (SAT.:&&:) SAT.Yes $
       [ (πr τftv q ==> πr τftv (U,βs)) SAT.:&&: (πa τftv q ==> πa τftv (U,βs))
       | (q, βs) ← sq_βlst state ]
     ++
@@ -1402,7 +1400,7 @@ solveQualifiers value αs qc τ = do
         (πa τftv (FreeVar α) ==> πa τftv (q,αs))
       | (α, QEMeet qes) ← Map.toList (sq_vmap state)
       , QE q αs         ← qes
-      , tvKindIs QualKd α || α `Set.member` βs ]
+      , tvKindIs QualKd α ]
     where
       p ==> q = SAT.Not p SAT.:||: q
       τftv    = sq_τftv state

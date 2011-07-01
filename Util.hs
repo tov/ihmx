@@ -11,11 +11,11 @@ module Util (
   module Control.Monad.Error,
   module Control.Monad.Identity,
   module Control.Monad.List,
-  module Control.Monad.RWS,
+  module Control.Monad.RWS.Strict,
   module Control.Monad.Reader,
-  module Control.Monad.State,
+  module Control.Monad.State.Strict,
   module Control.Monad.Trans,
-  module Control.Monad.Writer,
+  module Control.Monad.Writer.Strict,
   module Data.Foldable,
   module Data.Maybe,
   module Data.Monoid,
@@ -51,14 +51,14 @@ import Control.Monad hiding ( forM, forM_, mapM_, mapM, msum,
 import Control.Monad.Error    ( MonadError(..), ErrorT(..), mapErrorT )
 import Control.Monad.Identity ( Identity(..) )
 import Control.Monad.List     ( ListT(..), mapListT )
-import Control.Monad.RWS      ( RWST(..), runRWST, execRWST, evalRWST,
-                                mapRWST )
-import Control.Monad.Reader   ( MonadReader(..), ReaderT(..), mapReaderT )
-import Control.Monad.State    ( MonadState(..), StateT(..), evalStateT,
-                                evalState, gets, modify, mapStateT )
+import Control.Monad.RWS.Strict ( RWST(..), runRWST, execRWST, evalRWST,
+                                  mapRWST )
+import Control.Monad.Reader     ( MonadReader(..), ReaderT(..), mapReaderT )
+import Control.Monad.State.Strict ( MonadState(..), StateT(..), evalStateT,
+                                    evalState, gets, modify, mapStateT )
 import Control.Monad.Trans    ( MonadTrans(..), MonadIO(..) )
-import Control.Monad.Writer   ( MonadWriter(..), WriterT(..), execWriter,
-                                mapWriterT )
+import Control.Monad.Writer.Strict ( MonadWriter(..), WriterT(..), execWriter,
+                                     mapWriterT )
 
 import Data.Maybe
 import Data.Monoid
