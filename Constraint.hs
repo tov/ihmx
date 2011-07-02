@@ -9,6 +9,7 @@
     MultiParamTypeClasses,
     NoImplicitPrelude,
     ParallelListComp,
+    RankNTypes,
     ScopedTypeVariables,
     TupleSections,
     TypeFamilies,
@@ -17,7 +18,8 @@
     ViewPatterns
   #-}
 module Constraint (
-  MonadC(..), runConstraintT
+  MonadC(..), mapConstraintT, runConstraintT,
+  generalize, generalizeList, generalizeEx,
 ) where
 
 import qualified Data.List  as List
@@ -63,31 +65,25 @@ class MonadTV tv r m ⇒ MonadC tv r m | m → tv r where
     QContravariant → τ' ⊏: τ
     QInvariant     → τ ~: τ'
     Omnivariant    → return ()
+  --
+  -- | Get the set of pinned type variables.
+  getPinnedTVs    ∷ m (Set.Set tv)
   -- | Run a computation in the context of some "pinned down" type
   --   variables, which means that they won't be considered for
   --   elimination or generalization.
-  withPinnedTVs ∷ Ftv a tv ⇒ a → m b → m b
+  withPinnedTVs   ∷ Ftv a tv ⇒ a → m b → m b
   -- | Update the pinned TVs list to reflect a substitution.
   --   PRECONDITION: @τ@ is fully substituted
   updatePinnedTVs ∷ tv → Type tv → m ()
+  --
   -- | Figure out which variables to generalize in a piece of syntax
-  generalize'   ∷ Bool → Rank → Type tv → m ([tv], [QLit])
-  -- | Generalize a type under a constraint and environment,
-  --   given whether the the value restriction is satisfied or not
-  generalize    ∷ Bool → Rank → Type tv → m (Type tv)
-  generalize value γrank τ = do
-    (αs, qls) ← generalize' value γrank τ
-    standardizeMus =<< closeWithQuals qls AllQu αs <$> substDeep τ
-  -- | Generalize a list of types together.
-  generalizeList ∷ Bool → Rank → [Type tv] → m [Type tv]
-  generalizeList value γrank τs = do
-    (αs, qls) ← generalize' value γrank (tupleTy τs)
-    mapM (standardizeMus <=< closeWithQuals qls AllQu αs <$$> substDeep) τs
+  generalize'     ∷ Bool → Rank → Type tv → m ([tv], [QLit])
   -- | Saves the constraint in an action that, when run, restores the
   --   saved constraint
-  saveConstraint ∷ m (m ())
+  --
+  saveConstraint  ∷ m (m ())
   -- | Return a string representation of the constraint
-  showConstraint ∷ m String
+  showConstraint  ∷ m String
 
 infix 5 <:, =:, ⊏:
 
@@ -95,6 +91,7 @@ instance (MonadC tv s m, Monoid w) ⇒ MonadC tv s (WriterT w m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  getPinnedTVs   = lift getPinnedTVs
   withPinnedTVs  = mapWriterT <$> withPinnedTVs
   updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
@@ -105,6 +102,7 @@ instance (MonadC tv r m, Defaultable s) ⇒ MonadC tv r (StateT s m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  getPinnedTVs   = lift getPinnedTVs
   withPinnedTVs  = mapStateT <$> withPinnedTVs
   updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
@@ -115,6 +113,7 @@ instance (MonadC tv p m, Defaultable r) ⇒ MonadC tv p (ReaderT r m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  getPinnedTVs   = lift getPinnedTVs
   withPinnedTVs  = mapReaderT <$> withPinnedTVs
   updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
@@ -126,11 +125,39 @@ instance (MonadC tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  getPinnedTVs   = lift getPinnedTVs
   withPinnedTVs  = mapRWST <$> withPinnedTVs
   updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
+
+---
+--- Some operations
+---
+
+-- | Generalize a type under a constraint and environment,
+--   given whether the the value restriction is satisfied or not
+generalize    ∷ MonadC tv r m ⇒ Bool → Rank → Type tv → m (Type tv)
+generalize value γrank τ = do
+  (αs, qls) ← generalize' value γrank τ
+  standardizeMus =<< closeWithQuals qls AllQu αs <$> substDeep τ
+
+-- | Generalize a list of types together.
+generalizeList ∷ MonadC tv r m ⇒ Bool → Rank → [Type tv] → m [Type tv]
+generalizeList value γrank τs = do
+  (αs, qls) ← generalize' value γrank (tupleTy τs)
+  mapM (standardizeMus <=< closeWithQuals qls AllQu αs <$$> substDeep) τs
+
+-- | Generalize the existential type variables in a type
+generalizeEx   ∷ MonadC tv r m ⇒ Rank → Type tv → m (Type tv)
+generalizeEx γrank τ = do
+  αs  ← filter (tvFlavorIs Existential) <$> ftvList τ
+  αs' ← removeByRank γrank αs
+  let qls = getQual <$> αs'
+  standardizeMus =<< closeWithQuals qls ExQu αs' <$> substDeep τ
+  where
+  getQual = fromMaybe (error "generalizeEx (BUG!) no rank?") . tvQual
 
 ---
 --- Eager subtyping constraint solver
@@ -225,6 +252,10 @@ instance Tv tv ⇒ Ppr (CTState tv r) where
                      | (τ1, τ2) ← csQuals cs ])
     ]
 
+mapConstraintT   ∷ (∀s. m (a, s) → n (b, s)) →
+                   ConstraintT tv r m a → ConstraintT tv r n b
+mapConstraintT f = ConstraintT . mapStateT f . unConstraintT_
+
 -- | Run the constraint solver, starting with an empty (true)
 --   constraint.  Seeds the atom graph with the type constructors that
 --   are involved in the subtyping order.
@@ -257,10 +288,11 @@ instance MonadTV tv r m ⇒ MonadTV tv r (ConstraintT tv r m) where
   newTV_ attrs  = lift (newTV' attrs)
   writeTV_      = lift <$$> writeTV_
   readTV_       = lift <$> readTV_
+  collectTV     = mapConstraintT (mapListen2 collectTV)
+  monitorChange = mapConstraintT (mapListen2 monitorChange)
   getTVRank_    = lift <$> getTVRank_
   setTVRank_    = lift <$$> setTVRank_
-  hasChanged    = lift hasChanged
-  putChanged    = lift <$> putChanged
+  setChanged    = lift setChanged
   unsafePerformTV = error "No MonadTV.unsafePerformU for ConstraintT"
   unsafeIOToTV  = lift <$> unsafeIOToTV
 
@@ -288,6 +320,9 @@ instance MonadTV tv r m ⇒ MonadC tv r (ConstraintT tv r m) where
     traceN 3 ("⊏:", toQualifierType τ, toQualifierType τ')
     ConstraintT . modify . csQualsUpdate $
       ((toQualifierType τ, toQualifierType τ') :)
+  --
+  getPinnedTVs      = Set.unions <$> ConstraintT (gets csPinned)
+  --
   withPinnedTVs a m = do
     αs     ← ftvSet a
     ConstraintT (modify (csPinnedUpdate (αs :)))
@@ -575,10 +610,11 @@ solveConstraint value γrank τ = do
   qc    ← ConstraintT (gets csQuals)
   cftv  ← ftvSet . map snd =<< NM.getsGraph Gr.labNodes
   qcftv ← ftvSet qc
-  αs    ← Set.fromDistinctAscList <$$>
-            removeByRank γrank <$>
-              Set.toAscList $
-                (qcftv `Set.union` Map.keysSet τftv) Set.\\ cftv
+  αs    ← Set.fromDistinctAscList <$>
+            filter (tvFlavorIs Universal) <$>
+              (removeByRank γrank <$>
+                Set.toAscList $
+                  (qcftv `Set.union` Map.keysSet τftv) Set.\\ cftv)
   (qc, αqs, τ) ← solveQualifiers value αs qc τ
   ConstraintT (modify (csQualsUpdate (const qc)))
   gtraceN 2 (TraceOut ("gen", "finished", αqs, τ))
@@ -809,14 +845,16 @@ solveConstraint value γrank τ = do
         restrict = if value
                      then id
                      else Map.filter (`elem` [1, -1, 2, -2])
-    -- Remove type variables from a list if their rank indicates that
-    -- they're in the environment or if they're pinned
-    removeByRank γrank αs = do
-      pinned ← Set.unions <$> ConstraintT (gets csPinned)
-      let keep α = do
-            rank ← getTVRank α
-            return (rank > γrank && α `Set.notMember` pinned)
-      filterM keep αs
+
+-- | Remove type variables from a list if their rank indicates that
+--   they're in the environment or if they're pinned
+removeByRank ∷ MonadC tv r m ⇒ Rank → [tv] → m [tv]
+removeByRank γrank αs = do
+  pinned ← getPinnedTVs
+  let keep α = do
+        rank ← getTVRank α
+        return (rank > γrank && α `Set.notMember` pinned)
+  filterM keep αs
 
 -- | Tracing facility for constraint solving; shows the supplied
 --   argument and the state of the constraint solver.

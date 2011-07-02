@@ -6,6 +6,7 @@
     GeneralizedNewtypeDeriving,
     MultiParamTypeClasses,
     OverlappingInstances,
+    RankNTypes,
     TypeSynonymInstances,
     UndecidableInstances,
     UnicodeSyntax
@@ -13,7 +14,7 @@
 module NodeMap (
   MonadNM(..),
   module Data.Graph.Inductive.NodeMap,
-  NodeMapT(..), runNodeMapT, execNodeMapT, runNodeMapT_,
+  NodeMapT(..), mapNodeMapT, runNodeMapT, execNodeMapT, runNodeMapT_,
 ) where
 
 import Data.Graph.Inductive (DynGraph, LNode, LEdge, insNode, lab, empty)
@@ -172,6 +173,10 @@ instance (Ord a, DynGraph g, Monad m) ⇒
 newtype NodeMapT a b g m r
   = NodeMapT { unNodeMapT ∷ Strict.StateT (NodeMap a, g a b) m r }
   deriving (Functor, Applicative, Monad, MonadTrans)
+
+mapNodeMapT   ∷ (∀s. m (y, s) → n (z, s)) →
+                NodeMapT a b g m y → NodeMapT a b g n z
+mapNodeMapT f = NodeMapT . Strict.mapStateT f . unNodeMapT
 
 instance (Ord a, DynGraph g) ⇒ ExtractableT (NodeMapT a b g) where
   extractT   = liftM fst . runNodeMapT new empty

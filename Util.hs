@@ -33,6 +33,8 @@ module Util (
   -- * Monadic operations
   allA, anyA, whenM, unlessM, concatMapM, foldM1,
   before,
+  -- ** Maps for state-like monads
+  mapListen2, mapListen3,
   -- * Composition combinators
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
   (<$.>), (<$$.>), (<$$$.>), (<$$$$.>),
@@ -60,7 +62,7 @@ import Control.Monad.State.Strict ( MonadState(..), StateT(..), evalStateT,
                                     evalState, gets, modify, mapStateT )
 import Control.Monad.Trans    ( MonadTrans(..), MonadIO(..) )
 import Control.Monad.Writer.Strict ( MonadWriter(..), WriterT(..), execWriter,
-                                     mapWriterT )
+                                     mapWriterT, censor, listens )
 
 import Data.Maybe
 import Data.Monoid
@@ -80,6 +82,17 @@ findLastIndex pred = loop 0 Nothing where
 
 listNth ∷ Int → [a] → Maybe a
 listNth i = foldr (const . Just) Nothing . drop i
+
+mapListen2 ∷ Monad m ⇒ (a → m ((b, s), w)) → a → m ((b, w), s)
+mapListen3 ∷ Monad m ⇒ (a → m ((b, s1, s2), w)) → a → m ((b, w), s1, s2)
+
+mapListen2 mapper action = do
+  ((b, s), w) ← mapper action
+  return ((b, w), s)
+
+mapListen3 mapper action = do
+  ((b, s1, s2), w) ← mapper action
+  return ((b, w), s1, s2)
 
 allA ∷ (Applicative f, Traversable t) ⇒ (a → f Bool) → t a → f Bool
 allA pred xs = and <$> traverse pred xs

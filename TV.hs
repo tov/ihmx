@@ -22,7 +22,7 @@ module TV (
   -- ** Rank management
   lowerRank,
   -- ** Change monitoring
-  setChanged, withChanged, monitorChange, whileChanging, iterChanging,
+  whileChanging, iterChanging,
   (>=>!),
   -- * Implementations of 'MonadTV'
   -- ** Representation of type variables
@@ -91,7 +91,7 @@ tvKindIs kind v = tvKind v == kind
 -- | A class for type variables and unification.
 --   Minimal definition: @newTV@, @writeTV_@, @readTV_@, @setTVRank_@,
 --   @getTVRank_@,
---   @hasChanged@, @setChanged@, @unsafePerformTV@, and @unsafeIOToTV@
+--   @setChanged@, @monitorChange@, @unsafePerformTV@, and @unsafeIOToTV@
 class (Functor m, Applicative m, Monad m, MonadTrace m,
        Tv tv, MonadRef r m, MonadReadTV tv m) ⇒
       MonadTV tv r m | m → tv r where
@@ -106,6 +106,9 @@ class (Functor m, Applicative m, Monad m, MonadTrace m,
   -- | Read a type variable. Not meant to be used directly by
   --   clients.
   readTV_   ∷ tv → m (Maybe (Type tv))
+  -- | Get all the type variables allocated while running the action
+  --   (except for any masked out by a previous action.)
+  collectTV ∷ m a → m (a, [tv])
   -- | Get the canonical representative (root) of a tree of type
   --   variables, and any non-tv type stored at the root, if it
   --   exists.  Performs path compression.
@@ -170,10 +173,10 @@ class (Functor m, Applicative m, Monad m, MonadTrace m,
   lowerTVRank r tv = do
     r0 ← getTVRank tv
     when (r < r0) (setTVRank_ r tv)
-  -- | Has the unification state changed?
-  hasChanged ∷ m Bool
-  -- | Set whether the unification state has changed
-  putChanged ∷ Bool → m ()
+  -- | Monitor an action for changes to variables.
+  monitorChange ∷ m a → m (a, Bool)
+  -- | Indicate that something has changed.
+  setChanged ∷ m ()
   -- | Unsafe operations:
   unsafePerformTV ∷ m a → a
   unsafeIOToTV    ∷ IO a → m a
@@ -217,29 +220,6 @@ instance MonadTV tv r m ⇒ Substitutable (Type tv) m where
 -- | Lower the rank of all the type variables in a given type
 lowerRank ∷ (MonadTV tv r m, Ftv a tv) ⇒ Rank → a → m ()
 lowerRank rank τ = ftvList τ >>= mapM_ (lowerTVRank rank)
-
--- | Record that the state has changed
-setChanged ∷ MonadTV tv r m ⇒ m ()
-setChanged = putChanged True
-
--- | Run a computation with a different changed status
-withChanged ∷ MonadTV tv r m ⇒ Bool → m a → m a
-withChanged b m = do
-  b0 ← hasChanged
-  putChanged b
-  r  ← m
-  putChanged b0
-  return r
-
--- | Run a computation with starting with unchanged
-monitorChange ∷ MonadTV tv r m ⇒ m a → m (a, Bool)
-monitorChange m = do
-  b0 ← hasChanged
-  putChanged False
-  r  ← m
-  b  ← hasChanged
-  putChanged (b || b0)
-  return (r, b)
 
 -- | Iterate a computation until it stops changing
 whileChanging ∷ MonadTV tv r m ⇒ m a → m a
@@ -313,9 +293,9 @@ instance Show (TV s) where
         then shows (tvId tv) . showChar '=' .  showsPrec 2 t
         else showsPrec _p t
     _              → (if tvKindIs QualKd tv then showChar '`' else id)
-                   . (if debugLevel > 2
-                        then showChar (flavorSigil (tvFlavor tv))
-                        else id)
+                   . (if tvFlavorIs Universal tv
+                        then id
+                        else showChar (flavorSigil (tvFlavor tv)))
                    . shows (tvId tv)
 
 instance Ftv (TV s) (TV s) where
@@ -326,14 +306,17 @@ instance Ftv (TV s) (TV s) where
 ---
 
 -- | Monad transformer implementing 'MonadTV'.  U is for unification.
-newtype UT (s ∷ * → *) m a = UT { unUT ∷ StateT UTState m a }
+newtype UT (s ∷ * → *) m a
+  = UT { unUT ∷ RWST () (UTWriter s) UTState m a }
   deriving (Monad, MonadTrans)
 
--- | The state of the unification monad transformer.
+-- | The synthesized state of the unification monad transformer.
+type UTWriter s = ([TV s], Any)
+
+-- | The threaded state of the unification monad transformer.
 data UTState
   = UTState {
       utsGensym  ∷ !Int,
-      utsChanged ∷ !Bool,
       utsTrace   ∷ !Int
     }
 
@@ -370,10 +353,14 @@ instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
     let i = utsGensym uts
     UT $ put uts { utsGensym = succ i }
     traceN 2 ("new", flavor, kind, i)
-    TV i kind <$> case flavor of
+    α ← TV i kind <$> case flavor of
       Universal   → lift $ UniFl <$> newRef (Left Rank.infinity)
       Existential → lift $ ExiFl bound <$> newRef Rank.infinity
       Skolem      → return $ SkoFl bound
+    UT $ tell ([α], mempty)
+    return α
+  --
+  collectTV = UT . censor (upd1 []) . listens sel1 . unUT
   --
   writeTV_ TV { tvRep = UniFl r }   t = lift (writeRef r (Right t))
   writeTV_ TV { tvRep = ExiFl _ _ } _ = fail "BUG! writeTV_ got ex."
@@ -391,8 +378,8 @@ instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
   setTVRank_ rank TV { tvRep = ExiFl _ r } = UT (writeRef r rank)
   setTVRank_ _    TV { tvRep = SkoFl _ }   = return ()
   --
-  hasChanged   = UT $ gets utsChanged
-  putChanged b = UT $ modify $ \uts → uts { utsChanged = b }
+  setChanged    = UT $ tell ([], Any True)
+  monitorChange = UT . listens (getAny . sel2) . unUT
   --
   unsafePerformTV = unsafePerformRef . unUT
   unsafeIOToTV    = lift . unsafeIOToRef
@@ -401,7 +388,7 @@ instance Defaultable UTState where
   getDefault = error "BUG! getDefault[UTState]: can't gensym here"
 
 runUT ∷ (Functor m, Monad m) ⇒ UT s m a → m a
-runUT m = evalStateT (unUT m) (UTState 0 False 0)
+runUT m = fst <$> evalRWST (unUT m) () (UTState 0 0)
 
 type U a = ∀ s m. (Functor m, MonadRef s m) ⇒ UT s m a
 
@@ -416,10 +403,11 @@ instance (MonadTV tv r m, Monoid w) ⇒ MonadTV tv r (WriterT w m) where
   newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
+  collectTV     = mapWriterT (mapListen2 collectTV)
+  monitorChange = mapWriterT (mapListen2 monitorChange)
   getTVRank_ = lift <$> getTVRank_
   setTVRank_ = lift <$$> setTVRank_
-  hasChanged = lift hasChanged
-  putChanged = lift <$> putChanged
+  setChanged = lift setChanged
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
@@ -427,10 +415,11 @@ instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (StateT s m) where
   newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
+  collectTV     = mapStateT (mapListen2 collectTV)
+  monitorChange = mapStateT (mapListen2 monitorChange)
   getTVRank_ = lift <$> getTVRank_
   setTVRank_ = lift <$$> setTVRank_
-  hasChanged = lift hasChanged
-  putChanged = lift <$> putChanged
+  setChanged = lift setChanged
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
@@ -438,10 +427,11 @@ instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (ReaderT r m) where
   newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
+  collectTV     = mapReaderT collectTV
+  monitorChange = mapReaderT monitorChange
   getTVRank_ = lift <$> getTVRank_
   setTVRank_ = lift <$$> setTVRank_
-  hasChanged = lift hasChanged
-  putChanged = lift <$> putChanged
+  setChanged = lift setChanged
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
@@ -450,10 +440,11 @@ instance (MonadTV tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
   newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
+  collectTV     = mapRWST (mapListen3 collectTV)
+  monitorChange = mapRWST (mapListen3 monitorChange)
   getTVRank_ = lift <$> getTVRank_
   setTVRank_ = lift <$$> setTVRank_
-  hasChanged = lift hasChanged
-  putChanged = lift <$> putChanged
+  setChanged = lift setChanged
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
@@ -462,10 +453,11 @@ instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
   newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
+  collectTV     = NM.mapNodeMapT (mapListen2 collectTV)
+  monitorChange = NM.mapNodeMapT (mapListen2 monitorChange)
   getTVRank_ = lift <$> getTVRank_
   setTVRank_ = lift <$$> setTVRank_
-  hasChanged = lift hasChanged
-  putChanged = lift <$> putChanged
+  setChanged = lift setChanged
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 

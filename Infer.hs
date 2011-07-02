@@ -116,7 +116,7 @@ infer φ0 δ γ e0 mσ0 = do
       σ1               ← infer [] δ γ e1 Nothing
       inferMatch φ δ γ σ1 bs mσ
     RecTm bs e2                   → do
-      σs               ← mapM (maybe newTVTy (fst <$$> instAnnot δ) . sel2) bs
+      σs               ← mapM (maybe newTVTy (instAnnot δ) . sel2) bs
       let ns           = map sel1 bs
       γ'               ← γ &+&! ns &:& σs
       σs'              ← sequence
@@ -146,7 +146,7 @@ infer φ0 δ γ e0 mσ0 = do
       σ                ← inferApp δ γ σ1 es
       maybeInstGen e0 φ γ σ
     AnnTm e annot                 → do
-      (σ, _)           ← instAnnot δ annot
+      σ                ← instAnnot δ annot
       σ'               ← infer [] δ γ e (Just σ)
       σ' ≤ σ
       return σ
@@ -176,7 +176,7 @@ maybeInst e0 _
 maybeInst _ []          = instantiate
 maybeInst _ φ
   | Universal `elem` φ  = return
-  | otherwise           = fst <$$> instAll True <=< substDeep
+  | otherwise           = instAll True <=< substDeep
 
 maybeInstGen ∷ MonadC tv r m ⇒
                Term Empty → [Flavor] → Γ tv → Type tv → m (Type tv)
@@ -188,11 +188,7 @@ genFlavors value φ γ σ = do
   traceN 4 ("genFlavors", value, φ, γ, σ)
   σ ← substRoot σ
   σ ← if Existential `elem` φ
-        then do
-          αs ← filter (tvFlavorIs Existential) <$> ftvList σ
-          when (not (null αs)) $
-            fail "existentials not implemented XXX"
-          return σ
+        then generalizeEx (rankΓ γ) σ
         else return σ
   if Universal `elem` φ
     then generalize value (rankΓ γ) σ
@@ -328,9 +324,9 @@ funmatchN n0 σ = do
 inferPatt ∷ MonadC tv r m ⇒
             Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
             m (Type tv, [Type tv], [Type tv])
-inferPatt δ0 π0 mσ0 occs = do
-  traceN 1 (TraceIn ("inferPatt", δ0, π0, mσ0, occs))
-  (σ, δ, (σs, αs)) ← runRWST (loop π0 mσ0) () δ0
+inferPatt δ π0 mσ0 occs = do
+  traceN 1 (TraceIn ("inferPatt", δ, π0, mσ0, occs))
+  (σ, (σs, αs)) ← runWriterT (loop π0 mσ0)
   zipWithM_ (⊏:) σs occs
   traceN 1 (TraceOut ("inferPatt", σ, σs, δ, αs))
   return (σ, σs, αs)
@@ -355,9 +351,8 @@ inferPatt δ0 π0 mσ0 occs = do
     σ2 ← maybeFresh mβ
     mσ ?≤ RowTy name σ1 σ2
   loop (AnnPa π annot) mσ = do
-    δ ← get
-    (σ', αs) ← instAnnot δ annot
-    mapM_ some αs
+    (σ', αs) ← collectTV (instAnnot δ annot)
+    mapM_ (some . fvTy) αs
     σ ← mσ ?≤ σ'
     loop π (Just σ')
     return σ
@@ -384,11 +379,11 @@ subsumeBy (<*) σ1 σ2 = do
     (VarTy (FreeVar α), _) | tvFlavorIs Universal α → do
       σ1' <* σ2'
     (_, VarTy (FreeVar α)) | tvFlavorIs Universal α → do
-      (σ1', _) ← instAll True σ1'
+      σ1' ← instAll True σ1'
       σ1' <* σ2'
     _ → do
       ρ1 ← instantiate σ1'
-      (ρ2, αs2) ← instantiateNeg σ2'
+      (ρ2, αs2) ← collectTV (instantiateNeg σ2')
       ρ1 <* ρ2
       skolems ← Set.filter (tvFlavorIs Skolem) <$> ftvSet (σ1, σ2)
       when (any (`Set.member` skolems) αs2) $ do
@@ -401,12 +396,12 @@ subsumeBy (<*) σ1 σ2 = do
 --   accordingly. Return the annotation instantiated to a type and the
 --   list of universal tyvars.
 instAnnot ∷ MonadTV tv r m ⇒
-            Δ tv → Annot → m (Type tv, [Type tv])
+            Δ tv → Annot → m (Type tv)
 instAnnot δ (Annot names σ0) = do
   αs ← mapM eachName names
-  let σ  = totalSubst names αs =<< σ0
+  let σ = totalSubst names αs =<< σ0
   traceN 4 ("instAnnot", δ, σ, αs)
-  return (σ, αs)
+  return σ
   where
     eachName ('_':_) = newTVTy
     eachName name    = case Map.lookup name δ of
@@ -423,7 +418,7 @@ extractPattAnnot δ π0
   loop WldPa        = newTVTy
   loop (ConPa n πs) = ConTy n <$> mapM loop πs
   loop (InjPa n π)  = RowTy n <$> loop π <*> newTVTy
-  loop (AnnPa _ an) = fst <$> instAnnot δ an
+  loop (AnnPa _ an) = instAnnot δ an
 
 ---
 --- Instantiation operations
@@ -451,7 +446,7 @@ splitCon ∷ MonadC tv r m ⇒
 splitCon _    Nothing  _ arity = return (replicate arity Nothing, [])
 splitCon (<*) (Just σ) c arity = do
   traceN 4 ("splitCon", σ, c, arity)
-  (ρ, _) ← instAllEx True False σ
+  ρ ← instAllEx True False σ
   case ρ of
     ConTy c' σs       | c == c', length σs == arity
       → return (Just <$> σs, [])
@@ -475,7 +470,7 @@ splitRow ∷ MonadC tv r m ⇒
 splitRow _    Nothing  _    = return (Nothing, Nothing, [])
 splitRow (<*) (Just σ) name = do
   traceN 4 ("splitRow", σ, name)
-  (ρ, _) ← instAllEx True False σ
+  ρ ← instAllEx True False σ
   loop ρ
   where
   loop ρ = case ρ of
@@ -505,27 +500,24 @@ determineFlavor Skolem      _       = error "BUG! determineFlavor Skolem"
 -- | Instantiate the outermost universal and existential quantifiers
 --   at the given polarities.
 --   PRECONDITION: σ is fully substituted.
-instAllEx ∷ MonadC tv r m ⇒ Bool → Bool → Type tv → m (Type tv, [tv])
-instAllEx upos epos σ = do
-  (σ', αs)  ← instAll upos σ
-  (σ'', βs) ← instEx epos σ'
-  return (σ'', αs ++ βs)
+instAllEx ∷ MonadC tv r m ⇒ Bool → Bool → Type tv → m (Type tv)
+instAllEx upos epos = instAll upos >=> instEx epos
 
 -- | Instantiate an outer universal quantifier.
 --   PRECONDITION: σ is fully substituted.
-instAll ∷ MonadC tv r m ⇒ Bool → Type tv → m (Type tv, [tv])
+instAll ∷ MonadC tv r m ⇒ Bool → Type tv → m (Type tv)
 instAll pos (QuaTy AllQu αqs σ) = do
   traceN 4 ("instAll", pos, αqs, σ)
   instGeneric (determineFlavor Universal pos) αqs σ
-instAll _ σ = return (σ, [])
+instAll _ σ = return σ
 
 -- | Instantiate an outer existential quantifier.
 --   PRECONDITION: σ is fully substituted.
-instEx ∷ MonadC tv r m ⇒ Bool → Type tv → m (Type tv, [tv])
+instEx ∷ MonadC tv r m ⇒ Bool → Type tv → m (Type tv)
 instEx pos (QuaTy ExQu αqs σ) = do
   traceN 4 ("instEx", pos, αqs, σ)
   instGeneric (determineFlavor Existential pos) αqs σ
-instEx _ σ = return (σ, [])
+instEx _ σ = return σ
 
 -- | Instantiate type variables and use them to open a type, given
 --   a flavor and list of qualifier literal bounds.  Along with the
@@ -533,19 +525,19 @@ instEx _ σ = return (σ, [])
 --   PRECONDITION: σ is fully substituted.
 instGeneric ∷ MonadC tv r m ⇒
               Flavor → [(a, QLit)] → Type tv →
-              m (Type tv, [tv])
+              m (Type tv)
 instGeneric flav αqs σ = do
   σ' ← substDeep σ
   αs ← zipWithM (newTV' <$$> (,flav,) . snd) αqs (inferKindsTy σ')
-  return (openTy 0 (fvTy <$> αs) σ', αs)
+  return (openTy 0 (fvTy <$> αs) σ')
 
 -- | To instantiate a prenex quantifier with fresh type variables.
 instantiate ∷ MonadC tv r m ⇒ Type tv → m (Type tv)
-instantiate = substDeep >=> instAllEx True True >=> return . fst
+instantiate = substDeep >=> instAllEx True True
 
 -- | To instantiate a prenex quantifier with fresh type variables, in
 --   a negative position
-instantiateNeg ∷ MonadC tv r m ⇒ Type tv → m (Type tv, [tv])
+instantiateNeg ∷ MonadC tv r m ⇒ Type tv → m (Type tv)
 instantiateNeg = substDeep >=> instAllEx False False
 
 ---
@@ -1193,40 +1185,56 @@ inferFnTests = T.test
   , "let rec f : ∀α:U. α → List α = \
     \       λx. choose (single x) (head (f (single x))) in f"
                 -: "∀α:U. α → List α"
-  {-
   ----
   ---- Existential quantification
   ----
   -- Construction
   , "Z : ∃α. α"
                 -: "∃α. α"
-  , "P Y Z : ∃α. α"
+  , "(Y, Z) : ∃α. α"
                 -: "∃α. α"
-  , "P Y Z : ∃α. P Y α"
-                -: "∃α. P Y α"
-  , te "P Y Z : ∃α. P α α"
-  , "P Y Z : ∃α. P ε α"
-                -: "∃α. P Y α"
-  , "P Z Z : ∃α. P α α"
-                -: "∃α. P α α"
-  , "P Z Z : ∃α. P Z α"
-                -: "∃α. P Z α"
-  , "P Z Z : ∃α. P ε α"
-                -: "∃α. P Z α"
+  , "(Y, Z) : ∃α. Y × α"
+                -: "∃α. Y × α"
+  , te "(Y, Z) : ∃α. α × α"
+  , "(Y, Z) : ∃α. ε × α"
+                -: "∃α. Y × α"
+  , "(Z, Z) : ∃α. α × α"
+                -: "∃α. α × α"
+  , "(Z, Z) : ∃α. Z × α"
+                -: "∃α. Z × α"
+  , "(Z, Z) : ∃α. ε × α"
+                -: "∃α. Z × α"
+  , "Z : ∃α:U. α"
+                -: "∃α:U. α"
+  , "A : ∃α:A. α"
+                -: "∃α:A. α"
+  , "A : ∃α:L. α"
+                -: "∃α:L. α"
+  , te "A : ∃α:U. α"
+  , "(R, A) : ∃α. α × α"
+                -: "∃α. α × α"
+  , te "(R, A) : ∃α:A. α × α"
   -- Impredicative instantiation to ∃
   , "(λx.x) (Z : ∃α. α)"
                 -: "∃α. α"
   , "let z : ∃α. α = Z in (λx.x) z"
                 -: "∃α. α"
-  , "let z : ∃α. α = Z in (λx.Y) z"
+  , "let z : ∃α:A. α = Z in (λ_.Y) z"
                 -: "Y"
-  , "let z : ∃α. α = Z in (λ(x:∃α.α).Y) z"
+  , "let z : ∃α:A. α = Z in (λ(_:∃α:A.α).Y) z"
                 -: "Y"
-  , "let f : ∀ α. A α → Z = λ_. Z in \
-    \let x : ∃ α. A α = A B in \
+  , "let f : ∀ α:A. A α → Z = λ_. Z in \
+    \let x : ∃ α:A. A α = A B in \
     \  f x"
                 -: "Z"
-  , "let x : ∃α. B α = B A in (λ(B _). Z) x"
+  , "let f : ∀ α:A. A α → Z = λ_. Z in \
+    \let x : ∃ α:U. A α = A B in \
+    \  f x"
+                -: "Z"
+  , te "let f : ∀ α:A. A α → Z = λ_. Z in \
+       \let x : ∃ α. A α = A B in \
+       \  f x"
+  , "let x : ∃α:A. B α = B A in (λ(B _). Z) x"
                 -: "Z"
   -- Constructing data with ∃
   , "let x : ∃α. B α = B A in C x"
@@ -1248,8 +1256,9 @@ inferFnTests = T.test
                 -: "(∀α. C α → D α) → (∃α. C α) → ∃α. D α"
   , "λ(f : ∀α. C α → D α α) (e : ∃α. C α). f e"
                 -: "(∀α. C α → D α α) → (∃α. C α) → ∃α. D α α"
-  , "λ(f : ∀α β. C α → C β → D α β) (e : ∃α. C α). f e e"
-                -: "(∀α β. C α → C β → D α β) → (∃α. C α) → ∃α β. D α β"
+  , te "λ(f : ∀α β. C α → C β → D α β) (e : ∃α. C α). f e e"
+  , "λ(f : ∀α β. C α → C β → D α β) (e : ∃α:R. C α). f e e"
+                -: "(∀α β. C α → C β → D α β) → (∃α:R. C α) → ∃α β:R. D α β"
   , "λ(f : ∀α. α → D α) (C e : ∃α. C α). f e"
                 -: "(∀α. α → D α) → ∃α. (∃α. C α) → D α"
   , "λ(f : ∀α. α → D α) (C e : ∃α. C α). (f e : ∃α. D α)"
@@ -1261,19 +1270,16 @@ inferFnTests = T.test
                 -: "(∀α. C α → D α) → (∃α. C α) → ∃α. D α"
   , "(λf e. f e) : (∀α. C α → D α α) → (∃α. C α) → ∃α. D α α"
                 -: "(∀α. C α → D α α) → (∃α. C α) → ∃α. D α α"
-  , "(λf e. f e e) : (∀α β. C α → C β → D α β) → (∃α. C α) → ∃α β. D α β"
-                -: "(∀α β. C α → C β → D α β) → (∃α. C α) → ∃α β. D α β"
-                {-
-  , "(λf e. f e) : (∀α. α → D α) → ∃α. (∃α. C α) → D α"
-                -: "(∀α. α → D α) → ∃α. (∃α. C α) → D α"
-  , "(λf e. f e) : (∀α. α → D α) → (∃β. C β) → ∃α. D α"
-                -: "(∀α. α → D α) → (∃β. C β) → ∃α. D α"
-                -}
+  , "(λf e. f e e) : (∀α β. C α → C β → D α β) → (∃α:R. C α) → ∃α β:R. D α β"
+                -: "(∀α β. C α → C β → D α β) → (∃α:R. C α) → ∃α β:R. D α β"
+  , "(λf e. f e) : (∀α. α → D α) → (∃β. C β) → D (∃α. C α)"
+                -: "(∀α. α → D α) → (∃β. C β) → D (∃α. C α)"
   -- Destruction by pattern matching
-  , "λ(e : ∃α. C (D α) (D α)).          \
+  , "λ(e : ∃α:A. C (D α) (D α)).          \
     \let C x y = e in           \
     \  choose x y"
-                -: "(∃α. C (D α) (D α)) → ∃α. D α"
+                -: "(∃α:A. C (D α) (D α)) → ∃α:A. D α"
+                {-
   , "λ(e : ∃α. C (D α) (D α)).          \
     \let C x y = e in           \
     \  (choose x y : ∃α. D α)"
