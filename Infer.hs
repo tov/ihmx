@@ -97,9 +97,11 @@ infer φ0 δ γ e0 mσ0 = do
   let φ = fromMaybe id (prenexFlavors <$> mσ) φ0
   σ  ← case e0 of
     AbsTm π e                     → do
-      ([mσ1,_,mσ2],αs) ← splitCon (<:) mσ "->" 3
-      (σ1, σs, βs)     ← inferPatt δ π mσ1 (countOccsPatt π e)
-      αs'              ← filterM isMonoType (αs++βs)
+      ((mσ2, σ1, σs), αs) ← collectTV $ do
+        [mσ1,_,mσ2]    ← splitCon (<:) mσ "->" 3
+        (σ1, σs)       ← inferPatt δ π mσ1 (countOccsPatt π e)
+        return (mσ2, σ1, σs)
+      αs'              ← filterM isMonoType (map fvTy αs)
       γ'               ← γ &+&! π &:& σs
       σ2               ← infer [Existential] δ γ' e mσ2
       qe               ← arrowQualifier γ (AbsTm π e)
@@ -109,7 +111,7 @@ infer φ0 δ γ e0 mσ0 = do
     LetTm π e1 e2                 → do
       mσ1              ← extractPattAnnot δ π
       σ1               ← infer [Universal, Existential] δ γ e1 mσ1
-      (_, σs, _)       ← inferPatt δ π (Just σ1) (countOccsPatt π e2)
+      (_, σs)          ← inferPatt δ π (Just σ1) (countOccsPatt π e2)
       γ'               ← γ &+&! π &:& σs
       infer φ δ γ' e2 mσ
     MatTm e1 bs                   → do
@@ -134,7 +136,7 @@ infer φ0 δ γ e0 mσ0 = do
       infer φ δ γ' e2 mσ
     VarTm n                       → maybeInst e0 φ =<< γ &.& n
     ConTm n es                    → do
-      (mσs, _)         ← splitCon (flip (<:)) mσ n (length es)
+      mσs              ← splitCon (flip (<:)) mσ n (length es)
       ρs               ← zipWithM (infer [Existential] δ γ) es mσs
       maybeGen e0 φ γ (ConTy n ρs)
     LabTm b n                     → do
@@ -218,7 +220,7 @@ inferMatch φ δ γ σ ((InjPa n πi, ei):bs) mσ | totalPatt πi = do
       σ2 ← newTVTy
       σ =: RowTy n σ1 σ2
       return (σ1, σ2)
-  (_, σs, _)      ← inferPatt δ πi (Just σ1) (countOccsPatt πi ei)
+  (_, σs)         ← inferPatt δ πi (Just σ1) (countOccsPatt πi ei)
   γ'              ← γ &+&! πi &:& σs
   σi              ← infer φ δ γ' ei mσ
   σk              ← if null bs
@@ -233,7 +235,7 @@ inferMatch φ δ γ σ ((InjPa n πi, ei):bs) mσ | totalPatt πi = do
   return β
 inferMatch φ δ γ σ ((πi, ei):bs) mσ = do
   β               ← newTVTy
-  (_, σs, _)      ← inferPatt δ πi (Just σ) (countOccsPatt πi ei)
+  (_, σs)         ← inferPatt δ πi (Just σ) (countOccsPatt πi ei)
   γ'              ← γ &+&! πi &:& σs
   σi              ← infer φ δ γ' ei mσ
   σk              ← inferMatch φ δ γ σ bs mσ
@@ -323,13 +325,13 @@ funmatchN n0 σ = do
 --   PRECONDITION: mσ0 is fully substituted
 inferPatt ∷ MonadC tv r m ⇒
             Δ tv → Patt Empty → Maybe (Type tv) → [Occurrence] →
-            m (Type tv, [Type tv], [Type tv])
+            m (Type tv, [Type tv])
 inferPatt δ π0 mσ0 occs = do
   traceN 1 (TraceIn ("inferPatt", δ, π0, mσ0, occs))
-  (σ, (σs, αs)) ← runWriterT (loop π0 mσ0)
+  (σ, σs) ← runWriterT (loop π0 mσ0)
   zipWithM_ (⊏:) σs occs
-  traceN 1 (TraceOut ("inferPatt", σ, σs, δ, αs))
-  return (σ, σs, αs)
+  traceN 1 (TraceOut ("inferPatt", σ, σs))
+  return (σ, σs)
   where
   loop (VarPa _)       mσ = do
     σ ← maybeFresh mσ
@@ -340,27 +342,23 @@ inferPatt δ π0 mσ0 occs = do
     σ ⊏: A
     return σ
   loop (ConPa name πs) mσ = do
-    (mαs, αs) ← splitCon (<:) mσ name (length πs)
-    traverse_ some αs
-    σs ← zipWithM loop πs mαs
+    mαs ← splitCon (<:) mσ name (length πs)
+    σs  ← zipWithM loop πs mαs
     mσ ?≤ ConTy name σs
   loop (InjPa name π)  mσ = do
-    (mα, mβ, αs) ← splitRow (<:) mσ name
-    traverse_ some αs
+    (mα, mβ) ← splitRow (<:) mσ name
     σ1 ← loop π mα
     σ2 ← maybeFresh mβ
     mσ ?≤ RowTy name σ1 σ2
   loop (AnnPa π annot) mσ = do
-    (σ', αs) ← collectTV (instAnnot δ annot)
-    mapM_ (some . fvTy) αs
-    σ ← mσ ?≤ σ'
+    σ' ← instAnnot δ annot
+    σ  ← mσ ?≤ σ'
     loop π (Just σ')
     return σ
   --
-  bind τ      = tell ([τ], [])
-  some α      = tell ([], [α])
+  bind τ      = tell [τ]
   maybeFresh  = fromMaybeA fresh
-  fresh       = newTVTy `before` some
+  fresh       = newTVTy
   --
   Nothing ?≤ σ' = return σ'
   Just σ  ?≤ σ' = do σ ≤ σ'; return σ
@@ -442,23 +440,23 @@ Instantiates both ∀ and ∃ to univars:
 splitCon ∷ MonadC tv r m ⇒
            (Type tv → Type tv → m ()) →
            Maybe (Type tv) → Name → Int →
-           m ([Maybe (Type tv)], [Type tv])
-splitCon _    Nothing  _ arity = return (replicate arity Nothing, [])
+           m ([Maybe (Type tv)])
+splitCon _    Nothing  _ arity = return (replicate arity Nothing)
 splitCon (<*) (Just σ) c arity = do
   traceN 4 ("splitCon", σ, c, arity)
   ρ ← instAllEx True False σ
   case ρ of
     ConTy c' σs       | c == c', length σs == arity
-      → return (Just <$> σs, [])
+      → return (Just <$> σs)
     ConTy _ []
       → do
           ρ <* ConTy c []
-          return ([], [])
+          return []
     VarTy (FreeVar α) | tvFlavorIs Universal α
       → do
           αs ← replicateM arity newTVTy
           ρ <* ConTy c αs
-          return (Just <$> αs, αs)
+          return (Just <$> αs)
     _ → fail $ "got " ++ show σ ++ " where " ++ c ++ " expected"
 
 -- | Like 'splitCon', but for rows.
@@ -466,8 +464,8 @@ splitCon (<*) (Just σ) c arity = do
 splitRow ∷ MonadC tv r m ⇒
            (Type tv → Type tv → m ()) →
            Maybe (Type tv) → Name →
-           m (Maybe (Type tv), Maybe (Type tv), [Type tv])
-splitRow _    Nothing  _    = return (Nothing, Nothing, [])
+           m (Maybe (Type tv), Maybe (Type tv))
+splitRow _    Nothing  _    = return (Nothing, Nothing)
 splitRow (<*) (Just σ) name = do
   traceN 4 ("splitRow", σ, name)
   ρ ← instAllEx True False σ
@@ -475,17 +473,17 @@ splitRow (<*) (Just σ) name = do
   where
   loop ρ = case ρ of
     RowTy name' τ1 τ2 | name' == name
-      → return (Just τ1, Just τ2, [])
+      → return (Just τ1, Just τ2)
                       | otherwise
       → do
-        (mτ1, mτ2, αs) ← loop τ2
-        return (mτ1, RowTy name' τ1 <$> mτ2, αs)
+        (mτ1, mτ2) ← loop τ2
+        return (mτ1, RowTy name' τ1 <$> mτ2)
     VarTy (FreeVar α) | tvFlavorIs Universal α
       → do
           τ1 ← newTVTy
           τ2 ← newTVTy
           ρ <* RowTy name τ1 τ2
-          return (Just τ1, Just τ2, [τ1, τ2])
+          return (Just τ1, Just τ2)
     _ → fail $ "got " ++ show σ ++ " where `" ++ name ++ " expected"
 
 -- | What kind of type variable to create when instantiating
