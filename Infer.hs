@@ -88,6 +88,14 @@ inferTm γ e = do
     c ← showConstraint
     return (σ, c)
 
+{-
+data Request tv
+  = Request {
+      rqUni ∷ !Bool,
+      rqExi ∷ ![tv]
+    }
+-}
+
 -- | To infer the type of a term
 infer ∷ MonadC tv r m ⇒
         [Flavor] → Δ tv → Γ tv → Term Empty → Maybe (Type tv) → m (Type tv)
@@ -102,12 +110,18 @@ infer φ0 δ γ e0 mσ0 = do
         (σ1, σs)       ← inferPatt δ π mσ1 (countOccsPatt π e)
         return (mσ2, σ1, σs)
       αs'              ← filterM isMonoType (map fvTy αs)
+      let eαs          = filter (tvFlavorIs Existential) αs
       γ'               ← γ &+&! π &:& σs
       σ2               ← infer [Existential] δ γ' e mσ2
       qe               ← arrowQualifier γ (AbsTm π e)
       unlessM (allA isMonoType αs') $
         fail "used some unannotated parameter polymorphically"
-      maybeGen e0 φ γ (arrTy σ1 qe σ2)
+      for eαs $ \α → do
+        rank ← getTVRank α
+        when (rank <= rankΓ γ) $
+          fail "existential type escapes its scope"
+      σ2' ← generalizeEx (rankΓ γ) σ2
+      maybeGen e0 φ γ (arrTy σ1 qe σ2')
     LetTm π e1 e2                 → do
       mσ1              ← extractPattAnnot δ π
       σ1               ← infer [Universal, Existential] δ γ e1 mσ1
@@ -357,8 +371,7 @@ inferPatt δ π0 mσ0 occs = do
     return σ
   --
   bind τ      = tell [τ]
-  maybeFresh  = fromMaybeA fresh
-  fresh       = newTVTy
+  maybeFresh  = fromMaybeA newTVTy
   --
   Nothing ?≤ σ' = return σ'
   Just σ  ?≤ σ' = do σ ≤ σ'; return σ
