@@ -342,7 +342,7 @@ instance MonadRef r m ⇒ MonadTrace (UT r m) where
   getTraceIndent   = UT (gets utsTrace)
   putTraceIndent n = UT (modify (\uts → uts { utsTrace = n }))
 
-instance MonadTV tv r m ⇒ MonadReadTV tv m where
+instance (Functor m, MonadRef r m) ⇒ MonadReadTV (TV r) (UT r m) where
   readTV = liftM (uncurry (flip maybe Right . Left)) . rootTV
 
 instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
@@ -411,6 +411,9 @@ instance (MonadTV tv r m, Monoid w) ⇒ MonadTV tv r (WriterT w m) where
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
+instance (MonadTV tv r m, Monoid w) ⇒ MonadReadTV tv (WriterT w m) where
+  readTV = lift . readTV
+
 instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (StateT s m) where
   newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
@@ -423,6 +426,9 @@ instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (StateT s m) where
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
+instance (MonadTV tv r m, Defaultable s) ⇒ MonadReadTV tv (StateT s m) where
+  readTV = lift . readTV
+
 instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (ReaderT r m) where
   newTV_   = lift <$> newTV_
   writeTV_ = lift <$$> writeTV_
@@ -434,6 +440,9 @@ instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (ReaderT r m) where
   setChanged = lift setChanged
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
+
+instance (MonadTV tv r m, Defaultable s) ⇒ MonadReadTV tv (ReaderT s m) where
+  readTV = lift . readTV
 
 instance (MonadTV tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
          MonadTV tv p (RWST r w s m) where
@@ -448,6 +457,10 @@ instance (MonadTV tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
 
+instance (MonadTV tv r' m, Defaultable r, Monoid w, Defaultable s) ⇒
+         MonadReadTV tv (RWST r w s m) where
+  readTV = lift . readTV
+
 instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
          MonadTV tv s (NM.NodeMapT a b g m) where
   newTV_   = lift <$> newTV_
@@ -460,6 +473,10 @@ instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
   setChanged = lift setChanged
   unsafePerformTV = unsafePerformTV <$> extractMsgT' ("unsafePerformTV: "++)
   unsafeIOToTV    = lift <$> unsafeIOToTV
+
+instance (MonadTV tv r m, Ord a, Gr.DynGraph g) ⇒
+         MonadReadTV tv (NM.NodeMapT a b g m) where
+  readTV = lift . readTV
 
 instance (MonadTrace m, Ord a, Gr.DynGraph g) ⇒
          MonadTrace (NM.NodeMapT a b g m) where

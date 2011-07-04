@@ -296,6 +296,9 @@ instance MonadTV tv r m ⇒ MonadTV tv r (ConstraintT tv r m) where
   unsafePerformTV = error "No MonadTV.unsafePerformU for ConstraintT"
   unsafeIOToTV  = lift <$> unsafeIOToTV
 
+instance MonadTV tv r m ⇒ MonadReadTV tv (ConstraintT tv r m) where
+  readTV = lift . readTV
+
 -- | 'ConstraintT' implements 'Graph'/'NodeMap' transformer operations
 --   for accessing its graph and node map.
 instance (Ord tv, Monad m) ⇒

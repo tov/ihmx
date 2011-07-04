@@ -64,12 +64,14 @@ import qualified Test.HUnit as T
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import System.IO (stderr, hPutStrLn)
 import System.Timeout (timeout)
+import qualified Text.PrettyPrint as Ppr
 
 import Constraint
 import Env
 import qualified Rank
 import Syntax hiding (tests)
 import TV
+import Ppr
 import Util
 
 ---
@@ -83,26 +85,49 @@ inferTm γ e = do
   δ ← mapM (newTVTy' . varianceToKind) (ftvPure e)
   traceN 2 ("inferTm", δ, γ, e)
   runConstraintT $ do
-    τ ← infer [Universal, Existential] δ γ e Nothing
+    τ ← infer requestGen δ γ e Nothing
     σ ← generalize False (rankΓ γ) τ
     c ← showConstraint
     return (σ, c)
 
-{-
-data Request tv
+data Request
   = Request {
       rqUni ∷ !Bool,
-      rqExi ∷ ![tv]
+      rqExi ∷ !Bool
     }
--}
+  deriving Show
 
--- | To infer the type of a term
+requestInst, requestGen, requestUni, requestExi ∷ Request
+requestInst = Request False False
+requestGen  = Request True True
+requestUni  = requestInst { rqUni = True }
+requestExi  = requestInst { rqExi = True }
+
+instance Ppr Request where
+  ppr φ = (if rqUni φ then Ppr.char '∀' else Ppr.empty)
+          Ppr.<>
+          (if rqExi φ then Ppr.char '∃' else Ppr.empty)
+
+-- | To infer the type of a term.
 infer ∷ MonadC tv r m ⇒
-        [Flavor] → Δ tv → Γ tv → Term Empty → Maybe (Type tv) → m (Type tv)
+        -- | Which quantifiers are requested on the resulting type, which
+        --   may result in generalization or instantiation.
+        Request →
+        -- | The type annotation environment mapping names of some-bound
+        --   type variables to unification variables.
+        Δ tv →
+        -- | The type environment mapping term variables to types.
+        Γ tv →
+        -- | The term to type.
+        Term Empty →
+        -- | Maybe the expected result type, used for annotation
+        --   propagation.
+        Maybe (Type tv) →
+        m (Type tv)
 infer φ0 δ γ e0 mσ0 = do
   traceN 1 (TraceIn ("infer", φ0, γ, e0, mσ0))
   mσ ← mapM substDeep mσ0
-  let φ = fromMaybe id (prenexFlavors <$> mσ) φ0
+  let φ = maybePrenexFlavors mσ φ0
   σ  ← case e0 of
     AbsTm π e                     → do
       ((mσ2, σ1, σs), αs) ← collectTV $ do
@@ -110,27 +135,22 @@ infer φ0 δ γ e0 mσ0 = do
         (σ1, σs)       ← inferPatt δ π mσ1 (countOccsPatt π e)
         return (mσ2, σ1, σs)
       αs'              ← filterM isMonoType (map fvTy αs)
-      let eαs          = filter (tvFlavorIs Existential) αs
       γ'               ← γ &+&! π &:& σs
-      σ2               ← infer [Existential] δ γ' e mσ2
+      σ2               ← infer requestInst δ γ' e mσ2 >>= ensureGenEx γ αs
       qe               ← arrowQualifier γ (AbsTm π e)
       unlessM (allA isMonoType αs') $
         fail "used some unannotated parameter polymorphically"
-      for eαs $ \α → do
-        rank ← getTVRank α
-        when (rank <= rankΓ γ) $
-          fail "existential type escapes its scope"
-      σ2' ← generalizeEx (rankΓ γ) σ2
-      maybeGen e0 φ γ (arrTy σ1 qe σ2')
+      maybeGen e0 φ γ (arrTy σ1 qe σ2)
     LetTm π e1 e2                 → do
       mσ1              ← extractPattAnnot δ π
-      σ1               ← infer [Universal, Existential] δ γ e1 mσ1
-      (_, σs)          ← inferPatt δ π (Just σ1) (countOccsPatt π e2)
+      ((_, σs), αs)    ← collectTV $ do
+        σ1               ← infer requestGen δ γ e1 mσ1
+        inferPatt δ π (Just σ1) (countOccsPatt π e2)
       γ'               ← γ &+&! π &:& σs
-      infer φ δ γ' e2 mσ
+      infer φ δ γ' e2 mσ >>= ensureGenEx γ αs
     MatTm e1 bs                   → do
-      σ1               ← infer [] δ γ e1 Nothing
-      inferMatch φ δ γ σ1 bs mσ
+      (σ1, αs)         ← collectTV (infer requestInst δ γ e1 Nothing)
+      inferMatch φ δ γ σ1 bs mσ >>= ensureGenEx γ αs
     RecTm bs e2                   → do
       σs               ← mapM (maybe newTVTy (instAnnot δ) . sel2) bs
       let ns           = map sel1 bs
@@ -141,7 +161,7 @@ infer φ0 δ γ e0 mσ0 = do
               fail $ "In let rec, binding for ‘" ++ ni ++
                      "’ not a syntactic value"
             σi ⊏: U
-            infer [] δ γ' ei (σi <$ mai)
+            infer requestInst δ γ' ei (σi <$ mai)
         | (ni, mai, ei) ← bs
         | σi            ← σs ]
       zipWithM (<:) σs' σs
@@ -151,63 +171,86 @@ infer φ0 δ γ e0 mσ0 = do
     VarTm n                       → maybeInst e0 φ =<< γ &.& n
     ConTm n es                    → do
       mσs              ← splitCon (flip (<:)) mσ n (length es)
-      ρs               ← zipWithM (infer [Existential] δ γ) es mσs
+      ρs               ← zipWithM (infer requestInst δ γ) es mσs
       maybeGen e0 φ γ (ConTy n ρs)
     LabTm b n                     → do
       instantiate . elimEmptyF . read $
         "∀α r. " ++ (if b then 'α' else 'r') : " → [ " ++ n ++ " : α | r ]"
     AppTm _ _                     → do
       let (e, es) = unfoldApp e0
-      σ1               ← infer [] δ γ e Nothing
-      σ                ← inferApp δ γ σ1 es
-      maybeInstGen e0 φ γ σ
+      (σ, αs)          ← collectTV $ do
+        σ1               ← infer requestInst δ γ e Nothing
+        inferApp δ γ σ1 es
+      σ' ← ensureGenEx γ αs σ
+      maybeInstGen e0 φ γ σ'
     AnnTm e annot                 → do
       σ                ← instAnnot δ annot
-      σ'               ← infer [] δ γ e (Just σ)
+      -- XXX: what about existential type variables created here?:
+      σ'               ← infer requestInst δ γ e (Just σ)
       σ' ≤ σ
       return σ
   traceN 1 (TraceOut ("infer", σ))
   return σ
 
+-- | Ensure that the existential type variables in the given list have
+--   not escaped to the given environment, then generalize existentials
+--   in that environment.
+ensureGenEx ∷ MonadC tv r m ⇒
+          Γ tv → [tv] → Type tv → m (Type tv)
+ensureGenEx γ αs0 σ = do
+  let αs = filter (tvFlavorIs Existential) αs0
+  for αs $ \α → do
+    rank ← getTVRank α
+    when (rank <= rankΓ γ) $
+      fail "existential type escapes its scope"
+  generalizeEx (rankΓ γ) σ
+
 -- | Determine which quantifiers may appear at the beginning of
 --   a type scheme, given a list of quantifiers that may be presumed
 --   to belong to an unsubstituted variable.
-prenexFlavors ∷ Type tv → [Flavor] → [Flavor]
+maybePrenexFlavors ∷ Maybe (Type tv) → Request → Request
+maybePrenexFlavors Nothing  = id
+maybePrenexFlavors (Just σ) = prenexFlavors σ
+
+-- | Determine which quantifiers may appear at the beginning of
+--   a type scheme, given a list of quantifiers that may be presumed
+--   to belong to an unsubstituted variable.
+prenexFlavors ∷ Type tv → Request → Request
 prenexFlavors σ φ =
   case σ of
-    QuaTy AllQu _ σ' → Universal : prenexFlavors σ' φ
-    QuaTy ExQu  _ _  → [Existential]
+    QuaTy ExQu _ σ'  → (prenexFlavors σ' φ) { rqExi = True }
+    QuaTy AllQu _ _  → requestUni
     VarTy _          → φ
-    _                → []
+    _                → requestInst
 
 -- | Generalize the requested flavors, 
 maybeGen ∷ MonadC tv r m ⇒
-           Term Empty → [Flavor] → Γ tv → Type tv → m (Type tv)
-maybeGen = genFlavors . syntacticValue
+           Term Empty → Request → Γ tv → Type tv → m (Type tv)
+maybeGen = genRequest . syntacticValue
 
 maybeInst ∷ MonadC tv r m ⇒
-            Term Empty → [Flavor] → Type tv → m (Type tv)
+            Term Empty → Request → Type tv → m (Type tv)
 maybeInst e0 _
-  | isAnnotated e0      = return
-maybeInst _ []          = instantiate
-maybeInst _ φ
-  | Universal `elem` φ  = return
-  | otherwise           = instAll True <=< substDeep
+              | isAnnotated e0 = return
+maybeInst _ φ | rqUni φ        = return
+              | rqExi φ        = instAll True <=< substDeep
+              | otherwise      = instantiate
+              -- XXX what about requestUni?
 
 maybeInstGen ∷ MonadC tv r m ⇒
-               Term Empty → [Flavor] → Γ tv → Type tv → m (Type tv)
+               Term Empty → Request → Γ tv → Type tv → m (Type tv)
 maybeInstGen e φ γ = maybeInst e φ >=> maybeGen e φ γ
 
-genFlavors ∷ MonadC tv r m ⇒
-             Bool → [Flavor] → Γ tv → Type tv → m (Type tv)
-genFlavors value φ γ σ = do
-  traceN 4 ("genFlavors", value, φ, γ, σ)
+genRequest ∷ MonadC tv r m ⇒
+             Bool → Request → Γ tv → Type tv → m (Type tv)
+genRequest value φ γ σ = do
+  traceN 4 ("genRequest", value, φ, γ, σ)
   σ ← substRoot σ
-  σ ← if Existential `elem` φ
-        then generalizeEx (rankΓ γ) σ
+  σ ← if rqUni φ
+        then generalize value (rankΓ γ) σ
         else return σ
-  if Universal `elem` φ
-    then generalize value (rankΓ γ) σ
+  if rqExi φ
+    then generalizeEx (rankΓ γ) σ
     else return σ
 
 -- | To compute the qualifier expression for a function type.
@@ -220,7 +263,7 @@ arrowQualifier γ e =
 -- | To infer a type of a match form, including refinement when matching
 --   open variants.
 inferMatch ∷ MonadC tv r m ⇒
-             [Flavor] → Δ tv → Γ tv → Type tv →
+             Request → Δ tv → Γ tv → Type tv →
              [(Patt Empty, Term Empty)] → Maybe (Type tv) → 
              m (Type tv)
 inferMatch _ _ _ _ [] _ = newTVTy
@@ -234,9 +277,9 @@ inferMatch φ δ γ σ ((InjPa n πi, ei):bs) mσ | totalPatt πi = do
       σ2 ← newTVTy
       σ =: RowTy n σ1 σ2
       return (σ1, σ2)
-  (_, σs)         ← inferPatt δ πi (Just σ1) (countOccsPatt πi ei)
+  ((_, σs), αs)   ← collectTV $ inferPatt δ πi (Just σ1) (countOccsPatt πi ei)
   γ'              ← γ &+&! πi &:& σs
-  σi              ← infer φ δ γ' ei mσ
+  σi              ← infer φ δ γ' ei mσ >>= ensureGenEx γ αs
   σk              ← if null bs
                       then do σ2 <: endTy; return β
                       else inferMatch φ δ γ σ2 bs mσ
@@ -249,9 +292,9 @@ inferMatch φ δ γ σ ((InjPa n πi, ei):bs) mσ | totalPatt πi = do
   return β
 inferMatch φ δ γ σ ((πi, ei):bs) mσ = do
   β               ← newTVTy
-  (_, σs)         ← inferPatt δ πi (Just σ) (countOccsPatt πi ei)
+  ((_, σs), αs)   ← collectTV $ inferPatt δ πi (Just σ) (countOccsPatt πi ei)
   γ'              ← γ &+&! πi &:& σs
-  σi              ← infer φ δ γ' ei mσ
+  σi              ← infer φ δ γ' ei mσ >>= ensureGenEx γ αs
   σk              ← inferMatch φ δ γ σ bs mσ
   if (isAnnotated ei)
     then σi <: β
@@ -277,7 +320,7 @@ inferApp δ γ ρ e1n = do
     subsumeN [ -- last arg to infer (Just σi) is for
                -- formal-to-actual propagation
                (σi, do
-                      σi' ← infer [Existential] δ γ ei (Just σi)
+                      σi' ← infer requestExi δ γ ei (Just σi)
                       traceN 2 ("subsumeI", i, ei, σi', σi)
                       if isAnnotated ei
                         then σi' <: σi
@@ -393,13 +436,25 @@ subsumeBy (<*) σ1 σ2 = do
       σ1' ← instAll True σ1'
       σ1' <* σ2'
     _ → do
-      ρ1 ← instantiate σ1'
+      ρ1        ← instantiate σ1'
       (ρ2, αs2) ← collectTV (instantiateNeg σ2')
       ρ1 <* ρ2
-      skolems ← Set.filter (tvFlavorIs Skolem) <$> ftvSet (σ1, σ2)
-      when (any (`Set.member` skolems) αs2) $ do
-        traceN 3 (αs2, skolems)
+      let (us1, _, ss1) = partitionFlavors αs2
+      freeSkolems ← Set.filter (tvFlavorIs Skolem) <$>
+                      ftvSet (σ1, σ2, fvTy <$> us1)
+      when (any (`Set.member` freeSkolems) ss1) $ do
+        traceN 3 (αs2, freeSkolems)
         fail "Could not subsume: insufficiently polymorphic"
+      return ()
+
+partitionFlavors ∷ Tv tv ⇒
+                   [tv] → ([tv], [tv], [tv])
+partitionFlavors = loop [] [] [] where
+  loop us es ss []     = (us, es, ss)
+  loop us es ss (α:αs) = case tvFlavor α of
+    Universal   → loop (α:us) es     ss     αs
+    Existential → loop us     (α:es) ss     αs
+    Skolem      → loop us     es     (α:ss) αs
 
 -- | Given a tyvar environment (mapping some-bound names to tyvars) and
 --   an annotation, create new universal type variables for any new
@@ -501,25 +556,27 @@ splitRow (<*) (Just σ) name = do
 
 -- | What kind of type variable to create when instantiating
 --   a given quantifier in a given polarity:
-determineFlavor ∷ Flavor → Bool → Flavor
-determineFlavor Universal   True    = Universal
-determineFlavor Universal   False   = Skolem
-determineFlavor Existential True    = Existential
-determineFlavor Existential False   = Universal
-determineFlavor Skolem      _       = error "BUG! determineFlavor Skolem"
+determineFlavor ∷ Quant → Bool → Flavor
+determineFlavor AllQu  True    = Universal
+determineFlavor AllQu  False   = Skolem
+determineFlavor ExQu   True    = Existential
+determineFlavor ExQu   False   = Universal
 
 -- | Instantiate the outermost universal and existential quantifiers
 --   at the given polarities.
 --   PRECONDITION: σ is fully substituted.
 instAllEx ∷ MonadC tv r m ⇒ Bool → Bool → Type tv → m (Type tv)
-instAllEx upos epos = instAll upos >=> instEx epos
+instAllEx upos epos = instEx epos >=> instAll upos
 
 -- | Instantiate an outer universal quantifier.
 --   PRECONDITION: σ is fully substituted.
 instAll ∷ MonadC tv r m ⇒ Bool → Type tv → m (Type tv)
 instAll pos (QuaTy AllQu αqs σ) = do
-  traceN 4 ("instAll", pos, αqs, σ)
-  instGeneric (determineFlavor Universal pos) αqs σ
+  traceN 4 ("instAll/∀", pos, αqs, σ)
+  instGeneric 0 (determineFlavor AllQu pos) αqs σ
+instAll pos (QuaTy ExQu αqs (QuaTy AllQu βqs σ)) = do
+  traceN 4 ("instAll/∃∀", pos, αqs, βqs, σ)
+  QuaTy ExQu αqs <$> instGeneric 1 (determineFlavor AllQu pos) βqs σ
 instAll _ σ = return σ
 
 -- | Instantiate an outer existential quantifier.
@@ -527,7 +584,7 @@ instAll _ σ = return σ
 instEx ∷ MonadC tv r m ⇒ Bool → Type tv → m (Type tv)
 instEx pos (QuaTy ExQu αqs σ) = do
   traceN 4 ("instEx", pos, αqs, σ)
-  instGeneric (determineFlavor Existential pos) αqs σ
+  instGeneric 0 (determineFlavor ExQu pos) αqs σ
 instEx _ σ = return σ
 
 -- | Instantiate type variables and use them to open a type, given
@@ -535,12 +592,12 @@ instEx _ σ = return σ
 --   instantiated type, returns any new type variables.
 --   PRECONDITION: σ is fully substituted.
 instGeneric ∷ MonadC tv r m ⇒
-              Flavor → [(a, QLit)] → Type tv →
+              Int → Flavor → [(a, QLit)] → Type tv →
               m (Type tv)
-instGeneric flav αqs σ = do
+instGeneric k flav αqs σ = do
   σ' ← substDeep σ
   αs ← zipWithM (newTV' <$$> (,flav,) . snd) αqs (inferKindsTy σ')
-  return (openTy 0 (fvTy <$> αs) σ')
+  return (openTy k (fvTy <$> αs) σ')
 
 -- | To instantiate a prenex quantifier with fresh type variables.
 instantiate ∷ MonadC tv r m ⇒ Type tv → m (Type tv)
@@ -648,6 +705,28 @@ inferFnTests = T.test
   , te "let rec x = C x in x"
   , te "λf. f f"
   , te "let rec f = λ(C x).f (C (f x)) in f"
+  -- Subsumption
+  , te "bot : ∀α. T α α : ∃α ∀β. T α β"
+  , "bot : ∃α ∀β. T α β : ∃α. T α M"
+                  -: "∃α. T α M"
+  , te "bot : ∀α ∃β. T α β : ∃β ∀α. T α β"
+  , "bot : ∃α. T α α : ∃α β. T α β"
+                  -: "∃α β. T α β"
+  , te "bot : ∃α β. T α β : ∃α. T α α"
+  , "bot : ∀α β. T α β : ∀α. T α α"
+                  -: "∀α. T α α"
+  , te "bot : ∀α. T α α : ∀α β. T α β"
+  , "bot : ∀α. T α : ∃α. T α"
+                  -: "∃α. T α"
+  , te "bot : ∃α. T α : ∀α. T α"
+  , "bot : ∀α β. T α β : ∃α ∀β. T α β"
+                  -: "∃α ∀β. T α β"
+  , "bot : ∀α β. T α β : ∃β ∀α. T α β"
+                  -: "∃β ∀α. T α β"
+  , "bot : ∀α β. T α β : ∃α β. T α β"
+                  -: "∃α β. T α β"
+  , "bot : ∀α β. T α β : ∃α. T α α"
+                  -: "∃α. T α α"
   -- Subtyping
   , "λf. C (f L)" -: "∀ α. (L -L> α) → C α"
   , "λf. C (f L) (f L)" -: "∀ α. (L -R> α) → C α α"
@@ -1249,6 +1328,8 @@ inferFnTests = T.test
                 -: "Z"
   -- Constructing data with ∃
   , "let x : ∃α. B α = B A in C x"
+                -: "∃α. C (B α)"
+  , "let x : ∃α. B α = B A in C (x : ∃α. B α)"
                 -: "C (∃α. B α)"
   , "let x : ∃α. B α = B A in single x"
                 -: "List (∃α. B α)"
@@ -1260,7 +1341,7 @@ inferFnTests = T.test
   , "λ(x: ∃α. List α). x"
                 -: "(∃α. List α) → ∃α. List α"
   , "λ(x: ∃α. List α). x : List β"
-                -: "∃α. (∃α. List α) → List α"
+                -: "(∃α. List α) → ∃α. List α"
   , "λ(f : ∀α. α → D α) (e : ∃α. C α). f e"
                 -: "(∀α. α → D α) → (∃α. C α) → D (∃α. C α)"
   , "λ(f : ∀α. C α → D α) (e : ∃α. C α). f e"
@@ -1271,7 +1352,7 @@ inferFnTests = T.test
   , "λ(f : ∀α β. C α → C β → D α β) (e : ∃α:R. C α). f e e"
                 -: "(∀α β. C α → C β → D α β) → (∃α:R. C α) → ∃α β:R. D α β"
   , "λ(f : ∀α. α → D α) (C e : ∃α. C α). f e"
-                -: "(∀α. α → D α) → ∃α. (∃α. C α) → D α"
+                -: "(∀α. α → D α) → (∃α. C α) → ∃α. D α"
   , "λ(f : ∀α. α → D α) (C e : ∃α. C α). (f e : ∃α. D α)"
                 -: "(∀α. α → D α) → (∃β. C β) → ∃α. D α"
   -- with propagation
@@ -1286,6 +1367,29 @@ inferFnTests = T.test
   , "(λf e. f e) : (∀α. α → D α) → (∃β. C β) → D (∃α. C α)"
                 -: "(∀α. α → D α) → (∃β. C β) → D (∃α. C α)"
   -- Destruction by pattern matching
+  , "λ(T x: ∃α. T α). S x"
+                -: "(∃α. T α) → ∃α. S α"
+  , te "λf (T x: ∃α. T α). f x"
+  , "λ(tx: ∃α. T α). let T x = tx in S x"
+                -: "(∃α. T α) → ∃ α. S α"
+  , te "λf (tx: ∃α. T α). let T x = tx in f x"
+  , "λ(tx: ∃α. T α). match tx with T x → S x"
+                -: "(∃α. T α) → ∃ α. S α"
+  , te "λf (tx: ∃α. T α). match tx with T x → f x"
+  , "λ(tx: S (∃α. T α)). match tx with S (T x) → T (S x)"
+                -: "S (∃α. T α) → ∃α. T (S α)"
+  , "λ(tx: S (∃α. T α)). match tx with S (T x) → T (S x : ∃β. S β)"
+                -: "S (∃α. T α) → T (∃α. S α)"
+  , te "λf (tx: S (∃α. T α)). match tx with S (T x) → f x"
+  , "let x = bot : ∃ α. T α in (λ(T y). S y) x"
+                -: "∃ α. S α"
+  , te "λf. let x = bot : ∃ α. T α in (λ(T y). f y) x"
+  , "λ_. S (bot : ∃α. T α : T b)"
+                -: "∀α:A. α → ∃β. S (T β)"
+  , te "λf. f (bot : ∃α. T α : T b)"
+  , "λ_. let x = bot : ∃α. T α : T b in S x"
+                -: "∀α:A. α → ∃β. S (T β)"
+  , te "λf. let x = bot : ∃α. T α : T b in f x"
   , "λ(e : ∃α:A. C (D α) (D α)).          \
     \let C x y = e in           \
     \  choose x y"
