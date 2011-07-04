@@ -11,26 +11,30 @@ module Util (
   module Control.Monad.Error,
   module Control.Monad.Identity,
   module Control.Monad.List,
-  module Control.Monad.RWS,
+  module Control.Monad.RWS.Strict,
   module Control.Monad.Reader,
-  module Control.Monad.State,
+  module Control.Monad.State.Strict,
   module Control.Monad.Trans,
-  module Control.Monad.Writer,
+  module Control.Monad.Writer.Strict,
   module Data.Foldable,
+  module Data.Function,
   module Data.Maybe,
   module Data.Monoid,
   module Data.Traversable,
+  module Data.Tuple.All,
   module Perhaps,
   module Prelude,
   -- * Extra list operations
-  findLastIndex, listNth, ordNub,
+  findLastIndex, listNth, ordNub, partitionJust,
   -- * Extra 'Traversable' operations
   mapHead, mapTail, mapInit, mapLast, foldr2,
-  -- * An 'Either' operation
-  unEither,
+  -- * 'Maybe' and 'Either' operations
+  fromMaybeA, unEither,
   -- * Monadic operations
   allA, anyA, whenM, unlessM, concatMapM, foldM1,
   before,
+  -- ** Maps for state-like monads
+  mapListen2, mapListen3,
   -- * Composition combinators
   (<$$>), (<$$$>), (<$$$$>), (<$$$$$>), (<$$$$$$>),
   (<$.>), (<$$.>), (<$$$.>), (<$$$$.>),
@@ -48,20 +52,24 @@ import Control.Applicative
 import Control.Monad hiding ( forM, forM_, mapM_, mapM, msum,
                               sequence, sequence_ )
 
-import Control.Monad.Error    ( MonadError(..), ErrorT(..) )
+import Control.Monad.Error    ( MonadError(..), ErrorT(..), mapErrorT )
 import Control.Monad.Identity ( Identity(..) )
-import Control.Monad.List     ( ListT(..) )
-import Control.Monad.RWS      ( RWST(..), evalRWST )
-import Control.Monad.Reader   ( MonadReader(..), ReaderT(..) )
-import Control.Monad.State    ( MonadState(..), StateT(..), evalStateT,
-                                evalState, gets, modify )
+import Control.Monad.List     ( ListT(..), mapListT )
+import Control.Monad.RWS.Strict ( RWST(..), runRWST, execRWST, evalRWST,
+                                  mapRWST )
+import Control.Monad.Reader     ( MonadReader(..), ReaderT(..), mapReaderT )
+import Control.Monad.State.Strict ( MonadState(..), StateT(..), evalStateT,
+                                    evalState, gets, modify, mapStateT )
 import Control.Monad.Trans    ( MonadTrans(..), MonadIO(..) )
-import Control.Monad.Writer   ( MonadWriter(..), WriterT(..), execWriter )
+import Control.Monad.Writer.Strict ( MonadWriter(..), WriterT(..), execWriter,
+                                     mapWriterT, censor, listens )
 
 import Data.Maybe
 import Data.Monoid
 import Data.Foldable
+import Data.Function ( on )
 import Data.Traversable
+import Data.Tuple.All
 
 import Perhaps
 
@@ -75,11 +83,22 @@ findLastIndex pred = loop 0 Nothing where
 listNth ∷ Int → [a] → Maybe a
 listNth i = foldr (const . Just) Nothing . drop i
 
+mapListen2 ∷ Monad m ⇒ (a → m ((b, s), w)) → a → m ((b, w), s)
+mapListen3 ∷ Monad m ⇒ (a → m ((b, s1, s2), w)) → a → m ((b, w), s1, s2)
+
+mapListen2 mapper action = do
+  ((b, s), w) ← mapper action
+  return ((b, w), s)
+
+mapListen3 mapper action = do
+  ((b, s1, s2), w) ← mapper action
+  return ((b, w), s1, s2)
+
 allA ∷ (Applicative f, Traversable t) ⇒ (a → f Bool) → t a → f Bool
-allA pred xs = all id <$> traverse pred xs
+allA pred xs = and <$> traverse pred xs
 
 anyA ∷ (Applicative f, Traversable t) ⇒ (a → f Bool) → t a → f Bool
-anyA pred xs = any id <$> traverse pred xs
+anyA pred xs = or <$> traverse pred xs
 
 whenM ∷ Monad m ⇒ m Bool → m () → m ()
 whenM test branch = test >>= flip when branch
@@ -99,6 +118,12 @@ ordNub = loop Set.empty where
     | otherwise           = x : loop (Set.insert x seen) xs
   loop _    []     = []
 
+partitionJust ∷ (a → Maybe b) → [a] → ([a], [b])
+partitionJust f = foldr each ([], []) where
+  each x (xs, ys) = case f x of
+    Nothing → (x:xs, ys)
+    Just y →  (xs, y:ys)
+
 concatMapM   ∷ (Foldable t, Monad m, Monoid b) ⇒ (a → m b) → t a → m b
 concatMapM f = foldr (liftM2 mappend . f) (return mempty)
 
@@ -114,6 +139,10 @@ before m k = do
   return a
 
 infixl 8 `before`
+
+fromMaybeA ∷ Applicative f ⇒ f a → Maybe a → f a
+fromMaybeA _ (Just a) = pure a
+fromMaybeA f Nothing  = f
 
 unEither ∷ Either a a → a
 unEither = either id id

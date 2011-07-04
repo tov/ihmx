@@ -25,9 +25,8 @@ import Data.Graph.Inductive.Query.DFS
 import Data.Graph.Inductive.Query.TransClos
 
 -- Mine:
-import qualified NodeMap as NM
+import NodeMap as NM
 import Util hiding (empty)
-import Defaultable
 
 -- | Transitive, non-reflexive closure
 trcnr ∷ DynGraph gr ⇒ gr a b → gr a ()
@@ -142,14 +141,8 @@ instance (Graph gr, Show v) ⇒ Show (ShowGraph gr v) where
   showsPrec _ (ShowGraph gr) =
     showChar '{' .
     foldr (.) id
-      (List.intersperse (showString " ⋀ ")
-         [ shows n1 . showChar '≤' . shows n2
+      (List.intersperse (showString ", ")
+         [ shows n1 . showString "<:" . shows n2
          | (n1, n2) ← labNodeEdges gr ])
     . showChar '}'
-
-instance Ord a ⇒ Defaultable (NM.NodeMap a) where
-  getDefault = NM.new
-
-instance Defaultable (Gr a b) where
-  getDefault = empty
 

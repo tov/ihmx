@@ -6,6 +6,8 @@ module Rank (
 ) where
 
 import Data.Monoid
+import Ppr
+import qualified Text.PrettyPrint as Ppr
 
 data Rank
   = Finite !Int
@@ -15,6 +17,8 @@ data Rank
 instance Show Rank where
   show (Finite n) = show n
   show Infinity   = "∞"
+
+instance Ppr Rank where ppr = Ppr.text . show
 
 instance Monoid Rank where
   mempty  = Finite 0

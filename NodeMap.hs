@@ -6,6 +6,7 @@
     GeneralizedNewtypeDeriving,
     MultiParamTypeClasses,
     OverlappingInstances,
+    RankNTypes,
     TypeSynonymInstances,
     UndecidableInstances,
     UnicodeSyntax
@@ -13,20 +14,25 @@
 module NodeMap (
   MonadNM(..),
   module Data.Graph.Inductive.NodeMap,
-  NodeMapT(..), runNodeMapT, execNodeMapT, runNodeMapT_,
+  NodeMapT(..), mapNodeMapT, runNodeMapT, execNodeMapT, runNodeMapT_,
 ) where
 
-import Data.Graph.Inductive (DynGraph, LNode, LEdge, insNode, lab)
+import Data.Graph.Inductive (DynGraph, LNode, LEdge, insNode, lab, empty)
 import Data.Graph.Inductive.NodeMap
   hiding (mkNodeM, mkNodesM, mkEdgeM, mkEdgesM,
           insMapNodeM, insMapEdgeM, delMapNodeM, delMapEdgeM,
           insMapNodesM, insMapEdgesM, delMapNodesM, delMapEdgesM)
-import Control.Monad.State
+import Control.Monad.State.Lazy as Lazy
+import Control.Monad.State.Strict as Strict
 import Control.Monad.Reader
-import Control.Monad.Writer
-import Control.Monad.RWS
-import Control.Applicative
+import Control.Monad.Writer.Lazy as Lazy
+import Control.Monad.Writer.Strict as Strict
+import Control.Monad.RWS.Lazy as Lazy
+import Control.Monad.RWS.Strict as Strict
+import Control.Applicative hiding (empty)
 import Control.Arrow
+
+import Defaultable
 
 insNewMapNode ∷ (Ord a, DynGraph gr) ⇒
                 NodeMap a → a → gr a b → (gr a b, NodeMap a, LNode a)
@@ -122,15 +128,27 @@ instance MonadNM a b g m ⇒ MonadNM a b g (ReaderT r m) where
   getNMState = lift getNMState
   putNMState = lift . putNMState
 
-instance (MonadNM a b g m, Monoid w) ⇒ MonadNM a b g (WriterT w m) where
+instance (MonadNM a b g m, Monoid w) ⇒ MonadNM a b g (Strict.WriterT w m) where
   getNMState = lift getNMState
   putNMState = lift . putNMState
 
-instance MonadNM a b g m ⇒ MonadNM a b g (StateT s m) where
+instance (MonadNM a b g m, Monoid w) ⇒ MonadNM a b g (Lazy.WriterT w m) where
   getNMState = lift getNMState
   putNMState = lift . putNMState
 
-instance (MonadNM a b g m, Monoid w) ⇒ MonadNM a b g (RWST r w s m) where
+instance MonadNM a b g m ⇒ MonadNM a b g (Strict.StateT s m) where
+  getNMState = lift getNMState
+  putNMState = lift . putNMState
+
+instance MonadNM a b g m ⇒ MonadNM a b g (Lazy.StateT s m) where
+  getNMState = lift getNMState
+  putNMState = lift . putNMState
+
+instance (MonadNM a b g m, Monoid w) ⇒ MonadNM a b g (Strict.RWST r w s m) where
+  getNMState = lift getNMState
+  putNMState = lift . putNMState
+
+instance (MonadNM a b g m, Monoid w) ⇒ MonadNM a b g (Lazy.RWST r w s m) where
   getNMState = lift getNMState
   putNMState = lift . putNMState
 
@@ -139,7 +157,12 @@ instance (MonadNM a b g m, Monoid w) ⇒ MonadNM a b g (RWST r w s m) where
 ---
 
 instance (Ord a, DynGraph g, Monad m) ⇒
-         MonadNM a b g (StateT (NodeMap a, g a b) m) where
+         MonadNM a b g (Strict.StateT (NodeMap a, g a b) m) where
+  getNMState = get
+  putNMState = put
+
+instance (Ord a, DynGraph g, Monad m) ⇒
+         MonadNM a b g (Lazy.StateT (NodeMap a, g a b) m) where
   getNMState = get
   putNMState = put
 
@@ -148,8 +171,15 @@ instance (Ord a, DynGraph g, Monad m) ⇒
 ---
 
 newtype NodeMapT a b g m r
-  = NodeMapT { unNodeMapT ∷ StateT (NodeMap a, g a b) m r }
+  = NodeMapT { unNodeMapT ∷ Strict.StateT (NodeMap a, g a b) m r }
   deriving (Functor, Applicative, Monad, MonadTrans)
+
+mapNodeMapT   ∷ (∀s. m (y, s) → n (z, s)) →
+                NodeMapT a b g m y → NodeMapT a b g n z
+mapNodeMapT f = NodeMapT . Strict.mapStateT f . unNodeMapT
+
+instance (Ord a, DynGraph g) ⇒ ExtractableT (NodeMapT a b g) where
+  extractT   = liftM fst . runNodeMapT new empty
 
 instance (Ord a, DynGraph g, Monad m) ⇒ MonadNM a b g (NodeMapT a b g m) where
   getNMState = NodeMapT get
@@ -171,7 +201,7 @@ instance MonadState s m ⇒ MonadState s (NodeMapT a b g m) where
 runNodeMapT  ∷ (DynGraph g, Ord a, Monad m) ⇒
                NodeMap a → g a b → NodeMapT a b g m r →
                m (r, (NodeMap a, g a b))
-runNodeMapT nm g m = runStateT (unNodeMapT m) (nm, g)
+runNodeMapT nm g m = Strict.runStateT (unNodeMapT m) (nm, g)
 
 execNodeMapT  ∷ (DynGraph g, Ord a, Monad m) ⇒
                 NodeMap a → g a b → NodeMapT a b g m r →

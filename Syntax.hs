@@ -54,6 +54,14 @@ instance (Bounded a, Lattice a) ⇒ BoundedLattice a where
   bigJoin = foldr (⊔) minBound
   bigMeet = foldr (⊓) maxBound
 
+instance Lattice a ⇒ Lattice (Maybe a) where
+  Just a  ⊔ Just b  = Just (a ⊔ b)
+  Nothing ⊔ b       = b
+  a       ⊔ Nothing = a
+  Just a  ⊓ Just b  = Just (a ⊓ b)
+  Nothing ⊓ _       = Nothing
+  _       ⊓ Nothing = Nothing
+
 newtype DUAL a = DUAL { dual ∷ a } deriving (Eq, Show)
 
 instance Lattice a ⇒ Lattice (DUAL a) where
@@ -79,6 +87,8 @@ data QLit = U | R | A | L
   deriving (Eq, Ord, Show)
   -- NB: Ord instance is not the subsumption order, but merely an order
   -- used for binary search trees.
+
+instance Ppr QLit where ppr = Ppr.text . show
 
 readQLit ∷ String → Maybe QLit
 readQLit "U" = Just U
@@ -214,6 +224,8 @@ isQVariance QInvariant     = True
 isQVariance QCovariant     = True
 isQVariance QContravariant = True
 isQVariance _              = False
+
+instance Ppr Variance where ppr = Ppr.text . show
 
 -- | Variances are a four point lattice with Invariant on top and
 --   Omnivariant on the bottom
@@ -388,6 +400,8 @@ data Kind
 varianceToKind ∷ Variance → Kind
 varianceToKind var = if isQVariance var then QualKd else TypeKd
 
+instance Ppr Kind where ppr = Ppr.text . show
+
 ---
 --- Representation of types and type annotations
 ---
@@ -557,7 +571,8 @@ mkRecF f pn k = k (0, 0) (f pn)
 qualifier ∷ MonadReadTV v m ⇒ Type v → m (QExp v)
 qualifier = foldType fquant fbvar ffvar fcon frow frec
   where
-  fquant _ αs k          = k (map snd αs) bumpQExp
+  fquant AllQu αs k      = k (U <$ αs) bumpQExp
+  fquant ExQu  αs k      = k (snd <$> αs) bumpQExp
   fbvar _ _    (Just ql) = qlitexp ql
   fbvar (i,j) n Nothing  = qvarexp (BoundVar i j n)
   ffvar                  = qvarexp . FreeVar
@@ -641,7 +656,7 @@ isMonoType ∷ MonadReadTV v m ⇒ Type v → m Bool
 isMonoType = foldType (mkQuaF (\_ _ _ → False))
                       (mkBvF (\_ _ _ → True))
                       (\_ → True) (\_ → and) (\_ → (&&))
-                      (mkRecF (\_ _ → False))
+                      (mkRecF (\_ _ → True))
 
 -- | Is the given type (universal) prenex?
 --   (Precondition: the argument is standard)
@@ -657,6 +672,12 @@ isPrenexType τ                   = isMonoType τ
 
 newtype REC_TYPE a = REC_TYPE { unREC_TYPE ∷ Type a }
 
+instance Ppr a ⇒ Show (REC_TYPE a) where
+  showsPrec = showsPrec <$.> unREC_TYPE
+
+instance Ppr a ⇒ Ppr (REC_TYPE a) where
+  pprPrec = pprPrec <$.> unREC_TYPE
+
 instance Ord a ⇒ Eq (REC_TYPE a) where
   a == b   = compare a b == EQ
 
@@ -671,7 +692,7 @@ instance Ord a ⇒ Ord (REC_TYPE a) where
       compareM a b = return (compare a b)
       loop τ1 τ2 = do
         seen ← get
-        if (Set.member (τ1, τ2) seen || Set.member (τ2, τ2) seen)
+        if (Set.member (τ1, τ2) seen || Set.member (τ2, τ1) seen)
           then return EQ
           else do
             put (Set.insert (τ1, τ2) seen)
@@ -697,7 +718,9 @@ instance Ord a ⇒ Ord (REC_TYPE a) where
               (ConTy _ _, VarTy _)
                 → return GT
               (ConTy n1 τs1, ConTy n2 τs2)
-                → foldl' thenCompareM (compareM n1 n2) (zipWith loop τs1 τs2)
+                → compareM n1 n2 `thenCompareM`
+                  compareM (length τs1) (length τs2) `thenCompareM`
+                  foldl' thenCompareM (return EQ) (zipWith loop τs1 τs2)
               (ConTy _ _, _)
                 → return LT
               (RowTy _ _ _, QuaTy _ _ _)
@@ -783,6 +806,13 @@ pattHasWild (ConPa _ πs) = any pattHasWild πs
 pattHasWild (InjPa _ π)  = pattHasWild π
 pattHasWild (AnnPa π _)  = pattHasWild π
 
+pattHasAnnot ∷ Patt a → Bool
+pattHasAnnot (VarPa _)    = False
+pattHasAnnot WldPa        = False
+pattHasAnnot (ConPa _ πs) = any pattHasAnnot πs
+pattHasAnnot (InjPa _ π)  = pattHasAnnot π
+pattHasAnnot (AnnPa _ _)  = True
+
 pattBv ∷ Patt a → [Name]
 pattBv (VarPa n)    = [n]
 pattBv WldPa        = []
@@ -798,7 +828,7 @@ data Term a
   = AbsTm (Patt a) (Term a)
   | LetTm (Patt a) (Term a) (Term a)
   | MatTm (Term a) [(Patt a, Term a)]
-  | RecTm [(Name, Term a)] (Term a)
+  | RecTm [(Name, Maybe Annot, Term a)] (Term a)
   | VarTm Name
   | ConTm Name [Term a]
   | LabTm Bool Name
@@ -836,8 +866,8 @@ termFv e0 = case e0 of
   AbsTm π e      → mask π e
   MatTm e bs     → Set.unions (termFv e : map (uncurry mask) bs)
   LetTm π e1 e2  → termFv e1 `Set.union` mask π e2
-  RecTm bs e2    → Set.unions (termFv e2 : map (termFv . snd) bs)
-                     Set.\\ Set.fromList (map fst bs)
+  RecTm bs e2    → Set.unions (termFv e2 : map (termFv . sel3) bs)
+                     Set.\\ Set.fromList (map sel1 bs)
   VarTm n        → Set.singleton n
   ConTm _ es     → Set.unions (map termFv es)
   LabTm _ _      → Set.empty
@@ -857,6 +887,9 @@ termFv e0 = case e0 of
       , ("discard",     "∀ α : A. α → α")
       , ("apply",       "∀ α β γ. (α -γ> β) → α -γ> β")
       , ("revapp",      "∀ α β γ. α → (α -γ> β) -α γ> β")
+      -- FCP
+      , ("ids",         "List (∀ α. α → α)")
+      , ("poly",        "(∀ α. α -> α) → Int × Bool")
       -- Lists
       , ("single",      "∀ α. α → List α")
       , ("nil",         "∀ α. List α")
@@ -873,18 +906,18 @@ termFv e0 = case e0 of
       , ("rref",        "∀ α. α → Ref R α")
       , ("aref",        "∀ α:A. α → Ref A α")
       , ("lref",        "∀ α. α → Ref L α")
-      , ("swapRef",     "∀ α β. Pair (Ref β α) α → Pair (Ref β α) α")
-      , ("swapRef'",    "∀ α β γ. Pair (Ref (A β γ) α) β → \
-                        \         Pair (Ref (A β γ) β) α")
+      , ("swapRef",     "∀ α β. Ref β α × α → Ref β α × α")
+      , ("swapRef'",    "∀ α β γ. Ref (A β γ) α × β → \
+                        \         Ref (A β γ) β × α")
       , ("readRef",     "∀ α:R, β. Ref β α → α")
-      , ("readRef'"  ,  "∀ α:R, β. Ref β α → Pair (Ref β α) α")
+      , ("readRef'"  ,  "∀ α:R, β. Ref β α → Ref β α × α")
       , ("freeRef'",    "∀ α β. Ref (A β) α → α")
-      , ("writeRef",    "∀ α β:A. Pair (Ref β α) α → T")
-      , ("writeRef'",   "∀ α:A, β γ. Pair (Ref (A β γ) α) β → Ref (A β γ) β")
+      , ("writeRef",    "∀ α β:A. Ref β α × α → T")
+      , ("writeRef'",   "∀ α:A, β γ. Ref (A β γ) α × β → Ref (A β γ) β")
       -- Products
-      , ("pair",        "∀ α β. α → β -α> Pair α β")
-      , ("fst",         "∀ α : L, β : A. Pair α β → α")
-      , ("snd",         "∀ α : A, β : L. Pair α β → β")
+      , ("pair",        "∀ α β. α → β -α> α × β")
+      , ("fst",         "∀ α : L, β : A. α × β → α")
+      , ("snd",         "∀ α : A, β : L. α × β → β")
       -- Sums
       , ("inl",         "∀ α β. α → Either α β")
       , ("inr",         "∀ α β. β → Either α β")
@@ -894,6 +927,15 @@ termFv e0 = case e0 of
       , ("readFile",    "∀ α. File α → File α")
       , ("writeFile",   "File A → File A")
       , ("closeFile",   "File A → T")
+      -- Simple ST-like thing
+      , ("runST'",      "∀ β. (all s. ST s β) → β")
+      , ("returnST'",   "∀ α s. α → ST s Z")
+      -- ST Monad
+      , ("runST",       "∀ α β. (all s. α → ST s β) → β")
+      , ("bindST",      "∀ α β s. ST s α → (α → ST s β) → ST s β")
+      , ("returnST",    "∀ α s. α → ST s α")
+      , ("newSTRef",    "∀ α s. α → ST s (STRef s α)")
+      , ("readSTRef",   "∀ α:R, s. STRef s α → ST s α")
       -- Any
       , ("eat",         "∀ α β. α → β → β")
       , ("eatU",        "∀ α:U, β. α → β → β")
@@ -909,6 +951,9 @@ termFv e0 = case e0 of
 
 γ0 ∷ [(Name, Type a)]
 γ0 = second (elimEmptyF . read) <$> γ0'
+
+unγ0 ∷ Map.Map Name a → Map.Map Name a
+unγ0 = (Map.\\ γmap) where γmap = Map.fromList γ0'
 
 ---
 --- Locally nameless operations
@@ -1084,6 +1129,8 @@ data Occurrence
   | EO
   deriving (Eq, Show)
 
+instance Ppr Occurrence where ppr = Ppr.text . show
+
 -- | Convert an occurrence to a representative list of numbers
 occToInts ∷ Occurrence → [Int]
 occToInts UO = [0, 1, 2]
@@ -1163,8 +1210,8 @@ countOccs x = loop where
                                               | (πi, ei) ← bs
                                               , x `notElem` pattBv πi ]
   loop (RecTm bs e2)
-    | x `elem` map fst bs = 0
-    | otherwise           = loop e2 + sum (map (loop . snd) bs)
+    | x `elem` map sel1 bs= 0
+    | otherwise           = loop e2 + sum (map (loop . sel3) bs)
   loop (VarTm x')
     | x == x'             = 1
     | otherwise           = 0
@@ -1304,20 +1351,12 @@ instance Ftv (Term Empty) Name where
     AbsTm π e      → ftvTree (π, e)
     MatTm e bs     → ftvTree (e, bs)
     LetTm π e1 e2  → ftvTree (π, e1, e2)
-    RecTm bs e2    → ftvTree (map snd bs, e2)
+    RecTm bs e2    → ftvTree (map sel2 bs, map sel3 bs, e2)
     VarTm _        → return mempty
     ConTm _ es     → ftvTree es
     LabTm _ _      → return mempty
     AppTm e1 e2    → ftvTree (e1, e2)
     AnnTm e annot  → ftvTree (e, annot)
-
--- | A class for type variables (which are free in themselves).
-class    (Ftv v v, Show v, Ppr v) ⇒ Tv v where
-  tvUniqueID ∷ v → Int
-  tvKind     ∷ v → Kind
-
-tvKindIs ∷ Tv v ⇒ Kind → v → Bool
-tvKindIs kind v = tvKind v == kind
 
 ---
 --- Some-quantified type variable names in annotations
@@ -1665,11 +1704,8 @@ parseTypeArrow tyvarp typep = flip arrTy <$> choice
 -- the list of names bound by the patern.
 parsePatt ∷ Int → P (Patt a)
 parsePatt p = withState [] (level p) where
-  level 0 = do
-              π ← level 1
-              option π $ do
-                reservedOp tok ":"
-                AnnPa π <$> genParser
+  level 0 = foldl' AnnPa <$> level 1
+                         <*> many (reservedOp tok ":" *> genParser)
   level 1 = ConPa <$> upperIdentifier <*> many (level 2)
         <|> InjPa <$  char '`' <*> upperIdentifier <*> level 1
         <|> level 2
@@ -1712,9 +1748,10 @@ parseTerm = level0 where
                 [ reserved tok "rec" *>
                   (RecTm
                     <$> sepBy1
-                          ((,) <$> lowerIdentifier
-                               <*  reservedOp tok "="
-                               <*> level0)
+                          ((,,) <$> lowerIdentifier
+                                <*> optional (colon tok *> genParser)
+                                <*  reservedOp tok "="
+                                <*> level0)
                           (reserved tok "and")
                     <*  reserved tok "in"
                     <*> level0)
@@ -1732,11 +1769,8 @@ parseTerm = level0 where
                e ← level0
                return (foldr AbsTm e πs)
          <|> level1
-  level1   = do
-               e ← level2
-               option e $ do
-                 reservedOp tok ":"
-                 AnnTm e <$> genParser
+  level1   = foldl' AnnTm <$> level2
+                          <*> many (reservedOp tok ":" *> genParser)
   level2   = ConTm <$> upperIdentifier <*> many level3
          <|> chainl1 level3 (return AppTm)
   level3   = VarTm <$> lowerIdentifier
@@ -1971,11 +2005,13 @@ instance Ppr (Term a) where
           Ppr.vcat
             [ Ppr.text kw Ppr.<+>
               Ppr.hang
-                (Ppr.text ni Ppr.<+> Ppr.char '=')
+                (Ppr.text ni Ppr.<+>
+                 maybe Ppr.empty ((Ppr.char ':' Ppr.<+>) . ppr) mai
+                 Ppr.<+> Ppr.char '=')
                 2
                 (loop 0 ei)
-            | (ni,ei)  ← bs
-            | kw       ← "rec" : repeat "and" ]
+            | (ni,mai,ei) ← bs
+            | kw          ← "rec" : repeat "and" ]
           Ppr.$$ Ppr.text " in" Ppr.<+> loop 0 e2
       VarTm name          → Ppr.text name
       ConTm name es       → parensIf (p > 2 && not (null es)) $

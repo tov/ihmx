@@ -9,6 +9,7 @@
     MultiParamTypeClasses,
     NoImplicitPrelude,
     ParallelListComp,
+    RankNTypes,
     ScopedTypeVariables,
     TupleSections,
     TypeFamilies,
@@ -17,7 +18,8 @@
     ViewPatterns
   #-}
 module Constraint (
-  MonadC(..), runConstraintT,
+  MonadC(..), mapConstraintT, runConstraintT,
+  generalize, generalizeList, generalizeEx,
 ) where
 
 import qualified Data.List  as List
@@ -63,24 +65,25 @@ class MonadTV tv r m ⇒ MonadC tv r m | m → tv r where
     QContravariant → τ' ⊏: τ
     QInvariant     → τ ~: τ'
     Omnivariant    → return ()
+  --
+  -- | Get the set of pinned type variables.
+  getPinnedTVs    ∷ m (Set.Set tv)
+  -- | Run a computation in the context of some "pinned down" type
+  --   variables, which means that they won't be considered for
+  --   elimination or generalization.
+  withPinnedTVs   ∷ Ftv a tv ⇒ a → m b → m b
+  -- | Update the pinned TVs list to reflect a substitution.
+  --   PRECONDITION: @τ@ is fully substituted
+  updatePinnedTVs ∷ tv → Type tv → m ()
+  --
   -- | Figure out which variables to generalize in a piece of syntax
-  generalize'   ∷ Bool → Rank → Type tv → m ([tv], [QLit])
-  -- | Generalize a type under a constraint and environment,
-  --   given whether the the value restriction is satisfied or not
-  generalize    ∷ Bool → Rank → Type tv → m (Type tv)
-  generalize value γrank τ = do
-    (αs, qls) ← generalize' value γrank τ
-    standardizeMus =<< closeWithQuals qls AllQu αs <$> substDeep τ
-  -- | Generalize a list of types together.
-  generalizeList ∷ Bool → Rank → [Type tv] → m [Type tv]
-  generalizeList value γrank τs = do
-    (αs, qls) ← generalize' value γrank (tupleTy τs)
-    mapM (standardizeMus <=< closeWithQuals qls AllQu αs <$$> substDeep) τs
+  generalize'     ∷ Bool → Rank → Type tv → m ([tv], [QLit])
   -- | Saves the constraint in an action that, when run, restores the
   --   saved constraint
-  saveConstraint ∷ m (m ())
+  --
+  saveConstraint  ∷ m (m ())
   -- | Return a string representation of the constraint
-  showConstraint ∷ m String
+  showConstraint  ∷ m String
 
 infix 5 <:, =:, ⊏:
 
@@ -88,6 +91,9 @@ instance (MonadC tv s m, Monoid w) ⇒ MonadC tv s (WriterT w m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  getPinnedTVs   = lift getPinnedTVs
+  withPinnedTVs  = mapWriterT <$> withPinnedTVs
+  updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
@@ -96,6 +102,9 @@ instance (MonadC tv r m, Defaultable s) ⇒ MonadC tv r (StateT s m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  getPinnedTVs   = lift getPinnedTVs
+  withPinnedTVs  = mapStateT <$> withPinnedTVs
+  updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
@@ -104,6 +113,9 @@ instance (MonadC tv p m, Defaultable r) ⇒ MonadC tv p (ReaderT r m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  getPinnedTVs   = lift getPinnedTVs
+  withPinnedTVs  = mapReaderT <$> withPinnedTVs
+  updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
@@ -113,9 +125,39 @@ instance (MonadC tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
+  getPinnedTVs   = lift getPinnedTVs
+  withPinnedTVs  = mapRWST <$> withPinnedTVs
+  updatePinnedTVs= lift <$$> updatePinnedTVs
   generalize'    = lift <$$$> generalize'
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
+
+---
+--- Some operations
+---
+
+-- | Generalize a type under a constraint and environment,
+--   given whether the the value restriction is satisfied or not
+generalize    ∷ MonadC tv r m ⇒ Bool → Rank → Type tv → m (Type tv)
+generalize value γrank τ = do
+  (αs, qls) ← generalize' value γrank τ
+  standardizeMus =<< closeWithQuals qls AllQu αs <$> substDeep τ
+
+-- | Generalize a list of types together.
+generalizeList ∷ MonadC tv r m ⇒ Bool → Rank → [Type tv] → m [Type tv]
+generalizeList value γrank τs = do
+  (αs, qls) ← generalize' value γrank (tupleTy τs)
+  mapM (standardizeMus <=< closeWithQuals qls AllQu αs <$$> substDeep) τs
+
+-- | Generalize the existential type variables in a type
+generalizeEx   ∷ MonadC tv r m ⇒ Rank → Type tv → m (Type tv)
+generalizeEx γrank τ = do
+  αs  ← filter (tvFlavorIs Existential) <$> ftvList τ
+  αs' ← removeByRank γrank αs
+  let qls = getQual <$> αs'
+  standardizeMus =<< closeWithQuals qls ExQu αs' <$> substDeep τ
+  where
+  getQual = fromMaybe (error "generalizeEx (BUG!) no rank?") . tvQual
 
 ---
 --- Eager subtyping constraint solver
@@ -126,7 +168,7 @@ newtype ConstraintT tv r m a
   = ConstraintT {
       unConstraintT_ ∷ StateT (CTState tv r) m a
     }
-  deriving (Functor, Applicative, Monad, MonadTrans)
+  deriving (Functor, Applicative, Monad, MonadTrans, MonadTrace)
 
 -- | The state of the constraint solver.
 data CTState tv r
@@ -140,7 +182,9 @@ data CTState tv r
       -- | Maps type variables to same-size equivalence classes
       csEquivs  ∷ !(ProxyMap tv r),
       -- | Types to relate by the subqualifier relation
-      csQuals   ∷ ![(Type tv, Type tv)]
+      csQuals   ∷ ![(Type tv, Type tv)],
+      -- | Stack of pinned type variables
+      csPinned  ∷ ![Set.Set tv]
     }
 -- | Representation of type variable equivalence class
 type TVProxy  tv r = UF.Proxy r (Set.Set tv)
@@ -168,6 +212,11 @@ csEquivsUpdate ∷ (ProxyMap tv r → ProxyMap tv r) →
                  CTState tv r → CTState tv r
 csEquivsUpdate f cs = cs { csEquivs = f (csEquivs cs) }
 
+-- | Updater for 'csPinned' field
+csPinnedUpdate ∷ ([Set.Set tv] → [Set.Set tv]) →
+                 CTState tv r → CTState tv r
+csPinnedUpdate f cs = cs { csPinned = f (csPinned cs) }
+
 instance Tv tv ⇒ Show (Atom tv) where
   show (VarAt α) = show (tvUniqueID α)
   show (ConAt c) = c
@@ -189,6 +238,24 @@ instance Tv tv ⇒ Show (CTState tv r) where
         . shows (csQuals cs)
         . showString " }"
 
+instance Tv tv ⇒ Ppr (CTState tv r) where
+  ppr cs = ppr . Map.fromList $
+    [ ("graph",    Ppr.fsep . Ppr.punctuate Ppr.comma $
+                     [ pprPrec 10 (atomTy a1)
+                         Ppr.<> Ppr.text "<:"
+                         Ppr.<> pprPrec 10 (atomTy a2)
+                     | (a1, a2) ← Gr.labNodeEdges (csGraph cs) ])
+    , ("quals",    Ppr.fsep . Ppr.punctuate Ppr.comma $
+                     [ pprPrec 9 τ1
+                         Ppr.<> Ppr.char '⊑'
+                         Ppr.<> pprPrec 9 τ2
+                     | (τ1, τ2) ← csQuals cs ])
+    ]
+
+mapConstraintT   ∷ (∀s. m (a, s) → n (b, s)) →
+                   ConstraintT tv r m a → ConstraintT tv r n b
+mapConstraintT f = ConstraintT . mapStateT f . unConstraintT_
+
 -- | Run the constraint solver, starting with an empty (true)
 --   constraint.  Seeds the atom graph with the type constructors that
 --   are involved in the subtyping order.
@@ -198,7 +265,8 @@ runConstraintT m = evalStateT (unConstraintT_ m) cs0
                        csGraph   = gr0,
                        csNodeMap = nm0,
                        csEquivs  = Map.empty,
-                       csQuals   = []
+                       csQuals   = [],
+                       csPinned  = []
                      }
         (gr0, nm0) = NM.mkMapGraph
                        (map (ConAt . snd) (Gr.labNodes tyConOrder))
@@ -213,15 +281,23 @@ instance MonadRef r m ⇒ MonadRef r (ConstraintT tv r m) where
 
 -- | Pass through for unification operations
 instance MonadTV tv r m ⇒ MonadTV tv r (ConstraintT tv r m) where
-  newTVKind     = lift <$> newTVKind
+  newTV_ (Universal, kind, bound) = do
+    α ← lift (newTV' kind)
+    fvTy α ⊏: bound
+    return α
+  newTV_ attrs  = lift (newTV' attrs)
   writeTV_      = lift <$$> writeTV_
   readTV_       = lift <$> readTV_
+  collectTV     = mapConstraintT (mapListen2 collectTV)
+  monitorChange = mapConstraintT (mapListen2 monitorChange)
   getTVRank_    = lift <$> getTVRank_
   setTVRank_    = lift <$$> setTVRank_
-  hasChanged    = lift hasChanged
-  putChanged    = lift <$> putChanged
+  setChanged    = lift setChanged
   unsafePerformTV = error "No MonadTV.unsafePerformU for ConstraintT"
   unsafeIOToTV  = lift <$> unsafeIOToTV
+
+instance MonadTV tv r m ⇒ MonadReadTV tv (ConstraintT tv r m) where
+  readTV = lift . readTV
 
 -- | 'ConstraintT' implements 'Graph'/'NodeMap' transformer operations
 --   for accessing its graph and node map.
@@ -237,13 +313,45 @@ instance (Ord tv, Monad m) ⇒
 
 -- | Constraint solver implementation.
 instance MonadTV tv r m ⇒ MonadC tv r (ConstraintT tv r m) where
-  τ <: τ' = runSeenT (subtypeTypesK False 0 τ τ')
-  τ =: τ' = runSeenT (subtypeTypesK True 0 τ τ')
-  τ ⊏: τ' = ConstraintT . modify . csQualsUpdate $
-              ((toQualifierType τ, toQualifierType τ') :)
+  τ <: τ' = do
+    traceN 3 ("<:", τ, τ')
+    runSeenT (subtypeTypes False τ τ')
+  τ =: τ' = do
+    traceN 3 ("=:", τ, τ')
+    runSeenT (subtypeTypes True τ τ')
+  τ ⊏: τ' = do
+    traceN 3 ("⊏:", toQualifierType τ, toQualifierType τ')
+    ConstraintT . modify . csQualsUpdate $
+      ((toQualifierType τ, toQualifierType τ') :)
+  --
+  getPinnedTVs      = Set.unions <$> ConstraintT (gets csPinned)
+  --
+  withPinnedTVs a m = do
+    αs     ← ftvSet a
+    ConstraintT (modify (csPinnedUpdate (αs :)))
+    result ← m
+    ConstraintT (modify (csPinnedUpdate tail))
+    return result
+  --
+  updatePinnedTVs α τ = do
+    let βs      = Map.keysSet (ftvPure τ)
+        update  = snd . mapAccumR eachSet False
+        eachSet False set
+          | α `Set.member` set = (True, βs `Set.union` Set.delete α set)
+        eachSet done set       = (done, set)
+    ConstraintT (modify (csPinnedUpdate update))
   --
   generalize'    = solveConstraint
-  saveConstraint = ConstraintT . put <$> ConstraintT get
+  saveConstraint = do
+    c      ← ConstraintT get
+    return . ConstraintT $ do
+      pinned ← gets csPinned
+      put (csPinnedUpdate (`asLengthOf` pinned) c)
+    where
+    xs `asLengthOf` ys =
+      reverse (zipWith const
+                       (reverse xs ++ repeat Set.empty)
+                       (reverse ys))
   showConstraint = show <$> ConstraintT get
 
 -- | Monad transformer for tracking which type comparisons we've seen,
@@ -256,57 +364,68 @@ type SeenT tv r m = StateT (Map.Map (REC_TYPE tv, REC_TYPE tv) Bool)
 -- | Run a recursive subtyping computation.
 runSeenT ∷ MonadTV tv r m ⇒ SeenT tv r m a → ConstraintT tv r m a
 runSeenT m = do
-  gtrace "runSeenT {"
+  gtraceN 4 "runSeenT {"
   result ← evalStateT m Map.empty
-  gtrace "} runSeenT"
+  gtraceN 4 "} runSeenT"
   return result
 
 -- | Relate two types at either subtyping or equality, depending on
 --   the value of the first parameter (@True@ means equality).
 --   This eagerly solves as much as possible, adding to the constraint
 --   only as necessary.
-subtypeTypesK ∷ MonadTV tv r m ⇒
-                Bool → Int → Type tv → Type tv → SeenT tv r m ()
-subtypeTypesK unify k0 τ10 τ20 = do
-  lift $ gtrace ("subtypeTypesK", unify, k0, τ10, τ20)
-  check k0 τ10 τ20
+subtypeTypes ∷ MonadTV tv r m ⇒
+                Bool → Type tv → Type tv → SeenT tv r m ()
+subtypeTypes unify τ10 τ20 = do
+  check τ10 τ20
   where
-  check k τ1 τ2 = do
+  check τ1 τ2 = do
+    lift $ gtraceN 4 ("subtypeTypes", unify, τ1, τ2)
     τ1'  ← substDeep τ1
     τ2'  ← substDeep τ2
     seen ← get
     if Map.lookup (REC_TYPE τ1', REC_TYPE τ2') seen >= Just unify
-      then return ()
+      then do
+        let ps = [ p | p ← Map.keys seen, p == (REC_TYPE τ1', REC_TYPE τ2') ]
+        traceN 5 ("found!", τ1', τ2', ps, unify)
       else do
         put (Map.insert (REC_TYPE τ1', REC_TYPE τ2') unify seen)
-        decomp k τ1' τ2'
+        decomp τ1' τ2'
   --
-  decomp k τ1 τ2 = case (τ1, τ2) of
+  decomp τ1 τ2 = case (τ1, τ2) of
     (VarTy v1, VarTy v2)
       | v1 == v2 → return ()
     (VarTy (FreeVar r1), VarTy (FreeVar r2))
-      | unify     →
-      unifyVarK k r1 (fvTy r2)
-      | otherwise → do
-      lift (makeEquivTVs r1 r2)
-      addEdge (VarAt r1) (VarAt r2)
+      | tvFlavorIs Universal r1, tvFlavorIs Universal r2 →
+      if unify
+        then unifyVar r1 (fvTy r2)
+        else do
+          lift (makeEquivTVs r1 r2)
+          addEdge (VarAt r1) (VarAt r2)
     (VarTy (FreeVar r1), ConTy c2 [])
-      | not unify, tyConHasRelated c2 →
+      | not unify, tvFlavorIs Universal r1, tyConHasRelated c2 →
       addEdge (VarAt r1) (ConAt c2)
     (ConTy c1 [], VarTy (FreeVar r2))
-      | not unify, tyConHasRelated c1 →
+      | not unify, tvFlavorIs Universal r2, tyConHasRelated c1 →
       addEdge (ConAt c1) (VarAt r2)
-    (VarTy (FreeVar r1), _) → do
+    (VarTy (FreeVar r1), _)
+      | tvFlavorIs Universal r1 → do
       τ2' ← lift $ occursCheck r1 τ2 >>= if unify then return else copyType
-      unifyVarK k r1 τ2'
-      unless unify (check k τ2' τ2)
-    (_, VarTy (FreeVar r2)) → do
+      unifyVar r1 τ2'
+      unless unify (check τ2' τ2)
+    (_, VarTy (FreeVar r2))
+      | tvFlavorIs Universal r2 → do
       τ1' ← lift $ occursCheck r2 τ1 >>= if unify then return else copyType
-      unifyVarK k r2 τ1'
-      unless unify (check k τ1 τ1')
-    (QuaTy q1 αs1 τ1', QuaTy q2 αs2 τ2')
-      | q1 == q2 && αs1 == αs2 →
-      check (k + 1) τ1' τ2'
+      unifyVar r2 τ1'
+      unless unify (check τ1 τ1')
+    (QuaTy AllQu αs1 τ1', QuaTy AllQu αs2 τ2')
+      | if unify
+          then αs1 == αs2
+          else length αs1 == length αs2
+            && and (zipWith ((⊒)`on`snd) αs1 αs2) →
+      check τ1' τ2'
+    (QuaTy ExQu αs1 τ1', QuaTy ExQu αs2 τ2')
+      | αs1 == αs2 →
+      check τ1' τ2'
     (ConTy c1 [], ConTy c2 [])
       | not unify, c1 `tyConLe` c2 → return ()
     (ConTy c1 τs1, ConTy c2 τs2)
@@ -315,25 +434,25 @@ subtypeTypesK unify k0 τ10 τ20 = do
         [ if unify
             then if isQVariance var
               then τ1' ~: τ2'
-              else check k τ1' τ2'
-            else relateTypesK var k τ1' τ2'
+              else check τ1' τ2'
+            else relateTypes var τ1' τ2'
         | var ← getVariances c1 (length τs1)
         | τ1' ← τs1
         | τ2' ← τs2 ]
     (RowTy n1 τ11 τ12, RowTy n2 τ21 τ22)
       | n1 == n2 → do
-        check k τ11 τ21
-        check k τ12 τ22
+        check τ11 τ21
+        check τ12 τ22
       | otherwise   → do
         α ← newTVTy
-        check k (RowTy n1 τ11 α) τ22
+        check (RowTy n1 τ11 α) τ22
         β ← newTVTy
-        check k τ12 (RowTy n2 τ21 β)
-        check k α β
+        check τ12 (RowTy n2 τ21 β)
+        check α β
     (RecTy _ τ1', _) →
-      decomp k (openTy 0 [τ1] τ1') τ2
+      decomp (openTy 0 [τ1] τ1') τ2
     (_, RecTy _ τ2') →
-      decomp k τ1 (openTy 0 [τ2] τ2')
+      decomp τ1 (openTy 0 [τ2] τ2')
     _ →
       fail $ "cannot subtype/unify " ++ show τ1 ++ " and " ++ show τ2
   --
@@ -343,16 +462,16 @@ subtypeTypesK unify k0 τ10 τ20 = do
     NM.insMapEdgeM (a1, a2, ())
 
 -- | Relate two types at the given variance.
-relateTypesK ∷ MonadTV tv r m ⇒
-               Variance → Int → Type tv → Type tv → SeenT tv r m ()
-relateTypesK var = case var of
-  Invariant     → subtypeTypesK True
-  Covariant     → subtypeTypesK False
-  Contravariant → flip . subtypeTypesK False
-  QInvariant    → const (~:)
-  QCovariant    → const (⊏:)
-  QContravariant→ const (flip (⊏:))
-  Omnivariant   → \_ _ _ → return ()
+relateTypes ∷ MonadTV tv r m ⇒
+              Variance → Type tv → Type tv → SeenT tv r m ()
+relateTypes var = case var of
+  Invariant     → subtypeTypes True
+  Covariant     → subtypeTypes False
+  Contravariant → flip (subtypeTypes False)
+  QInvariant    → (~:)
+  QCovariant    → (⊏:)
+  QContravariant→ flip (⊏:)
+  Omnivariant   → \_ _ → return ()
 
 -- | Copy a type while replacing all the type variables with fresh ones
 --   of the same kind.
@@ -360,11 +479,13 @@ copyType ∷ MonadTV tv r m ⇒ Type tv → m (Type tv)
 copyType =
    foldTypeM (mkQuaF (return <$$$> QuaTy))
              (mkBvF (return <$$$> bvTy))
-             (fvTy <$$> newTVKind . tvKind)
+             fvar
              fcon
              (return <$$$> RowTy)
              (mkRecF (return <$$> RecTy))
   where
+    fvar α | tvFlavorIs Universal α = newTVTy' (tvKind α)
+           | otherwise              = return (fvTy α)
     -- Nullary type constructors that are involved in the atomic subtype
     -- relation are converted to type variables:
     fcon c [] | tyConHasRelated c = newTVTy
@@ -373,22 +494,23 @@ copyType =
           [ -- A Q-variant type constructor parameter becomes a single
             -- type variable:
             if isQVariance var
-              then fvTy <$> newTVKind QualKd
+              then newTVTy' QualKd
               else return τ
           | τ   ← τs
           | var ← getVariances c (length τs) ]
 
--- | Unify a type variable with a type, where the type must have
---   no bound variables pointing further than @k@.
+-- | Unify a type variable with a type, where the type must be locally
+--   closed.
 --   ASSUMPTIONS: @α@ has not been substituted and the occurs check has
 --   already passed.
-unifyVarK ∷ MonadTV tv r m ⇒ Int → tv → Type tv → SeenT tv r m ()
-unifyVarK k α τ0 = do
-  lift $ gtrace ("unifyVarK", k, α, τ0)
+unifyVar ∷ MonadTV tv r m ⇒ tv → Type tv → SeenT tv r m ()
+unifyVar α τ0 = do
+  lift $ gtraceN 4 ("unifyVar", α, τ0)
   τ ← substDeep τ0
-  unless (lcTy k τ) $
+  unless (lcTy 0 τ) $
     fail "cannot unify because insufficiently polymorphic"
   writeTV α τ
+  updatePinnedTVs α τ
   (n, _) ← NM.mkNodeM (VarAt α)
   gr     ← NM.getGraph
   case Gr.match n gr of
@@ -398,12 +520,12 @@ unifyVarK k α τ0 = do
       sequence_ $
         [ case Gr.lab gr' n' of
             Nothing → return ()
-            Just a  → subtypeTypesK False k (atomTy a) τ
+            Just a  → subtypeTypes False (atomTy a) τ
         | (_, n') ← pres ]
         ++
         [ case Gr.lab gr' n' of
             Nothing → return ()
-            Just a  → subtypeTypesK False k τ (atomTy a)
+            Just a  → subtypeTypes False τ (atomTy a)
         | (_, n') ← sucs ]
 
 --- OCCURS CHECK
@@ -418,12 +540,12 @@ unifyVarK k α τ0 = do
 --   and return that.
 occursCheck ∷ MonadTV tv r m ⇒ tv → Type tv → ConstraintT tv r m (Type tv)
 occursCheck α τ = do
-  gtrace ("occursCheck", α, τ)
+  gtraceN 3 ("occursCheck", α, τ)
   (guarded, unguarded) ← (Map.keys***Map.keys) . Map.partition id <$> ftvG τ
   whenM (anyA (checkEquivTVs α) unguarded) $
     fail "Occurs check failed"
   recVars ← filterM (checkEquivTVs α) guarded
-  when (not (null recVars)) $ gtrace ("occursCheck (recvars)", recVars)
+  when (not (null recVars)) $ gtraceN 3 ("occursCheck", "recvars", recVars)
   return (foldr closeRec τ recVars)
 
 -- | Records that two type variables have the same size.
@@ -469,35 +591,36 @@ solveConstraint ∷ MonadTV tv r m ⇒
                   Bool → Rank → Type tv → ConstraintT tv r m ([tv], [QLit])
 solveConstraint value γrank τ = do
   τftv ← ftvV τ;
-  gtrace ("gen (begin)", value, γrank, τftv, τ)
+  gtraceN 2 (TraceIn ("gen", "begin", value, γrank, τftv, τ))
   τftv ← coalesceSCCs τftv
-  gtrace ("gen (scc)", τftv, τ)
+  gtraceN 3 ("gen", "scc", τftv, τ)
   τftv ← satisfyTycons τftv
-  gtrace ("gen (tycons)", τftv, τ)
+  gtraceN 3 ("gen", "tycons", τftv, τ)
   eliminateExistentials True (γrank, τftv)
-  gtrace ("gen (existentials 1)", τftv, τ)
+  gtraceN 3 ("gen", "existentials 1", τftv, τ)
   removeRedundant
-  gtrace ("gen (redundant)", τftv, τ)
+  gtraceN 3 ("gen", "redundant", τftv, τ)
   eliminateExistentials False (γrank, τftv)
-  gtrace ("gen (existentials 2)", τftv, τ)
+  gtraceN 3 ("gen", "existentials 2", τftv, τ)
   τftv ← polarizedReduce τftv
-  gtrace ("gen (polarized)", τftv, τ)
+  gtraceN 3 ("gen", "polarized", τftv, τ)
   eliminateExistentials False (γrank, τftv)
-  gtrace ("gen (existentials 3)", τftv, τ)
+  gtraceN 3 ("gen", "existentials 3", τftv, τ)
   -- Guessing starts here
   τftv ← coalesceComponents value (γrank, τftv)
-  gtrace ("gen (components)", τftv, τ)
+  gtraceN 3 ("gen", "components", τftv, τ)
   -- Guessing ends here
   qc    ← ConstraintT (gets csQuals)
   cftv  ← ftvSet . map snd =<< NM.getsGraph Gr.labNodes
   qcftv ← ftvSet qc
-  αs    ← Set.fromDistinctAscList <$$>
-            removeByRank γrank <$>
-              Set.toAscList $
-                (qcftv `Set.union` Map.keysSet τftv) Set.\\ cftv
+  αs    ← Set.fromDistinctAscList <$>
+            filter (tvFlavorIs Universal) <$>
+              (removeByRank γrank <$>
+                Set.toAscList $
+                  (qcftv `Set.union` Map.keysSet τftv) Set.\\ cftv)
   (qc, αqs, τ) ← solveQualifiers value αs qc τ
   ConstraintT (modify (csQualsUpdate (const qc)))
-  gtrace ("gen (finished)", αqs, τ)
+  gtraceN 2 (TraceOut ("gen", "finished", αqs, τ))
   resetEquivTVs
   return (map fst αqs, map snd αqs)
   where
@@ -554,7 +677,7 @@ solveConstraint value γrank τ = do
     -- constraint
     eliminateExistentials trans (γrank, τftv) = do
       extvs ← getExistentials (γrank, τftv)
-      trace ("existentials are:", extvs)
+      traceN 4 ("existentials:", extvs)
       mapM (eliminateNode trans) (Set.toList extvs)
     -- Get the existential type variables
     getExistentials (γrank, τftv) = do
@@ -571,14 +694,29 @@ solveConstraint value γrank τ = do
       case (Gr.pre g node, Gr.suc g node) of
         (_:_:_, []) → return ()
         ([], _:_:_) → return ()
-        (pre, suc)  → NM.putGraph $
-          let g' = Gr.delNode node g in
-          if trans
-            then g'
-            else foldr ($) g'
-                   [ Gr.insEdge (n1, n2, ())
-                   | n1 ← pre
-                   , n2 ← suc ]
+        (pre, suc)  → do
+          β ← newTVTy' QualKd
+          writeTV α β
+          traceN 4 ("eliminateNode",
+                    catMaybes (map (Gr.lab g) pre),
+                    β,
+                    catMaybes (map (Gr.lab g) suc))
+          sequence $
+            [ atomTy a1 ⊏: β
+            | n1 ← pre
+            , let Just a1 = Gr.lab g n1 ]
+            ++
+            [ β ⊏: atomTy a2
+            | n2 ← suc
+            , let Just a2 = Gr.lab g n2 ]
+          NM.putGraph $
+            let g' = Gr.delNode node g in
+            if trans
+              then g'
+              else foldr ($) g'
+                     [ Gr.insEdge (n1, n2, ())
+                     | n1 ← pre
+                     , n2 ← suc ]
     --
     -- Remove redundant edges:
     --  • Edges implied by transitivity
@@ -675,6 +813,7 @@ solveConstraint value γrank τ = do
     -- ftvs appropriately
     assignTV α atom τftv = do
       writeTV α (atomTy atom)
+      updatePinnedTVs α (atomTy atom)
       assignFtvMap α atom τftv
     -- Given two type variables, where α ← atom, update a map of free
     -- type variables to variance lists accordingly
@@ -709,26 +848,35 @@ solveConstraint value γrank τ = do
         restrict = if value
                      then id
                      else Map.filter (`elem` [1, -1, 2, -2])
-    -- Remove type variables from a list if their rank indicates that
-    -- they're in the environment
-    removeByRank γrank = filterM keep
-      where
-        keep α = do
-          rank ← getTVRank α
-          return (rank > γrank)
+
+-- | Remove type variables from a list if their rank indicates that
+--   they're in the environment or if they're pinned
+removeByRank ∷ MonadC tv r m ⇒ Rank → [tv] → m [tv]
+removeByRank γrank αs = do
+  pinned ← getPinnedTVs
+  let keep α = do
+        rank ← getTVRank α
+        return (rank > γrank && α `Set.notMember` pinned)
+  filterM keep αs
 
 -- | Tracing facility for constraint solving; shows the supplied
 --   argument and the state of the constraint solver.
-gtrace ∷ (MonadTV tv r m, Show a) ⇒ a → ConstraintT tv r m ()
-gtrace =
-  if debug
-    then \info → do
+{-
+gtrace ∷ (MonadTV tv r m, TraceMessage a) ⇒ a → ConstraintT tv r m ()
+gtrace = if debug then gtraceN debugLevel else \_ → return ()
+-}
+
+gtraceN ∷ (MonadTV tv r m, TraceMessage a) ⇒ Int → a → ConstraintT tv r m ()
+gtraceN =
+  if debug then \n info →
+    if n <= debugLevel then do
       trace info
       cs ← ConstraintT get
-      unsafeIOToTV (print (indent cs))
-    else \_ → return ()
-  where
-    indent = Ppr.nest 4 . Ppr.fsep . map Ppr.text . words . show
+      let doc = ppr cs
+      unless (Ppr.isEmpty doc) $
+        trace (Ppr.nest 4 doc)
+    else return ()
+  else \_ _ → return ()
 
 ---
 --- THE SUBTYPE ORDER
@@ -742,7 +890,7 @@ tyConNode  ∷ String → Gr.Node
 tyConOrder ∷ Gr String ()
 (tyConNode, tyConOrder) = (Gr.nmLab nm, Gr.trcnr g)
   where
-    (_, (nm, g)) = NM.run Gr.empty $ do
+    (_, (nm, g)) = runIdentity $ NM.runNodeMapT NM.new Gr.empty $ do
       NM.insMapNodesM ["U", "R", "A", "L"]
       NM.insMapEdgesM [("U","R",()), ("U","A",()), ("R","L",()), ("A","L",())]
 
@@ -936,6 +1084,16 @@ instance Tv tv ⇒ Show (QE tv) where
     where γs' = map (show . tvUniqueID) (Set.toList γs)
           q'  = if q == U && not (Set.null γs) then id else (show q :)
 
+instance Tv tv ⇒ Ppr (QE tv) where
+  pprPrec _ (QE L _)  = Ppr.char 'L'
+  pprPrec p (QE q γs) = case items of
+    []  → Ppr.char 'U'
+    [x] → x
+    xs  → parensIf (p > 6) (Ppr.fcat (Ppr.punctuate (Ppr.char '⊔') xs))
+    where items = q' γs'
+          γs'   = map (Ppr.text . show . tvUniqueID) (Set.toList γs)
+          q'    = if q == U then id else (ppr q :)
+
 instance Eq tv ⇒ Eq (QE tv) where
     QE L  _   == QE L  _   = True
     QE q1 γs1 == QE q2 γs2 = q1 == q2 && γs1 == γs2
@@ -1025,12 +1183,28 @@ data QCState tv
     }
   deriving Show
 
+instance Tv tv ⇒ Ppr (QCState tv) where
+  ppr sq = ppr . Map.fromList $
+    [ ("αs",    ppr (sq_αs sq))
+    , ("τ",     ppr (sq_τ sq))
+    , ("τftv",  ppr (sq_τftv sq))
+    , ("βlst",  Ppr.fsep . Ppr.punctuate (Ppr.text " ⋀") $
+                  [ ppr ql Ppr.<> Ppr.char '⊑' Ppr.<>
+                    Ppr.hcat (Ppr.punctuate (Ppr.char '⊔')
+                                (map ppr (Set.toList tvs)))
+                  | (ql, tvs) ← sq_βlst sq ])
+    , ("vmap",  Ppr.fsep . Ppr.punctuate (Ppr.text " ⋀") $
+                  [ ppr α Ppr.<> Ppr.char '⊑' Ppr.<> ppr qe
+                  | (α, qem) ← Map.toList (sq_vmap sq)
+                  , qe       ← unQEMeet qem ])
+    ]
+
 -- | Solver for qualifier contraints.
 --   Given a qualifier constraint, solve and produce type variable
 --   bounds.  Also return any remaining inequalities (which must be
 --   satisfiable, but we haven't guessed how to satisfy them yet).
 solveQualifiers
-  ∷ MonadTV tv r m ⇒
+  ∷ MonadC tv r m ⇒
     -- | Are we generalizing the type of a non-expansive term?
     Bool →
     -- | Generalization candidates
@@ -1041,11 +1215,11 @@ solveQualifiers
     Type tv →
     m ([(Type tv, Type tv)], [(tv, QLit)], Type tv)
 solveQualifiers value αs qc τ = do
-  trace ("solveQ (init)", αs, qc)
+  traceN 3 (TraceIn ("solveQ", "init", αs, qc))
   -- Clean up the constraint, standardize types to qualifier form, and
   -- deal with trivial stuff right away:
   qc             ← stdize qc
-  trace ("solveQ (stdize)", qc)
+  traceN 4 ("solveQ", "stdize", qc)
   -- Decompose implements DECOMPOSE, TOP-SAT, BOT-SAT, and BOT-UNSAT.
   τftv           ← ftvV τ
   state          ← decompose qc QCState {
@@ -1055,7 +1229,7 @@ solveQualifiers value αs qc τ = do
                      sq_vmap = Map.empty,
                      sq_τ    = τ
                    }
-  trace ("solveQ (decompose)", state)
+  traceN 4 ("solveQ", "decompose", state)
   -- Rewrite until it stops changing
   state          ← iterChanging
                      (stdizeType        >=>
@@ -1064,14 +1238,15 @@ solveQualifiers value αs qc τ = do
                       substPosInv       >=>!
                       substNeg True)
                      state
-  trace ("solveQ (rewrites)", state)
+  traceN 4 ("solveQ", "rewrites", state)
   -- Try the SAT solver, then recheck
   state          ← runSat state True
-  trace ("solveQ (sat)", state)
+  traceN 4 ("solveQ", "sat", state)
   runSat state False
   -- Finish by reconstructing the constraint and returning the bounds
   -- for the variables to quantify.
   state          ← genVars state
+  traceN 3 (TraceOut ("solveQ", "done", state))
   return (recompose state, getBounds state, τ)
   where
   --
@@ -1096,8 +1271,9 @@ solveQualifiers value αs qc τ = do
   -- This implements DECOMPOSE, BOT-SAT, TOP-SAT, and BOT-UNSAT.
   decompose qc state0 = foldM each state0 qc where
     each state (QE q1 γs1, QE q2 γs2) = do
-      let γs' = γs1 Set.\\ γs2
-          βs' = Set.filter (tvKindIs QualKd) γs2
+      let γs'  = γs1 Set.\\ γs2
+          βs'  = Set.filter flex γs2
+          flex = (||) <$> unifiable state <*> (`Set.notMember` sq_αs state)
       fβlst ← case q1 \-\ q2 of
         -- (BOT-SAT)
         U  →   return id
@@ -1112,7 +1288,10 @@ solveQualifiers value αs qc τ = do
                     then id     -- (TOP-SAT)
                     else Map.unionWith mappend (setToMapWith bound γs')
           bound γ
-            | tvKindIs QualKd γ = qemSingleton (QE q2 γs2)
+            | Map.lookup γ (sq_τftv state) == Just Covariant
+            , γ `Set.member` sq_αs state
+                                = qemSingleton maxBound
+            | unifiable state γ = qemSingleton (QE q2 γs2)
             | otherwise         = qemSingleton (QE q2 βs')
       return state {
                sq_βlst = fβlst (sq_βlst state),
@@ -1125,7 +1304,7 @@ solveQualifiers value αs qc τ = do
     let meet = bigMeet . map qeQLit . filter (Set.null . qeQSet) . unQEMeet
         qm   = meet <$> sq_vmap state
         τ'   = standardizeQuals qm τ
-    trace ("stdizeType", τ, τ', qm)
+    traceN 5 ("stdizeType", τ, τ', qm)
     τftv ← ftvV τ'
     return state {
              sq_τ    = τ',
@@ -1135,10 +1314,10 @@ solveQualifiers value αs qc τ = do
   -- Substitute U for qualifier variables upper bounded by U (FORCE-U).
   forceU state =
     subst "forceU" state $
-      const minBound <$>
+      minBound <$
         Map.filterWithKey
           (\β qem → case qem of
-            QEMeet [QE U γs] → tvKindIs QualKd β && Set.null γs
+            QEMeet [QE U γs] → unifiable state β && Set.null γs
             _                → False)
           (sq_vmap state)
   --
@@ -1149,7 +1328,8 @@ solveQualifiers value αs qc τ = do
   substNeg doLossy state =
     subst who state $ Map.fromDistinctAscList $ do
       δ ← Set.toAscList (sq_αs state)
-      guard (Map.findWithDefault 0 δ (sq_τftv state) ⊑ QContravariant)
+      guard (unifiable state δ
+             && Map.lookup δ (sq_τftv state) ⊑ Just QContravariant)
       case Map.lookup δ (sq_vmap state) of
         Nothing            → return (δ, maxBound)
         Just (QEMeet [])   → return (δ, maxBound)
@@ -1157,17 +1337,17 @@ solveQualifiers value αs qc τ = do
         Just (QEMeet qes)
           | doLossy        → return (δ, bigMeet qes)
           | otherwise      → mzero
-    where who = if doLossy then "substNeg (lossy)" else "substNeg"
+    where who = if doLossy then "substNeg/lossy" else "substNeg"
   --
   -- Replace Q+ and Q= variables with tight lower bounds.
   substPosInv state = do
     let add qe (QE U (Set.toList → [β]))
           | β `Set.member` sq_αs state
-          = Map.insertWith (liftM2 (⊔)) β (Just qe)
+          = Map.insertWith (liftA2 (⊔)) β (Just qe)
         add _  (QE _ βs)
           = Map.union (setToMap Nothing βs)
         lbs0 = setToMap (Just minBound)
-                        (Set.filter (tvKindIs QualKd) (sq_αs state))
+                        (Set.filter (unifiable state) (sq_αs state))
                  Map.\\ sq_vmap state
         lbs1 = Map.foldrWithKey each lbs0 (sq_vmap state) where
           each γ (QEMeet qem) = foldr (add (QE U (Set.singleton γ))) <-> qem
@@ -1178,7 +1358,7 @@ solveQualifiers value αs qc τ = do
                  Map.filter (== QInvariant) (sq_τftv state)
     (δ's, inv) ← first Set.fromDistinctAscList . unzip <$> sequence
       [ do
-          δ' ← newTVKind QualKd
+          δ' ← newTV' QualKd
           return (δ', (δ, QE q (Set.insert δ' βs)))
       | (δ, qe@(QE q βs)) ← Map.toAscList inv
       , qe /= minBound ]
@@ -1193,7 +1373,7 @@ solveQualifiers value αs qc τ = do
   subst who state γqes0
     | Map.null γqes0 = return state
     | otherwise      = do
-    trace (who, γqes0, state)
+    traceN 4 (who, γqes0, state)
     let sanitize _    []  []
           = fail $ "BUG! (subst)" ++ who ++
                    " attempt impossible substitution: " ++ show γqes0
@@ -1214,7 +1394,11 @@ solveQualifiers value αs qc τ = do
   -- This is okay:     { 1 ↦ 2 3, 2 ↦ 4 }
   -- This is not okay: { 1 ↦ 3 4, 2 ↦ 1 }
   unsafeSubst state γqes = do
-    sequence [ writeTV γ (toQualifierType qe) | (γ, qe) ← Map.toList γqes ]
+    sequence [ do
+                 let τ = toQualifierType qe
+                 writeTV γ τ
+                 updatePinnedTVs γ τ
+             | (γ, qe) ← Map.toList γqes ]
     let γset          = Map.keysSet γqes
         unchanged set = Set.null (γset `Set.intersection` set)
         (βlst, βlst') = List.partition (unchanged . snd) (sq_βlst state)
@@ -1235,7 +1419,7 @@ solveQualifiers value αs qc τ = do
         sq_βlst = βlst,
         sq_vmap = vmap
       }
-    trace ("subst", γqes, state)
+    traceN 4 ("subst", γqes, state)
     return state
   --
   -- As a last ditch effort, use a simple SAT solver to find a
@@ -1243,37 +1427,37 @@ solveQualifiers value αs qc τ = do
   runSat state doIt = do
     let formula = toSat state
         sols    = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
-        δs      = Set.filter (tvKindIs QualKd) (sq_αs state)
-    trace ("runSat", formula, sols)
+    traceN 4 ("runSat", formula, sols)
     case sols of
       []  → fail "Qualifier constraints unsatisfiable"
       sat:_ | doIt
           → subst "sat" state =<<
               Map.fromDistinctAscList <$> sequence
                 [ do
-                    βs ← case var of
-                      QInvariant → Set.singleton <$> newTVKind QualKd
+                    slack ← case var of
+                      QInvariant → Set.singleton <$> newTV' QualKd
                       _          → return Set.empty
-                    -- warn $ "\nSAT: substituting " ++ show (QE q βs) ++
+                    -- warn $ "\nSAT: substituting " ++ show (QE q slack) ++
                     --        " for type variable " ++ show δ
-                    return (δ, QE q βs)
-                | δ ← Set.toAscList δs
+                    return (δ, QE q slack)
+                | δ ← Set.toAscList (sq_αs state)
+                , unifiable state δ
                 , let (q, var) = decodeSatVar δ (sq_τftv state) sat
                 , q /= U || var /= QInvariant ]
       _   → return state
   --
   toSat state = foldr (SAT.:&&:) SAT.Yes $
-      [ (πr vm q ==> πr vm (U,βs)) SAT.:&&: (πa vm q ==> πa vm (U,βs))
+      [ (πr τftv q ==> πr τftv (U,βs)) SAT.:&&: (πa τftv q ==> πa τftv (U,βs))
       | (q, βs) ← sq_βlst state ]
     ++
-      [ (πr vm (FreeVar α) ==> πr vm (q,αs)) SAT.:&&:
-        (πa vm (FreeVar α) ==> πa vm (q,αs))
+      [ (πr τftv (FreeVar α) ==> πr τftv (q,αs)) SAT.:&&:
+        (πa τftv (FreeVar α) ==> πa τftv (q,αs))
       | (α, QEMeet qes) ← Map.toList (sq_vmap state)
       , QE q αs         ← qes
-      , tvKindIs QualKd α ]
+      , unifiable state α ]
     where
       p ==> q = SAT.Not p SAT.:||: q
-      vm = sq_τftv state
+      τftv    = sq_τftv state
   --
   -- Find the variables to generalize
   genVars state = return state { sq_αs = αs' } where
@@ -1302,10 +1486,13 @@ solveQualifiers value αs qc τ = do
   --
   makeQE q = do
     QExp ql γs ← qualifier (toQualifierType q)
-    return (QE ql (Set.fromList (fromVar <$> γs)))
+    let (γs', qls) = partitionJust tvQual (fromVar <$> γs)
+    return (QE (ql ⊔ bigJoin qls) (Set.fromList γs'))
   --
   fromVar (FreeVar α) = α
   fromVar _           = error "BUG! solveQualifiers got bound tyvar"
+  --
+  unifiable _ α = tvKindIs QualKd α
 
 -- | Update a type variable variance map as a result of substituting a
 --   qualifier expression for a type variable.
@@ -1397,6 +1584,9 @@ maximizeVariance γ vm = case Map.findWithDefault 0 γ vm of
 varComponent ∷ Tv tv ⇒ QLit → tv → Int
 varComponent A β = 2 * tvUniqueID β
 varComponent _ β = 2 * tvUniqueID β + 1
+
+instance Ppr SAT.Boolean where ppr = Ppr.text . show
+instance Ppr SAT.SatSolver where ppr = Ppr.text . show
 
 {-
 

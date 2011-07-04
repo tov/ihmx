@@ -3,3 +3,8 @@ ihmx
 *.o
 .svn
 .*sw?
+aside
+dalton
+*.log
+*.aux
+*.pdf

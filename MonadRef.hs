@@ -2,6 +2,7 @@
   LANGUAGE
     FlexibleInstances,
     FunctionalDependencies,
+    GeneralizedNewtypeDeriving,
     MultiParamTypeClasses,
     RankNTypes,
     TypeFamilies,
@@ -10,9 +11,7 @@
   #-}
 module MonadRef (
   MonadRef(..),
-  RefT, RefRef, runRefT,
-  withUnsafePerformRef, withUnsafeRefToIO,
-  unsafePerformRef, unsafeRefToIO,
+  RefT, RefRef, runRefT, mapRefT,
   UnsafeReadRef(..),
   module Defaultable,
 ) where
@@ -29,18 +28,21 @@ import Control.Concurrent.STM.TVar
 import Control.Monad.Cont
 import Control.Monad.Error
 import Control.Monad.List
-import Control.Monad.RWS
+import Control.Monad.RWS.Strict    as Strict
+import Control.Monad.RWS.Lazy      as Lazy
 import Control.Monad.Reader
-import Control.Monad.State
-import Control.Monad.Writer
+import Control.Monad.State.Strict  as Strict
+import Control.Monad.State.Lazy    as Lazy
+import Control.Monad.Writer.Strict as Strict
+import Control.Monad.Writer.Lazy   as Lazy
 
 import System.IO.Unsafe
 import GHC.Conc (unsafeIOToSTM)
 
 import Defaultable
 import Eq1
-import qualified NodeMap as NM
-import qualified Graph as Gr
+import qualified NodeMap as Gr
+import qualified Graph   as Gr
 
 -- | A class for monads with mutable references. Provides generic
 --   operations for creating, reading, writing, and modifying
@@ -54,42 +56,35 @@ class (UnsafeReadRef p, Monad m, Eq1 p) ⇒ MonadRef p m | m → p where
     a ← readRef r
     writeRef r (f a)
   -- Unsafe operations.  Minimal definition: unsafeIOToRef, and either
-  -- maybeUnsafeRefToIO or maybeUnsafePerformRef
+  -- unsafeRefToIO or unsafePerformRef
   unsafeIOToRef         ∷ IO a → m a
-  maybeUnsafeRefToIO    ∷ Maybe (m a → IO a)
-  maybeUnsafeRefToIO    = withUnsafePerformRef (\it → return . it)
-  maybeUnsafePerformRef ∷ Maybe (m a → a)
-  maybeUnsafePerformRef = withUnsafeRefToIO (\it → unsafePerformIO . it)
-
----
---- Helpers for unsafe operations
----
-
-withUnsafePerformRef ∷ (MonadRef p m, Monad m') ⇒
-                       ((m a → a) → r) → m' r
-withUnsafePerformRef kont =
-  maybe (fail "withUnsafePerformRef: not found")
-        (return . kont) maybeUnsafePerformRef
-
-withUnsafeRefToIO ∷ (MonadRef p m, Monad m') ⇒
-                    ((m a → IO a) → r) → m' r
-withUnsafeRefToIO kont =
-  maybe (fail "withUnsafeRefToIO: not found") (return . kont) maybeUnsafeRefToIO
-
-unsafeRefToIO ∷ MonadRef p m ⇒ m a → IO a
-unsafeRefToIO m = join (withUnsafeRefToIO (\it → it m))
-
-unsafePerformRef ∷ MonadRef p m ⇒ m a → a
-unsafePerformRef m = either error id (withUnsafePerformRef (\it → it m))
+  unsafeIOToRef         = return . unsafePerformIO
+  unsafeRefToIO         ∷ m a → IO a
+  unsafeRefToIO         = (return $!) . unsafePerformRef
+  unsafePerformRef      ∷ m a → a
+  unsafePerformRef      = unsafePerformIO . unsafeRefToIO
 
 ---
 --- A transformer version of ST
 ---
 
 newtype RefT s m a = RefT { unRefT ∷ m a }
+  deriving Monad
 
 runRefT ∷ Monad m ⇒ (forall s. RefT s m a) → m a
 runRefT m = unRefT m
+
+mapRefT   ∷ (m a → m b) → RefT s m a → RefT s m b
+mapRefT f = RefT . f . unRefT
+
+liftCallCC :: (((a → m b) → m a) → m a) →
+              ((a → RefT s m b) → RefT s m a) → RefT s m a
+liftCallCC callCC f =
+  RefT $ callCC $ \ c -> unRefT (f (RefT . c))
+
+liftCatch ∷ (m a → (e → m a) → m a) →
+            RefT s m a → (e → RefT s m a) → RefT s m a
+liftCatch f m h = RefT $ f (unRefT m) (unRefT . h)
 
 instance Monad m ⇒ Functor (RefT s m) where
   fmap  = liftM
@@ -97,10 +92,6 @@ instance Monad m ⇒ Functor (RefT s m) where
 instance Monad m ⇒ Applicative (RefT s m) where
   pure  = return
   (<*>) = ap
-
-instance Monad m ⇒ Monad (RefT s m) where
-  return  = RefT . return
-  m >>= k = RefT (unRefT m >>= unRefT . k)
 
 instance MonadTrans (RefT s) where
   lift = RefT
@@ -120,31 +111,30 @@ instance Monad m ⇒ MonadRef (RefRef s) (RefT s m) where
      in a `seq` return (unBox a)
   writeRef (RefRef r) a =
     unsafePerformIO (writeRef r (Box a)) `seq` return ()
-  unsafeIOToRef = return . unsafePerformIO
-  maybeUnsafeRefToIO = Nothing
+  unsafeRefToIO   = const (fail "unsafeRefToIO (RefRef): undefined")
 
 instance MonadCont m ⇒ MonadCont (RefT s m) where
-  callCC f = RefT (callCC (\k → unRefT (f (RefT . k))))
+  callCC = liftCallCC callCC
 
 instance MonadError e m ⇒ MonadError e (RefT s m) where
-  throwError = RefT . throwError
-  catchError m h = RefT (catchError (unRefT m) (unRefT . h))
+  throwError = lift . throwError
+  catchError = liftCatch catchError
 
 instance MonadReader r m ⇒ MonadReader r (RefT s m) where
-  ask     = RefT ask
-  local f = RefT . local f . unRefT
+  ask     = lift ask
+  local   = mapRefT . local
 
 instance MonadState st m ⇒ MonadState st (RefT s m) where
-  get     = RefT get
-  put     = RefT . put
+  get     = lift get
+  put     = lift . put
 
 instance MonadWriter w m ⇒ MonadWriter w (RefT s m) where
-  tell    = RefT . tell
-  listen  = RefT . listen . unRefT
-  pass    = RefT . pass . unRefT
+  tell    = lift . tell
+  listen  = mapRefT listen
+  pass    = mapRefT pass
 
 instance MonadIO m ⇒ MonadIO (RefT s m) where
-  liftIO  = RefT . liftIO
+  liftIO  = lift . liftIO
 
 ---
 --- Other MonadRef instances
@@ -155,95 +145,101 @@ instance MonadRef IORef IO where
   readRef  = readIORef
   writeRef = writeIORef
   unsafeIOToRef    = id
-  maybeUnsafeRefToIO    = Just id
+  unsafeRefToIO    = id
 
 instance MonadRef (STRef s) (ST s) where
   newRef   = newSTRef
   readRef  = readSTRef
   writeRef = writeSTRef
   unsafeIOToRef    = unsafeIOToST
-  maybeUnsafeRefToIO    = Just unsafeSTToIO
+  unsafeRefToIO    = unsafeSTToIO
 
 instance MonadRef TVar STM where
   newRef   = newTVar
   readRef  = readTVar
   writeRef = writeTVar
   unsafeIOToRef = unsafeIOToSTM
-  maybeUnsafeRefToIO = Nothing
+  unsafeRefToIO = atomically
 
 instance MonadRef p m ⇒ MonadRef p (ContT r m) where
   newRef a     = lift $ newRef a
   readRef r    = lift $ readRef r
   writeRef r a = lift $ writeRef r a
   unsafeIOToRef    = lift . unsafeIOToRef
-  maybeUnsafeRefToIO    = withUnsafeRefToIO (\next m → do
-    r ← newIORef Nothing
-    next . runContT m $ \a → do
-      unsafeIOToRef (writeIORef r (Just a))
-      return (error "ContT#maybeUnsafeRefToIO: observed return value")
-    ma ← readIORef r
-    maybe (fail "ContT#maybeUnsafeRefToIO: empty IORef") return ma)
+  unsafeRefToIO    = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
 
 instance (Show e, Error e, MonadRef p m) ⇒ MonadRef p (ErrorT e m) where
   newRef a     = lift $ newRef a
   readRef r    = lift $ readRef r
   writeRef r a = lift $ writeRef r a
-  unsafeIOToRef         = lift . unsafeIOToRef
-  maybeUnsafePerformRef = withUnsafePerformRef (\next m → next $ do
-    r ← runErrorT m
-    case r of
-      Left e  → fail (show e)
-      Right a → return a)
+  unsafeIOToRef   = lift . unsafeIOToRef
+  unsafeRefToIO   = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
 
 instance MonadRef p m ⇒ MonadRef p (ListT m) where
   newRef a     = lift $ newRef a
   readRef r    = lift $ readRef r
   writeRef r a = lift $ writeRef r a
-  unsafeIOToRef         = lift . unsafeIOToRef
-  maybeUnsafePerformRef = withUnsafePerformRef (\next →
-    next . (liftM head . runListT))
+  unsafeIOToRef   = lift . unsafeIOToRef
+  unsafeRefToIO   = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
 
 instance (Defaultable r, Defaultable s, Monoid w, MonadRef p m) ⇒
-         MonadRef p (RWST r w s m) where
+         MonadRef p (Strict.RWST r w s m) where
   newRef a     = lift $ newRef a
   readRef r    = lift $ readRef r
   writeRef r a = lift $ writeRef r a
   unsafeIOToRef         = lift . unsafeIOToRef
-  maybeUnsafePerformRef = withUnsafePerformRef (\next m →
-    next . liftM fst $ evalRWST m getDefault getDefault)
+  unsafeRefToIO   = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
+
+instance (Defaultable r, Defaultable s, Monoid w, MonadRef p m) ⇒
+         MonadRef p (Lazy.RWST r w s m) where
+  newRef a     = lift $ newRef a
+  readRef r    = lift $ readRef r
+  writeRef r a = lift $ writeRef r a
+  unsafeIOToRef         = lift . unsafeIOToRef
+  unsafeRefToIO   = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
 
 instance (Defaultable r, MonadRef p m) ⇒ MonadRef p (ReaderT r m) where
   newRef a     = lift $ newRef a
   readRef r    = lift $ readRef r
   writeRef r a = lift $ writeRef r a
-  unsafeIOToRef    = lift . unsafeIOToRef
-  maybeUnsafePerformRef = withUnsafePerformRef (\next →
-    next . flip runReaderT getDefault)
+  unsafeIOToRef   = lift . unsafeIOToRef
+  unsafeRefToIO   = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
 
-instance (Defaultable s, MonadRef p m) ⇒ MonadRef p (StateT s m) where
+instance (Defaultable s, MonadRef p m) ⇒ MonadRef p (Strict.StateT s m) where
   newRef a     = lift $ newRef a
   readRef r    = lift $ readRef r
   writeRef r a = lift $ writeRef r a
   unsafeIOToRef    = lift . unsafeIOToRef
-  maybeUnsafePerformRef = withUnsafePerformRef (\next →
-    next . flip evalStateT getDefault)
+  unsafeRefToIO    = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
 
-instance (Monoid w, MonadRef p m) ⇒ MonadRef p (WriterT w m) where
+instance (Defaultable s, MonadRef p m) ⇒ MonadRef p (Lazy.StateT s m) where
   newRef a     = lift $ newRef a
   readRef r    = lift $ readRef r
   writeRef r a = lift $ writeRef r a
   unsafeIOToRef    = lift . unsafeIOToRef
-  maybeUnsafePerformRef = withUnsafePerformRef (\next →
-    next . liftM fst . runWriterT)
+  unsafeRefToIO    = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
+
+instance (Monoid w, MonadRef p m) ⇒ MonadRef p (Strict.WriterT w m) where
+  newRef a     = lift $ newRef a
+  readRef r    = lift $ readRef r
+  writeRef r a = lift $ writeRef r a
+  unsafeIOToRef    = lift . unsafeIOToRef
+  unsafeRefToIO    = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
+
+instance (Monoid w, MonadRef p m) ⇒ MonadRef p (Lazy.WriterT w m) where
+  newRef a     = lift $ newRef a
+  readRef r    = lift $ readRef r
+  writeRef r a = lift $ writeRef r a
+  unsafeIOToRef    = lift . unsafeIOToRef
+  unsafeRefToIO    = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
 
 instance (Ord a, Gr.DynGraph g, MonadRef p m) ⇒
-         MonadRef p (NM.NodeMapT a b g m) where
+         MonadRef p (Gr.NodeMapT a b g m) where
   newRef a     = lift $ newRef a
   readRef r    = lift $ readRef r
   writeRef r a = lift $ writeRef r a
   unsafeIOToRef    = lift . unsafeIOToRef
-  maybeUnsafePerformRef = withUnsafePerformRef (\next →
-    next . liftM fst . NM.runNodeMapT NM.new Gr.empty)
+  unsafeRefToIO    = unsafeRefToIO . extractMsgT' ("unsafeRefToIO: "++)
 
 ---
 --- Unsafe reading of references
