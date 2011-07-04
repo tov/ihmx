@@ -108,7 +108,9 @@ class (Functor m, Applicative m, Monad m, MonadTrace m,
   readTV_   ∷ tv → m (Maybe (Type tv))
   -- | Get all the type variables allocated while running the action
   --   (except for any masked out by a previous action.)
-  collectTV ∷ m a → m (a, [tv])
+  collectTV  ∷ m a → m (a, [tv])
+  collectTV_ ∷ m a → m [tv]
+  collectTV_ = snd <$$> collectTV
   -- | Get the canonical representative (root) of a tree of type
   --   variables, and any non-tv type stored at the root, if it
   --   exists.  Performs path compression.
@@ -142,7 +144,7 @@ class (Functor m, Applicative m, Monad m, MonadTrace m,
   writeTV α τ = do
     setChanged
     (α', mτα) ← rootTV α
-    traceN 2 ("writeTV", (α', mτα), τ)
+    traceN 2 ("writeTV", α', τ)
     case mτα of
       Nothing → do
         Just rank ← getTVRank_ α'
@@ -360,7 +362,10 @@ instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
     UT $ tell ([α], mempty)
     return α
   --
-  collectTV = UT . censor (upd1 []) . listens sel1 . unUT
+  collectTV action = do
+    rαs ← (UT . censor (upd1 []) . listens sel1 . unUT) action
+    traceN 2 ("collectTV", snd rαs)
+    return rαs
   --
   writeTV_ TV { tvRep = UniFl r }   t = lift (writeRef r (Right t))
   writeTV_ TV { tvRep = ExiFl _ _ } _ = fail "BUG! writeTV_ got ex."
