@@ -157,7 +157,7 @@ generalizeEx γrank τ = do
   let qls = getQual <$> αs'
   standardizeMus =<< closeWithQuals qls ExQu αs' <$> substDeep τ
   where
-  getQual = fromMaybe (error "generalizeEx (BUG!) no rank?") . tvQual
+  getQual = fromMaybe (error "BUG! generalizeEx: no rank?") . tvQual
 
 ---
 --- Eager subtyping constraint solver
@@ -257,19 +257,20 @@ instance MonadRef r m ⇒ MonadRef r (ConstraintT tv r m) where
 
 -- | Pass through for unification operations
 instance MonadTV tv r m ⇒ MonadTV tv r (ConstraintT tv r m) where
-  newTV_ (Universal, kind, bound) = do
-    α ← lift (newTV' kind)
+  newTV_ (Universal, kind, bound, descr) = do
+    α ← lift (newTV' (kind, descr))
     fvTy α ⊏: bound
     return α
   newTV_ attrs  = lift (newTV' attrs)
   writeTV_      = lift <$$> writeTV_
   readTV_       = lift <$> readTV_
   collectTV     = mapConstraintT (mapListen2 collectTV)
+  reportTV      = lift . reportTV
   monitorChange = mapConstraintT (mapListen2 monitorChange)
   getTVRank_    = lift <$> getTVRank_
   setTVRank_    = lift <$$> setTVRank_
   setChanged    = lift setChanged
-  unsafePerformTV = error "No MonadTV.unsafePerformU for ConstraintT"
+  unsafePerformTV = error "BUG! No MonadTV.unsafePerformU for ConstraintT"
   unsafeIOToTV  = lift <$> unsafeIOToTV
 
 instance MonadTV tv r m ⇒ MonadReadTV tv (ConstraintT tv r m) where
@@ -422,7 +423,11 @@ subtypeTypes unify τ10 τ20 = do
     (_, RecTy _ τ2') →
       decomp τ1 (openTy 0 [τ2] τ2')
     _ →
-      fail $ "cannot subtype/unify " ++ show τ1 ++ " and " ++ show τ2
+      fail $ "Type error: type ‘" ++ show τ1 ++ "’ " ++
+             (if unify
+                then "cannot be unified with"
+                else "is not a subtype of") ++
+             " ‘" ++ show τ2 ++ "’"
   --
   addEdge a1 a2 = do
     NM.insNewMapNodeM a1
@@ -475,7 +480,7 @@ unifyVar α τ0 = do
   lift $ gtraceN 4 ("unifyVar", α, τ0)
   τ ← substDeep τ0
   unless (lcTy 0 τ) $
-    fail "cannot unify because insufficiently polymorphic"
+    fail $ "Type error: Cannot unify because insufficiently polymorphic"
   writeTV α τ
   updatePinnedTVs α τ
   (n, _) ← NM.mkNodeM α
@@ -510,7 +515,8 @@ occursCheck α τ = do
   gtraceN 3 ("occursCheck", α, τ)
   (guarded, unguarded) ← (Map.keys***Map.keys) . Map.partition id <$> ftvG τ
   whenM (anyA (checkEquivTVs α) unguarded) $
-    fail "Occurs check failed"
+    fail $ "Type error: Occurs check failed: cannot construct infinite " ++ 
+           "type such that " ++ show α ++ " = " ++ show τ
   recVars ← filterM (checkEquivTVs α) guarded
   when (not (null recVars)) $ gtraceN 3 ("occursCheck", "recvars", recVars)
   return (foldr closeRec τ recVars)
@@ -1103,7 +1109,7 @@ solveQualifiers value αs qc τ = do
         U  →   return id
         -- (BOT-UNSAT)
         q' | Set.null βs' →
-               fail $ "Qualifier inequality unsatisfiable: " ++
+               fail $ "Type error: qualifier inequality unsatisfiable: " ++
                       show (toQualifierType (QE q1 γs1)) ++
                       " ⊑ " ++ show (toQualifierType (QE q2 γs2))
            | otherwise →
@@ -1253,7 +1259,7 @@ solveQualifiers value αs qc τ = do
         sols    = SAT.solve =<< SAT.assertTrue formula SAT.newSatSolver
     traceN 4 ("runSat", formula, sols)
     case sols of
-      []  → fail "Qualifier constraints unsatisfiable"
+      []  → fail "Type error: qualifier constraints unsatisfiable"
       sat:_ | doIt
           → subst "sat" state =<<
               Map.fromDistinctAscList <$> sequence

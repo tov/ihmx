@@ -11,6 +11,7 @@
     NoImplicitPrelude,
     RankNTypes,
     TypeFamilies,
+    TypeSynonymInstances,
     UndecidableInstances,
     UnicodeSyntax
   #-}
@@ -62,6 +63,7 @@ class (Ftv v v, Show v, Ppr v) ⇒ Tv v where
   tvKind     ∷ v → Kind
   tvFlavor   ∷ v → Flavor
   tvQual     ∷ v → Maybe QLit
+  tvDescr    ∷ v → String
 
 data Flavor
   = Universal
@@ -96,7 +98,7 @@ class (Functor m, Applicative m, Monad m, MonadTrace m,
        Tv tv, MonadRef r m, MonadReadTV tv m) ⇒
       MonadTV tv r m | m → tv r where
   -- | Allocate a new, empty type variable with the given properties
-  newTV_    ∷ (Flavor, Kind, QLit) → m tv
+  newTV_    ∷ (Flavor, Kind, QLit, String) → m tv
   -- | Allocate a new, empty (unifiable) type variable
   newTV     ∷ m tv
   newTV     = newTV' ()
@@ -111,6 +113,8 @@ class (Functor m, Applicative m, Monad m, MonadTrace m,
   collectTV  ∷ m a → m (a, [tv])
   collectTV_ ∷ m a → m [tv]
   collectTV_ = snd <$$> collectTV
+  -- | Report a type variable as "new" to any upstream collectors
+  reportTV   ∷ tv → m ()
   -- | Get the canonical representative (root) of a tree of type
   --   variables, and any non-tv type stored at the root, if it
   --   exists.  Performs path compression.
@@ -184,12 +188,14 @@ class (Functor m, Applicative m, Monad m, MonadTrace m,
   unsafeIOToTV    ∷ IO a → m a
 
 class NewTV a where
-  newTVArg ∷ a → (Flavor, Kind, QLit) → (Flavor, Kind, QLit)
+  newTVArg ∷ a → (Flavor, Kind, QLit, String) → (Flavor, Kind, QLit, String)
   newTV'   ∷ MonadTV tv r m ⇒ a → m tv
-  newTV' a = newTV_ (newTVArg a (Universal, TypeKd, maxBound))
+  newTV' a = newTV_ (newTVArg a (Universal, TypeKd, maxBound, ""))
   newTVTy' ∷ MonadTV tv r m ⇒ a → m (Type tv)
   newTVTy' = fvTy <$$> newTV'
 
+instance (NewTV a, NewTV b, NewTV c, NewTV d) ⇒ NewTV (a, b, c, d) where
+  newTVArg (a, b, c, d) = newTVArg a . newTVArg b . newTVArg c . newTVArg d
 instance (NewTV a, NewTV b, NewTV c) ⇒ NewTV (a, b, c) where
   newTVArg (a, b, c) = newTVArg a . newTVArg b . newTVArg c
 instance (NewTV a, NewTV b) ⇒ NewTV (a, b) where
@@ -197,6 +203,7 @@ instance (NewTV a, NewTV b) ⇒ NewTV (a, b) where
 instance NewTV Flavor         where newTVArg = upd1
 instance NewTV Kind           where newTVArg = upd2
 instance NewTV QLit           where newTVArg = upd3
+instance NewTV String         where newTVArg = upd4
 instance NewTV ()             where newTVArg = const id
 
 class Monad m ⇒ Substitutable a m where
@@ -261,6 +268,7 @@ data TV r
   = UnsafeReadRef r ⇒ TV {
       tvId     ∷ !Int,
       tvKind_  ∷ !Kind,
+      tvDescr_ ∷ !String,
       tvRep    ∷ !(TVRep r)
     }
 
@@ -272,6 +280,7 @@ data TVRep r
 instance Tv (TV r) where
   tvUniqueID = tvId
   tvKind     = tvKind_
+  tvDescr    = tvDescr_
   tvFlavor TV { tvRep = UniFl _ }   = Universal
   tvFlavor TV { tvRep = ExiFl _ _ } = Existential
   tvFlavor TV { tvRep = SkoFl _ }   = Skolem
@@ -348,14 +357,14 @@ instance (Functor m, MonadRef r m) ⇒ MonadReadTV (TV r) (UT r m) where
   readTV = liftM (uncurry (flip maybe Right . Left)) . rootTV
 
 instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
-  newTV_ (flavor, kind, bound) = do
+  newTV_ (flavor, kind, bound, descr) = do
     when (flavor == Universal && bound /= maxBound) $
       fail "newTV_ (BUG!): universal tyvars cannot have non-A bound"
     uts ← UT get
     let i = utsGensym uts
     UT $ put uts { utsGensym = succ i }
     traceN 2 ("new", flavor, kind, i)
-    α ← TV i kind <$> case flavor of
+    α ← TV i kind descr <$> case flavor of
       Universal   → lift $ UniFl <$> newRef (Left Rank.infinity)
       Existential → lift $ ExiFl bound <$> newRef Rank.infinity
       Skolem      → return $ SkoFl bound
@@ -366,6 +375,7 @@ instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
     rαs ← (UT . censor (upd1 []) . listens sel1 . unUT) action
     traceN 2 ("collectTV", snd rαs)
     return rαs
+  reportTV α = UT (tell ([α], mempty))
   --
   writeTV_ TV { tvRep = UniFl r }   t = lift (writeRef r (Right t))
   writeTV_ TV { tvRep = ExiFl _ _ } _ = fail "BUG! writeTV_ got ex."
@@ -409,6 +419,7 @@ instance (MonadTV tv r m, Monoid w) ⇒ MonadTV tv r (WriterT w m) where
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
   collectTV     = mapWriterT (mapListen2 collectTV)
+  reportTV      = lift . reportTV
   monitorChange = mapWriterT (mapListen2 monitorChange)
   getTVRank_ = lift <$> getTVRank_
   setTVRank_ = lift <$$> setTVRank_
@@ -424,6 +435,7 @@ instance (MonadTV tv r m, Defaultable s) ⇒ MonadTV tv r (StateT s m) where
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
   collectTV     = mapStateT (mapListen2 collectTV)
+  reportTV      = lift . reportTV
   monitorChange = mapStateT (mapListen2 monitorChange)
   getTVRank_ = lift <$> getTVRank_
   setTVRank_ = lift <$$> setTVRank_
@@ -439,6 +451,7 @@ instance (MonadTV tv p m, Defaultable r) ⇒ MonadTV tv p (ReaderT r m) where
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
   collectTV     = mapReaderT collectTV
+  reportTV      = lift . reportTV
   monitorChange = mapReaderT monitorChange
   getTVRank_ = lift <$> getTVRank_
   setTVRank_ = lift <$$> setTVRank_
@@ -455,6 +468,7 @@ instance (MonadTV tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
   collectTV     = mapRWST (mapListen3 collectTV)
+  reportTV      = lift . reportTV
   monitorChange = mapRWST (mapListen3 monitorChange)
   getTVRank_ = lift <$> getTVRank_
   setTVRank_ = lift <$$> setTVRank_
@@ -472,6 +486,7 @@ instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
   writeTV_ = lift <$$> writeTV_
   readTV_  = lift <$> readTV_
   collectTV     = NM.mapNodeMapT (mapListen2 collectTV)
+  reportTV      = lift . reportTV
   monitorChange = NM.mapNodeMapT (mapListen2 monitorChange)
   getTVRank_ = lift <$> getTVRank_
   setTVRank_ = lift <$$> setTVRank_

@@ -121,16 +121,17 @@ infer φ0 δ γ e0 mσ0 = do
   let φ = maybe id prenexFlavors mσ φ0
   σ  ← case e0 of
     AbsTm π e                     → do
-      ((mσ2, σ1, σs), αs) ← collectTV $ do
-        [mσ1,_,mσ2]    ← splitCon (<:) mσ "->" 3
-        (σ1, σs)       ← inferPatt δ π mσ1 (countOccsPatt π e)
-        return (mσ2, σ1, σs)
-      αs'              ← filterM isMonoType (map fvTy αs)
+      [mσ1,_,mσ2]      ← splitCon (<:) mσ "->" 3
+      ((σ1, σs), αs) ← collectTV $
+        inferPatt δ π mσ1 (countOccsPatt π e)
+      αs'              ← filterM (isMonoType . fst) ((fvTy &&& tvDescr) <$> αs)
       γ'               ← γ &+&! π &:& σs
       σ2               ← infer (request ExQu γ αs) δ γ' e mσ2
       qe               ← arrowQualifier γ (AbsTm π e)
-      unlessM (allA isMonoType αs') $
-        fail "used some unannotated parameter polymorphically"
+      sequence_
+        [ unlessM (isMonoType α) $
+            fail $ "Type error: Used " ++ descr ++ " polymorphically"
+        | (α, descr) ← αs' ]
       maybeGen e0 φ γ (arrTy σ1 qe σ2)
     LetTm π e1 e2                 → do
       mσ1              ← extractPattAnnot δ π
@@ -150,7 +151,7 @@ infer φ0 δ γ e0 mσ0 = do
         [ do
             unless (syntacticValue ei) $
               fail $ "In let rec, binding for ‘" ++ ni ++
-                     "’ not a syntactic value"
+                     "’ is not a syntactic value"
             σi ⊏: U
             infer request δ γ' ei (σi <$ mai)
         | (ni, mai, ei) ← bs
@@ -240,12 +241,12 @@ inferPatt δ π0 mσ0 occs = do
   traceN 1 (TraceOut ("inferPatt", σ, σs))
   return (σ, σs)
   where
-  loop (VarPa _)       mσ = do
-    σ ← maybeFresh mσ
+  loop (VarPa n)       mσ = do
+    σ ← maybeFresh mσ $ "unannotated parameter ‘" ++ n ++ "’"
     bind σ
     return σ
   loop WldPa           mσ = do
-    σ ← maybeFresh mσ
+    σ ← maybeFresh mσ $ "unannotated wildcard pattern"
     return σ
   loop (ConPa name πs) mσ = do
     mαs ← splitCon (<:) mσ name (length πs)
@@ -254,7 +255,7 @@ inferPatt δ π0 mσ0 occs = do
   loop (InjPa name π)  mσ = do
     (mα, mβ) ← splitRow (<:) mσ name
     σ1 ← loop π mα
-    σ2 ← maybeFresh mβ
+    σ2 ← maybeFresh mβ $ ""
     mσ ?≤ RowTy name σ1 σ2
   loop (AnnPa π annot) mσ = do
     σ' ← instAnnot δ annot
@@ -262,8 +263,15 @@ inferPatt δ π0 mσ0 occs = do
     loop π (Just σ')
     return σ
   --
-  bind τ      = tell [τ]
-  maybeFresh  = fromMaybeA newTVTy
+  bind τ         = tell [τ]
+  maybeFresh mσ doc = case mσ of
+    Nothing → newTVTy' doc
+    Just σ  → do
+      σ' ← substRoot σ
+      case σ' of
+        VarTy (FreeVar α) → reportTV α
+        _ → return ()
+      return σ'
   --
   Nothing ?≤ σ' = return σ'
   Just σ  ?≤ σ' = do σ ≤ σ'; return σ
@@ -370,7 +378,9 @@ funmatchN n0 σ = do
       return ([β1], β2)
     RecTy _ σ1 →
       funmatchN n0 (openTy 0 [σ'] σ1)
-    _ → fail ("Expected function type, but got ‘" ++ show σ' ++ "’")
+    _ → fail $ "Type error: In application expression, expected " ++
+               "operator to have a function type, but got ‘" ++
+               show σ' ++ "’ instead"
   where
     unroll n (ConTy "->" [σ1, _, σ']) | n > 0 = do
       (σ2m, σ) ← unroll (n - 1) =<< substRoot σ'
@@ -403,7 +413,9 @@ subsumeBy (<*) σ1 σ2 = do
                       ftvSet (σ1, σ2, fvTy <$> us1)
       when (any (`Set.member` freeSkolems) ss1) $ do
         traceN 3 (αs2, freeSkolems)
-        fail "Could not subsume: insufficiently polymorphic"
+        fail $ "Type error: cannot subsume type ‘" ++ show σ1 ++
+               "’ to type ‘" ++ show σ2 ++ "’ because the former is " ++
+               "insufficiently polymorphic."
       return ()
 
 -- | Given a list of type variables, partition it into a triple of lists
@@ -525,7 +537,7 @@ checkEscapingEx φ =
   for_ (rqTVs φ) $ \(α,rank) → do
     rank' ← getTVRank α
     when (rank' <= rank) $
-      fail "existential type escapes its scope"
+      fail "Type error: Existential type variable escapes its scope."
 
 ---
 --- Instantiation operations
@@ -563,10 +575,12 @@ splitCon (<*) (Just σ) c arity = do
           return []
     VarTy (FreeVar α) | tvFlavorIs Universal α
       → do
-          αs ← replicateM arity newTVTy
+          αs ← replicateM arity (newTVTy' (tvDescr α))
           ρ <* ConTy c αs
           return (Just <$> αs)
-    _ → fail $ "got " ++ show σ ++ " where " ++ c ++ " expected"
+    _ → fail $ "Type error: Pattern expected a value constructed " ++
+               "with ‘" ++ c ++ "’ (arity " ++ show arity ++ ") " ++
+               "but got type ‘" ++ show σ ++ "’ instead."
 
 -- | Like 'splitCon', but for rows.
 --   PRECONDITION: σ is fully substituted.
@@ -593,19 +607,22 @@ splitRow (<*) (Just σ) name = do
           τ2 ← newTVTy
           ρ <* RowTy name τ1 τ2
           return (Just τ1, Just τ2)
-    _ → fail $ "got " ++ show σ ++ " where `" ++ name ++ " expected"
+    _ → fail $ "Type error: Pattern expected a value constructed " ++
+               "with ‘`" ++ name ++ "’ but got type ‘" ++ show σ ++
+               "’ instead."
 
 -- | Given a map from type variables names and qualifiers to variances,
 --   create an initial type variable environment.
 instAnnotTVs ∷ MonadC tv r m ⇒ VarMap (Name, QLit) → m (Δ tv)
 instAnnotTVs vmap = foldM each Map.empty (Map.toList vmap) where
   each δ ((name, ql), variance) = do
-    α ← newTVTy' (ql, varianceToKind variance)
+    α ← newTV' (ql, varianceToKind variance,
+                "annotation type variable " ++ qLitSigil ql : name)
     case Map.insertLookupWithKey (\_ _ → id) name α δ of
       (Nothing, δ') → return δ'
       (Just _,  _)  → fail $
-        "Used type variable " ++ name ++
-        " as both A and U in annotations of same term"
+        "Type error: Used both type variables `" ++ name ++
+        " and '" ++ name ++ " in annotations in same expression."
 
 -- | Given a tyvar environment (mapping some-bound names to tyvars) and
 --   an annotation, create new universal type variables for any new
@@ -617,13 +634,14 @@ instAnnot ∷ MonadTV tv r m ⇒
 instAnnot δ (Annot nqls σ0) = do
   let names = fst <$> nqls
   αs ← mapM eachName names
-  let σ = totalSubst names αs =<< σ0
+  traverse_ reportTV αs
+  let σ = totalSubst names (fvTy <$> αs) =<< σ0
   traceN 4 ("instAnnot", δ, σ, αs)
   return σ
   where
-    eachName ('_':_) = newTVTy
+    eachName ('_':_) = newTV
     eachName name    = case Map.lookup name δ of
-      Just σ  → return σ
+      Just α  → return α
       Nothing → fail "BUG! (instAnnot): type variable not found"
 
 -- | Instantiate the outermost universal and existential quantifiers

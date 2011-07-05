@@ -19,7 +19,7 @@ import Ppr
 import Data.Map as M
 import qualified Text.PrettyPrint as Ppr
 
-type Δ tv = Map Name (Type tv)
+type Δ tv = Map Name tv
 
 data Γ tv
   = Γ {

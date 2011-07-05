@@ -612,21 +612,6 @@ totalSubst (α:αs) (τ:τs) β
   | otherwise       = totalSubst αs τs β
 totalSubst _ _ _ = error "BUG! substsAll saw unexpected free tv"
 
-{-
--- | Use the given function to substitute for the free variables
---   of a type; allows changing the ftv representation.
-typeMapM ∷ ∀ m a b. Monad m ⇒ (a → m (Type b)) → Type a → m (Type b)
-typeMapM f = foldTypeM (\q αs k → k (map (0,) [0..length αs - 1])
-                                    (return <$> QuaTy q αs))
-                       (return <$$> mkBvF bvTy)
-                       f
-                       (return <$$> ConTy)
-                       (return <$$$> RowTy)
-                       (\n k → k (0,0) (return <$> RecTy n))
-             where ?deref = return . Left
--}
-
-
 -- | Is the given type ground (type-variable and quantifier free)?
 isGroundType ∷ MonadReadTV v m ⇒ Type v → m Bool
 isGroundType = foldType (\_ _ k → k (repeat False) (const False))
@@ -1579,8 +1564,8 @@ findVar (name, ql) = loop 0 where
   finish ix jx ql' =
     if ql == ql'
       then return (boundVar ix jx name)
-      else fail $ "Used both type variables '" ++ name ++ " and `" ++
-                  " in the same expression"
+      else fail $ "Syntax error: Used both type variables '" ++
+                  name ++ " and `" ++ name ++ " in the same expression"
 
 -- | To parse an annotation
 instance Parsable Annot where
@@ -1597,7 +1582,7 @@ instance Parsable (Type a) where
     somes ← getState
     case somes of
       [] → return t
-      _  → fail ("Open type: " ++ show somes)
+      _  → fail ("Syntax error: Unbound type variables: " ++ show somes)
 
 -- | To parse a (potentially open) type.  Adds the names of any free
 --   variables encountered to the parse state in the order that their
@@ -1616,7 +1601,7 @@ parseType  = level0 []
                body ← level0 ([(tv, ql)]:g)
                if contractiveTy body
                  then return (RecTy (Here tv) body)
-                 else fail "Recursive type not contractive"
+                 else fail "Parser error: Recursive type not contractive"
          <|> level1 g
   level1 g = do
                t1 ← level2 g
@@ -1652,7 +1637,7 @@ parseQuantifiers = many1 ((,) <$> quant <*> tvs) <* dot tok where
     idss ← sepBy1 tvGroup (comma tok)
     let ids = concatMap (map fst) idss
     when (ordNub ids /= ids) $
-      fail "repeated tyvar in quantifier group"
+      fail "Syntax error: Repeated tyvar in quantifier group"
     return (concat idss)
   tvGroup = many1 parseTV
 
@@ -1791,7 +1776,7 @@ namesFrom s = [ c:n | n ← "" : "'" : map numberSubscript [0 ..], c ← s ]
 numberSubscript ∷ Int → String
 numberSubscript 0  = "₀"
 numberSubscript n0
-  | n0 < 0         = error "numberSubscript requires non-negative Int"
+  | n0 < 0         = error "BUG! numberSubscript requires non-negative Int"
   | otherwise      = reverse $ List.unfoldr each n0 where
   each 0 = Nothing
   each n = Just (subscriptDigits !! ones, rest)
@@ -1851,23 +1836,25 @@ instance Ppr a ⇒ Ppr (Type a) where
   pprPrec p = pprType p []
 
 -- | To pretty-print a type
-pprType ∷ Ppr a ⇒ Int → [[Name]] → Type a → Ppr.Doc
+pprType ∷ Ppr a ⇒ Int → [[(Name, QLit)]] → Type a → Ppr.Doc
 pprType  = loop where
   loop p g t0 = case t0 of
     QuaTy u e t           →
       let quant = case u of AllQu → "∀"; ExQu → "∃"
           (tvs0, qls) = unzip e
-          tvs1        = freshNames tvs0 (concat g) tvNames
-          tvs         = zipWith ((:) . qLitSigil) qls tvs1
+          tvs1        = freshNames tvs0 (fst <$> concat g) tvNames
+          tvs         = zip tvs1 qls
        in parensIf (p > 0) $
             Ppr.hang
               (Ppr.text quant Ppr.<+>
-                 Ppr.fsep (Ppr.text <$> tvs)
+                 Ppr.fsep (pprTV <$> tvs)
                Ppr.<> Ppr.char '.')
               2
               (loop 0 (tvs : g) t)
     VarTy (BoundVar ix jx (coerceOptional → n)) →
-      Ppr.text $ maybe "?" id $ (listNth jx <=< listNth ix $ g) `mplus` n
+      case listNth jx <=< listNth ix $ g of
+        Just tvql → pprTV tvql
+        Nothing   → Ppr.text $ fromMaybe "?" n
     VarTy (FreeVar a)      → pprPrec p a
     ConTy "->" [t1, tq, t2] →
       parensIf (p > 1) $
@@ -1898,14 +1885,15 @@ pprType  = loop where
             [ Ppr.text ni Ppr.<> Ppr.char ':' Ppr.<+> loop 0 g ti
             | (ni, ti) ← row ]
     RecTy pn t          →
-      let tv = freshName pn (concat g) tvNames in
+      let tv = freshName pn (fst <$> concat g) tvNames in
       parensIf (p > 0) $
         Ppr.hang
-          (Ppr.char 'μ' Ppr.<> ppr tv Ppr.<> Ppr.char '.')
+          (Ppr.text "μ `" Ppr.<> ppr tv Ppr.<> Ppr.char '.')
           2
-          (loop 0 ([tv]:g) t)
+          (loop 0 ([(tv, A)]:g) t)
+  pprTV (name, ql) = Ppr.text (qLitSigil ql : name)
 
-pprQExp ∷ Ppr a ⇒ Bool → Int → [[Name]] → Type a → Ppr.Doc
+pprQExp ∷ Ppr a ⇒ Bool → Int → [[(Name, QLit)]] → Type a → Ppr.Doc
 pprQExp arrowStyle p g t =
   case pureQualifier t of
     QExp U [] | arrowStyle → Ppr.char '→'
