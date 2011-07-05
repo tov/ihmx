@@ -177,7 +177,7 @@ infer φ0 δ γ e0 mσ0 = do
     AnnTm e annot                 → do
       -- infer φ δ γ (AppTm (AbsTm (AnnPa (VarPa "x") annot) (VarTm "x")) e) mσ
       σ                ← instAnnot δ annot
-      αs               ← collectTV_ $ do
+      αs               ← collectTV_ . withPinnedTVs σ $ do
         σ'               ← infer request δ γ e (Just σ)
         σ' ≤ σ
       maybeGen e0 (request φ γ αs) γ σ
