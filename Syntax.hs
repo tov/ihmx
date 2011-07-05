@@ -318,6 +318,7 @@ getVariances "Ref"   2 = [QInvariant, Invariant]
 getVariances "File"  1 = [QContravariant]
 getVariances "Const" i = replicate i Omnivariant
 getVariances "Anti"  i = replicate i Contravariant
+getVariances "Q"     i = replicate i QCovariant
 getVariances _       i = replicate i Covariant
 
 ---

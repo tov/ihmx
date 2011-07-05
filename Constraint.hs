@@ -262,15 +262,12 @@ mapConstraintT f = ConstraintT . mapStateT f . unConstraintT_
 runConstraintT ∷ MonadTV tv r m ⇒ ConstraintT tv r m a → m a
 runConstraintT m = evalStateT (unConstraintT_ m) cs0
   where cs0        = CTState {
-                       csGraph   = gr0,
-                       csNodeMap = nm0,
+                       csGraph   = Gr.empty,
+                       csNodeMap = NM.new,
                        csEquivs  = Map.empty,
                        csQuals   = [],
                        csPinned  = []
                      }
-        (gr0, nm0) = NM.mkMapGraph
-                       (map (ConAt . snd) (Gr.labNodes tyConOrder))
-                       []
 
 -- | Pass through for reference operations
 instance MonadRef r m ⇒ MonadRef r (ConstraintT tv r m) where
@@ -401,12 +398,6 @@ subtypeTypes unify τ10 τ20 = do
         else do
           lift (makeEquivTVs r1 r2)
           addEdge (VarAt r1) (VarAt r2)
-    (VarTy (FreeVar r1), ConTy c2 [])
-      | not unify, tvFlavorIs Universal r1, tyConHasRelated c2 →
-      addEdge (VarAt r1) (ConAt c2)
-    (ConTy c1 [], VarTy (FreeVar r2))
-      | not unify, tvFlavorIs Universal r2, tyConHasRelated c1 →
-      addEdge (ConAt c1) (VarAt r2)
     (VarTy (FreeVar r1), _)
       | tvFlavorIs Universal r1 → do
       τ2' ← lift $ occursCheck r1 τ2 >>= if unify then return else copyType
@@ -426,8 +417,6 @@ subtypeTypes unify τ10 τ20 = do
     (QuaTy ExQu αs1 τ1', QuaTy ExQu αs2 τ2')
       | αs1 == αs2 →
       check τ1' τ2'
-    (ConTy c1 [], ConTy c2 [])
-      | not unify, c1 `tyConLe` c2 → return ()
     (ConTy c1 τs1, ConTy c2 τs2)
       | c1 == c2 && length τs1 == length τs2 →
       sequence_
@@ -488,7 +477,6 @@ copyType =
            | otherwise              = return (fvTy α)
     -- Nullary type constructors that are involved in the atomic subtype
     -- relation are converted to type variables:
-    fcon c [] | tyConHasRelated c = newTVTy
     fcon c τs
       = ConTy c <$> sequence
           [ -- A Q-variant type constructor parameter becomes a single
@@ -594,8 +582,8 @@ solveConstraint value γrank τ = do
   gtraceN 2 (TraceIn ("gen", "begin", value, γrank, τftv, τ))
   τftv ← coalesceSCCs τftv
   gtraceN 3 ("gen", "scc", τftv, τ)
-  τftv ← satisfyTycons τftv
-  gtraceN 3 ("gen", "tycons", τftv, τ)
+  NM.modifyGraph Gr.trcnr
+  gtraceN 4 ("gen", "trc", τftv, τ)
   eliminateExistentials True (γrank, τftv)
   gtraceN 3 ("gen", "existentials 1", τftv, τ)
   removeRedundant
@@ -624,54 +612,6 @@ solveConstraint value γrank τ = do
   resetEquivTVs
   return (map fst αqs, map snd αqs)
   where
-    --
-    -- Make sure the graph is satisfiable and figure out anything that
-    -- is implied by the transitive closure of type constructors
-    satisfyTycons τftv0 = do
-      NM.insMapEdgesM [ (ConAt c1, ConAt c2, ())
-                      | (c1, c2) ← Gr.labNodeEdges tyConOrder ]
-      NM.modifyGraph Gr.trcnr
-      satisfyTycons' τftv0
-      where
-      satisfyTycons' = iterChanging $ \τftv →
-        foldM each τftv =<< NM.getsGraph Gr.labNodes
-      each τftv (n, VarAt α) = do
-        (nm, g) ← NM.getNMState
-        let assign c = do
-              τftv ← assignTV α (ConAt c) τftv
-              let n' = Gr.nmLab nm (ConAt c)
-              assignNode n n'
-              return τftv
-            lbs = [ c | Just (ConAt c) ← map (Gr.lab g) (Gr.pre g n)]
-            ubs = [ c | Just (ConAt c) ← map (Gr.lab g) (Gr.suc g n)]
-        glb ← case lbs of
-                []   → return Nothing
-                c:cs → Just <$> foldM tyConJoin c cs
-        lub ← case ubs of
-                []   → return Nothing
-                c:cs → Just <$> foldM tyConMeet c cs
-        case (glb, lub) of
-          (Just c1, Just c2) | c1 == c2         → assign c1
-          (Just c1, _) | not (tyConHasSuccs c1) → assign c1
-          (_, Just c2) | not (tyConHasPreds c2) → assign c2
-          _ → do
-            case glb of
-              Just lb | lb `notElem` lbs
-                → NM.insMapEdgeM (ConAt lb, VarAt α, ())
-              _ → return ()
-            case lub of
-              Just ub | ub `notElem` ubs
-                → NM.insMapEdgeM (VarAt α, ConAt ub, ())
-              _ → return ()
-            return τftv
-      each τftv (n, ConAt c1) = do
-        g ← NM.getGraph
-        sequence_
-          [ if c1 `tyConLe` c2
-              then return ()
-              else fail $ "Cannot unify: " ++ c1 ++ " ≤ " ++ c2
-          | Just (ConAt c2) ← map (Gr.lab g) (Gr.suc g n)]
-        return τftv
     --
     -- Eliminate existentially-quantified type variables from the
     -- constraint
@@ -870,70 +810,6 @@ gtraceN =
         trace (Ppr.nest 4 doc)
     else return ()
   else \_ _ → return ()
-
----
---- THE SUBTYPE ORDER
----
---- Currently hardcoded as a graph on type constructor names
----
-
-
--- | To compare two nullary type constructors
-tyConNode  ∷ String → Gr.Node
-tyConOrder ∷ Gr String ()
-(tyConNode, tyConOrder) = (Gr.nmLab nm, Gr.trcnr g)
-  where
-    (_, (nm, g)) = runIdentity $ NM.runNodeMapT NM.new Gr.empty $ do
-      NM.insMapNodesM ["U", "A"]
-      NM.insMapEdgesM [("U","A",())]
-
--- | Is one type constructor less than or equal to another?
-tyConLe ∷ Name → Name → Bool
-tyConLe c1 c2
-  | c1 == c2  = True
-  | otherwise = Gr.gelem n1 tyConOrder && n2 `elem` Gr.suc tyConOrder n1
-  where
-    n1 = tyConNode c1
-    n2 = tyConNode c2
-
-infix 4 `tyConLe`
-
--- | Are there any type constructors greater or lesser than
---   this one?
-tyConHasSuccs, tyConHasPreds, tyConHasRelated ∷ Name → Bool
-tyConHasSuccs c = Gr.gelem n tyConOrder && Gr.outdeg tyConOrder n > 0
-  where n = tyConNode c
-tyConHasPreds c = Gr.gelem n tyConOrder && Gr.indeg tyConOrder n > 0
-  where n = tyConNode c
-tyConHasRelated c = Gr.gelem (tyConNode c) tyConOrder
-
--- | Find the join or meet of a pair of type constructors, if possible
-tyConJoin, tyConMeet ∷ Monad m ⇒ Name → Name → m Name
-tyConJoin = tyConCombine (Gr.suc tyConOrder) (Gr.outdeg tyConOrder)
-                         "least upper bound"
-tyConMeet = tyConCombine (Gr.pre tyConOrder) (Gr.indeg tyConOrder)
-                         "greatest lower bound"
-
-tyConCombine ∷ Monad m ⇒ 
-               (Gr.Node → [Gr.Node]) → (Gr.Node → Int) → String →
-               Name → Name → m Name
-tyConCombine next countNext goalName c1 c2
-  | c1 == c2               = return c1
-  | n1 ← tyConNode c1
-  , n2 ← tyConNode c2
-  , Gr.gelem n1 tyConOrder
-  , Gr.gelem n2 tyConOrder =
-    let common  = [ (countNext n, Gr.lab tyConOrder n)
-                  | n ← next' n1 `List.intersect` next' n2 ]
-     in case reverse (List.sort common) of
-          [(_,Just c)]               → return c
-          (j,Just c):(k,_):_ | j > k → return c
-          _                          → giveUp
-  | otherwise              = giveUp
-  where next' n = n : next n
-        giveUp = fail $
-          "Type constructors " ++ c1 ++ " and " ++ c2 ++
-          " have no " ++ goalName ++ "."
 
 ---
 --- QUALIFIER CONSTRAINT SOLVING
