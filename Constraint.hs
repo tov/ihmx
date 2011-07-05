@@ -175,10 +175,10 @@ data CTState tv r
   = CTState {
       -- | Graph for subtype constraints on type variables and atomic
       --   type constructors
-      csGraph   ∷ !(Gr (Atom tv) ()),
+      csGraph   ∷ !(Gr tv ()),
       -- | Reverse lookup for turning atoms into node numbers for the
       --   'csGraph' graph
-      csNodeMap ∷ !(NM.NodeMap (Atom tv)),
+      csNodeMap ∷ !(NM.NodeMap tv),
       -- | Maps type variables to same-size equivalence classes
       csEquivs  ∷ !(ProxyMap tv r),
       -- | Types to relate by the subqualifier relation
@@ -190,17 +190,6 @@ data CTState tv r
 type TVProxy  tv r = UF.Proxy r (Set.Set tv)
 -- | The map from type variables to equivalence classes
 type ProxyMap tv r = Map.Map tv (TVProxy tv r)
-
--- | We reduce constraints to graphs representing inequalities on atoms,
---   which are either type variables or nullary type constructors.
-data Atom tv = VarAt !tv
-             | ConAt !Name
-  deriving (Eq, Ord)
-
--- | To inject an atom into a type
-atomTy ∷ Atom tv → Type tv
-atomTy (VarAt α) = fvTy α
-atomTy (ConAt n) = ConTy n []
 
 -- | Updater for 'csQuals' field
 csQualsUpdate ∷ ([(Type tv, Type tv)] → [(Type tv, Type tv)]) →
@@ -217,16 +206,6 @@ csPinnedUpdate ∷ ([Set.Set tv] → [Set.Set tv]) →
                  CTState tv r → CTState tv r
 csPinnedUpdate f cs = cs { csPinned = f (csPinned cs) }
 
-instance Tv tv ⇒ Show (Atom tv) where
-  show (VarAt α) = show (tvUniqueID α)
-  show (ConAt c) = c
-
-instance Ppr tv ⇒ Ppr (Atom tv) where
-  pprPrec p = pprPrec p . atomTy
-
-instance Tv tv ⇒ Ftv (Atom tv) tv where
-  ftvTree = ftvTree . atomTy
-
 instance Tv tv ⇒ Show (CTState tv r) where
   showsPrec _ cs
     | null (Gr.edges (csGraph cs)) && null (csQuals cs)
@@ -241,10 +220,10 @@ instance Tv tv ⇒ Show (CTState tv r) where
 instance Tv tv ⇒ Ppr (CTState tv r) where
   ppr cs = ppr . Map.fromList $
     [ ("graph",    Ppr.fsep . Ppr.punctuate Ppr.comma $
-                     [ pprPrec 10 (atomTy a1)
+                     [ pprPrec 10 α1
                          Ppr.<> Ppr.text "<:"
-                         Ppr.<> pprPrec 10 (atomTy a2)
-                     | (a1, a2) ← Gr.labNodeEdges (csGraph cs) ])
+                         Ppr.<> pprPrec 10 α2
+                     | (α1, α2) ← Gr.labNodeEdges (csGraph cs) ])
     , ("quals",    Ppr.fsep . Ppr.punctuate Ppr.comma $
                      [ pprPrec 9 τ1
                          Ppr.<> Ppr.char '⊑'
@@ -299,7 +278,7 @@ instance MonadTV tv r m ⇒ MonadReadTV tv (ConstraintT tv r m) where
 -- | 'ConstraintT' implements 'Graph'/'NodeMap' transformer operations
 --   for accessing its graph and node map.
 instance (Ord tv, Monad m) ⇒
-         NM.MonadNM (Atom tv) () Gr (ConstraintT tv r m) where
+         NM.MonadNM tv () Gr (ConstraintT tv r m) where
   getNMState = ConstraintT (gets (csNodeMap &&& csGraph))
   getNodeMap = ConstraintT (gets csNodeMap)
   getGraph   = ConstraintT (gets csGraph)
@@ -397,7 +376,7 @@ subtypeTypes unify τ10 τ20 = do
         then unifyVar r1 (fvTy r2)
         else do
           lift (makeEquivTVs r1 r2)
-          addEdge (VarAt r1) (VarAt r2)
+          addEdge r1 r2
     (VarTy (FreeVar r1), _)
       | tvFlavorIs Universal r1 → do
       τ2' ← lift $ occursCheck r1 τ2 >>= if unify then return else copyType
@@ -499,7 +478,7 @@ unifyVar α τ0 = do
     fail "cannot unify because insufficiently polymorphic"
   writeTV α τ
   updatePinnedTVs α τ
-  (n, _) ← NM.mkNodeM (VarAt α)
+  (n, _) ← NM.mkNodeM α
   gr     ← NM.getGraph
   case Gr.match n gr of
     (Nothing,                 _)   → return ()
@@ -508,12 +487,12 @@ unifyVar α τ0 = do
       sequence_ $
         [ case Gr.lab gr' n' of
             Nothing → return ()
-            Just a  → subtypeTypes False (atomTy a) τ
+            Just a  → subtypeTypes False (fvTy a) τ
         | (_, n') ← pres ]
         ++
         [ case Gr.lab gr' n' of
             Nothing → return ()
-            Just a  → subtypeTypes False τ (atomTy a)
+            Just a  → subtypeTypes False τ (fvTy a)
         | (_, n') ← sucs ]
 
 --- OCCURS CHECK
@@ -557,7 +536,7 @@ resetEquivTVs = do
   ConstraintT (modify (csEquivsUpdate (const Map.empty)))
   g     ← NM.getGraph
   mapM_ (uncurry makeEquivTVs)
-        [ (α, β) | (VarAt α, VarAt β) ← Gr.labNodeEdges g ]
+        [ (α, β) | (α, β) ← Gr.labNodeEdges g ]
 
 -- | Helper to get the proxy the represents the size-equivalence class
 --   of a type variable.
@@ -586,8 +565,8 @@ solveConstraint value γrank τ = do
   gtraceN 4 ("gen", "trc", τftv, τ)
   eliminateExistentials True (γrank, τftv)
   gtraceN 3 ("gen", "existentials 1", τftv, τ)
-  removeRedundant
-  gtraceN 3 ("gen", "redundant", τftv, τ)
+  untransitive
+  gtraceN 3 ("gen", "untrans", τftv, τ)
   eliminateExistentials False (γrank, τftv)
   gtraceN 3 ("gen", "existentials 2", τftv, τ)
   τftv ← polarizedReduce τftv
@@ -622,7 +601,7 @@ solveConstraint value γrank τ = do
     -- Get the existential type variables
     getExistentials (γrank, τftv) = do
       lnodes ← NM.getsGraph Gr.labNodes
-      cftv   ← removeByRank γrank [ α | (_, VarAt α) ← lnodes ]
+      cftv   ← removeByRank γrank [ α | (_, α) ← lnodes ]
       return (Set.fromList cftv Set.\\ Map.keysSet τftv)
     -- Remove a node unless it is necessary to associate some of its
     -- neighbors -- in particular, a node with multiple predecessors
@@ -630,7 +609,7 @@ solveConstraint value γrank τ = do
     -- predecessor) should not be removed.
     eliminateNode trans α = do
       (nm, g) ← NM.getNMState
-      let node = Gr.nmLab nm (VarAt α)
+      let node = Gr.nmLab nm α
       case (Gr.pre g node, Gr.suc g node) of
         (_:_:_, []) → return ()
         ([], _:_:_) → return ()
@@ -642,13 +621,13 @@ solveConstraint value γrank τ = do
                     β,
                     catMaybes (map (Gr.lab g) suc))
           sequence $
-            [ atomTy a1 ⊏: β
+            [ fvTy α1 ⊏: β
             | n1 ← pre
-            , let Just a1 = Gr.lab g n1 ]
+            , let Just α1 = Gr.lab g n1 ]
             ++
-            [ β ⊏: atomTy a2
+            [ β ⊏: fvTy α2
             | n2 ← suc
-            , let Just a2 = Gr.lab g n2 ]
+            , let Just α2 = Gr.lab g n2 ]
           NM.putGraph $
             let g' = Gr.delNode node g in
             if trans
@@ -661,11 +640,7 @@ solveConstraint value γrank τ = do
     -- Remove redundant edges:
     --  • Edges implied by transitivity
     --  • Edges relating type constructors to type constructors
-    removeRedundant = do
-      NM.modifyGraph Gr.untransitive
-      edges ← NM.getsGraph Gr.labNodeEdges
-      NM.delMapEdgesM [ (ConAt c1, ConAt c2)
-                      | (ConAt c1, ConAt c2) ← edges ]
+    untransitive = NM.modifyGraph Gr.untransitive
     --
     -- Remove type variables based on polarity-related rules:
     --  • Coalesce positive type variables with a single predecessor
@@ -678,7 +653,7 @@ solveConstraint value γrank τ = do
       foldM tryRemove τftv (findPolar nm τftv)
         where
         tryRemove τftv (n, α, var) = do
-          let ln = (n, VarAt α)
+          let ln = (n, α)
           mτ ← readTV α
           g  ← NM.getGraph
           case (mτ, Gr.gelem n g) of
@@ -695,7 +670,7 @@ solveConstraint value γrank τ = do
                   → siblings g τftv (ln, -1) sucs (Gr.suc,Gr.pre)
                 _ → return τftv
             _ → return τftv
-        findPolar nm τftv = [ (Gr.nmLab nm (VarAt α), α, var)
+        findPolar nm τftv = [ (Gr.nmLab nm α, α, var)
                             | (α, var) ← Map.toList τftv
                             , var == 1 || var == -1 ]
         siblings g τftv (lnode@(n,_), var) pres (gpre, gsuc) = do
@@ -703,10 +678,10 @@ solveConstraint value γrank τ = do
             pre ← ListT (return pres)
             sib ← ListT (return (gsuc g pre))
             guard $ sib /= n
-            Just (VarAt β) ← return (Gr.lab g sib)
+            Just β ← return (Gr.lab g sib)
             guard $ Map.lookup β τftv == Just var
             guard $ gpre g sib == pres
-            return (sib, VarAt β)
+            return (sib, β)
           case lnodes of
             _:_ → do
                 τftv' ← snd <$> coalesceList τftv (lnode:lnodes)
@@ -722,25 +697,14 @@ solveConstraint value γrank τ = do
     coalesceList _      [] = fail "BUG! coalesceList got []"
     -- Assign n2 to n1, updating the graph, type variables, and ftvs,
     -- and return whichever node survives
-    coalesce (n1, lab1) (n2, lab2) τftv = do
-      case (lab1, lab2) of
-        (VarAt α,  _)        → (n1, α) `gets` (n2, lab2)
-        (_,        VarAt α)  → (n2, α) `gets` (n1, lab1)
-        (ConAt c1, ConAt c2)
-          | c1 == c2         → do
+    coalesce (n1, α1) (n2, α2) τftv = do
+      ftv2 ← ftvSet α2
+      if α1 `Set.member` ftv2
+        then return ((n2, α2), τftv)
+        else do
+          τftv' ← assignTV α1 α2 τftv
           assignNode n1 n2
-          return ((n2, lab2), τftv)
-        _                    →
-          fail $ "Could not unify: " ++ show lab1 ++ " = " ++ show lab2
-      where
-        (n1', α) `gets` (n2', lab') = do
-          ftv2 ← ftvSet lab'
-          if α `Set.member` ftv2
-            then return ((n2', lab'), τftv)
-            else do
-              τftv' ← assignTV α lab' τftv
-              assignNode n1' n2'
-              return ((n2', lab'), τftv')
+          return ((n2, α2), τftv')
     -- Update the graph to remove node n1, assigning all of its
     -- neighbors to n2
     assignNode n1 n2 = NM.modifyGraph $ \g →
@@ -749,26 +713,24 @@ solveConstraint value γrank τ = do
       Gr.insEdges [ (n2, n', ())
                   | n' ← Gr.suc g n1, n' /= n1, n' /= n2 ] $
       Gr.delNode n1 g
-    -- Update the type variables to assign atom2 to α1, updating the
+    -- Update the type variables to assign β to α, updating the
     -- ftvs appropriately
-    assignTV α atom τftv = do
-      writeTV α (atomTy atom)
-      updatePinnedTVs α (atomTy atom)
-      assignFtvMap α atom τftv
-    -- Given two type variables, where α ← atom, update a map of free
+    assignTV α β τftv = do
+      writeTV α (fvTy β)
+      updatePinnedTVs α (fvTy β)
+      assignFtvMap α β τftv
+    -- Given two type variables, where α ← β, update a map of free
     -- type variables to variance lists accordingly
-    assignFtvMap α atom vmap =
+    assignFtvMap α β vmap =
       case Map.lookup α vmap of
-        Just vs → case atom of
-          VarAt β → return $ Map.insertWith (+) β vs vmap'
-          ConAt _ → return vmap'
+        Just vs → return $ Map.insertWith (+) β vs vmap'
         Nothing → return vmap
       where vmap' = Map.delete α vmap
     -- Coalesce and remove fully-generalizable components
     coalesceComponents value (γrank, τftv) = do
       extvs  ← getExistentials (γrank, τftv)
       τcands ← genCandidates value τftv γrank
-      let candidates = Set.mapMonotonic VarAt $ extvs `Set.union` τcands
+      let candidates = extvs `Set.union` τcands
           each τftv component@(_:_)
             | all (`Set.member` candidates) (map snd component)
             = do
