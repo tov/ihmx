@@ -186,7 +186,7 @@ class (Functor m, Applicative m, Monad m, MonadTrace m,
 class NewTV a where
   newTVArg ∷ a → (Flavor, Kind, QLit) → (Flavor, Kind, QLit)
   newTV'   ∷ MonadTV tv r m ⇒ a → m tv
-  newTV' a = newTV_ (newTVArg a (Universal, TypeKd, L))
+  newTV' a = newTV_ (newTVArg a (Universal, TypeKd, maxBound))
   newTVTy' ∷ MonadTV tv r m ⇒ a → m (Type tv)
   newTVTy' = fvTy <$$> newTV'
 
@@ -349,8 +349,8 @@ instance (Functor m, MonadRef r m) ⇒ MonadReadTV (TV r) (UT r m) where
 
 instance (Functor m, MonadRef r m) ⇒ MonadTV (TV r) r (UT r m) where
   newTV_ (flavor, kind, bound) = do
-    when (flavor == Universal && bound /= L) $
-      fail "newTV_ (BUG!): universal tyvars cannot have non-L bound"
+    when (flavor == Universal && bound /= maxBound) $
+      fail "newTV_ (BUG!): universal tyvars cannot have non-A bound"
     uts ← UT get
     let i = utsGensym uts
     UT $ put uts { utsGensym = succ i }

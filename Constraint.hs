@@ -884,8 +884,8 @@ tyConOrder ∷ Gr String ()
 (tyConNode, tyConOrder) = (Gr.nmLab nm, Gr.trcnr g)
   where
     (_, (nm, g)) = runIdentity $ NM.runNodeMapT NM.new Gr.empty $ do
-      NM.insMapNodesM ["U", "R", "A", "L"]
-      NM.insMapEdgesM [("U","R",()), ("U","A",()), ("R","L",()), ("A","L",())]
+      NM.insMapNodesM ["U", "A"]
+      NM.insMapEdgesM [("U","A",())]
 
 -- | Is one type constructor less than or equal to another?
 tyConLe ∷ Name → Name → Bool
@@ -967,7 +967,7 @@ First rewrite as follows:
 
 (TOP-SAT)
   -----------------
-  γ ⊑ L βs  --->  ⊤
+  γ ⊑ A βs  --->  ⊤
 
 (BOT-UNSAT)
   q ≠ U
@@ -1011,7 +1011,7 @@ continuing to apply the rewrites above when applicable:
 (SUBST-NEG-TOP)
   δ ∉ lftv(C)   V(δ,τ) ⊑ Q-
   -------------------------
-  C; τ  --->  [L/δ](C; τ)
+  C; τ  --->  [A/δ](C; τ)
 
 (SUBST-POS)
   δ ∉ uftv(C)   V(δ,τ) ⊑ Q+
@@ -1045,11 +1045,6 @@ We convert it to SAT as follows:
 
   Define:
 
-    πr(Q)       = R ⊑ Q
-    πr(β)       = 2 * tvId β
-    πr(q1 ⊔ q2) = πr(q1) ⋁ πr(q2)
-    πr(q1 ⊓ q2) = πr(q1) ⋀ πr(q2)
-
     πa(Q) = A ⊑ Q
     πa(β) = 2 * tvId β + 1
     πa(q1 ⊔ q2) = πa(q1) ⋁ πa(q2)
@@ -1061,9 +1056,9 @@ We convert it to SAT as follows:
 
     generate the formula:
 
-      (πr(q1) ⇒ πr(q1')) ⋀ (πa(q1) ⇒ πa(q1'))
+      (πa(q1) ⇒ πa(q1'))
         ⋀ ... ⋀
-      (πr(qk) ⇒ πr(qk')) ⋀ (πa(qk) ⇒ πa(qk'))
+      (πa(qk) ⇒ πa(qk'))
 
 -}
 
@@ -1072,47 +1067,46 @@ We convert it to SAT as follows:
 data QE tv = QE { qeQLit ∷ !QLit, qeQSet ∷ !(Set.Set tv) }
 
 instance Tv tv ⇒ Show (QE tv) where
-  show (QE L _)  = "L"
-  show (QE q γs) = concat (List.intersperse "⊔" (q' γs'))
+  show (QE A _)  = "A"
+  show (QE U γs) = concat (List.intersperse "⊔" (q' γs'))
     where γs' = map (show . tvUniqueID) (Set.toList γs)
-          q'  = if q == U && not (Set.null γs) then id else (show q :)
+          q'  = if not (Set.null γs) then id else ("U" :)
 
 instance Tv tv ⇒ Ppr (QE tv) where
-  pprPrec _ (QE L _)  = Ppr.char 'L'
-  pprPrec p (QE q γs) = case items of
+  pprPrec _ (QE A _)  = Ppr.char 'A'
+  pprPrec p (QE U γs) = case items of
     []  → Ppr.char 'U'
     [x] → x
     xs  → parensIf (p > 6) (Ppr.fcat (Ppr.punctuate (Ppr.char '⊔') xs))
-    where items = q' γs'
-          γs'   = map (Ppr.text . show . tvUniqueID) (Set.toList γs)
-          q'    = if q == U then id else (ppr q :)
+    where items = map (Ppr.text . show . tvUniqueID) (Set.toList γs)
 
 instance Eq tv ⇒ Eq (QE tv) where
-    QE L  _   == QE L  _   = True
+    QE A  _   == QE A  _   = True
     QE q1 γs1 == QE q2 γs2 = q1 == q2 && γs1 == γs2
 
 instance Ord tv ⇒ Ord (QE tv) where
-    QE L  _   `compare` QE L  _   = EQ
+    QE A  _   `compare` QE A  _   = EQ
     QE q1 γs1 `compare` QE q2 γs2
       | q1 == q2  = γs1 `compare` γs2
       | q1 ⊑  q2  = LT
       | otherwise = GT
 
 instance Bounded (QE tv) where
-  minBound = QE U Set.empty
-  maxBound = QE L Set.empty
+  minBound = QE minBound Set.empty
+  maxBound = QE maxBound Set.empty
 
 instance Ord tv ⇒ Lattice (QE tv) where
-  QE L _    ⊔ _         = maxBound
-  _         ⊔ QE L _    = maxBound
-  QE q1 γs1 ⊔ QE q2 γs2 = QE (q1 ⊔ q2) (γs1 `Set.union` γs2)
+  QE A _   ⊔ _        = maxBound
+  _        ⊔ QE A _   = maxBound
+  QE U γs1 ⊔ QE U γs2 = QE U (γs1 `Set.union` γs2)
   --
-  QE L _    ⊓ qe2       = qe2
-  qe1       ⊓ QE L _    = qe1
-  QE q1 γs1 ⊓ QE q2 γs2 = QE (q1 ⊓ q2) (γs1 `Set.intersection` γs2)
+  QE A _   ⊓ qe2      = qe2
+  qe1      ⊓ QE A _   = qe1
+  QE U γs1 ⊓ QE U γs2 = QE U (γs1 `Set.intersection` γs2)
   --
-  _         ⊑ QE L  _   = True
-  QE q1 γs1 ⊑ QE q2 γs2 = q1 ⊑ q2 && γs1 `Set.isSubsetOf` γs2
+  _        ⊑ QE A  _  = True
+  QE A _   ⊑ _        = False
+  QE U γs1 ⊑ QE U γs2 = γs1 `Set.isSubsetOf` γs2
 
 instance Qualifier (QE tv) tv where
   toQualifierType (QE q γs) =
@@ -1131,7 +1125,7 @@ instance Bounded (QEMeet tv) where
   maxBound = QEMeet []
 
 instance Tv tv ⇒ Show (QEMeet tv) where
-  show (QEMeet [])  = "L"
+  show (QEMeet [])  = "A"
   show (QEMeet qem) = concat (List.intersperse " ⊓ " (map show qem))
 
 instance Ord tv ⇒ Ftv (QEMeet tv) tv where
@@ -1142,12 +1136,12 @@ instance Ord tv ⇒ Monoid (QEMeet tv) where
   mappend = foldr qemInsert <$.> unQEMeet
 
 qemSingleton ∷ QE tv → QEMeet tv
-qemSingleton (QE L _) = maxBound
+qemSingleton (QE A _) = maxBound
 qemSingleton qe       = QEMeet [qe]
 
 qemInsert ∷ Ord tv ⇒ QE tv → QEMeet tv → QEMeet tv
 qemInsert qe (QEMeet qem) = QEMeet (loop qe qem) where
-  loop (QE L _)       qem = qem
+  loop (QE A _)       qem = qem
   loop qe             []  = [qe]
   loop (qe@(QE q γs)) (qe'@(QE q' γs'):qem)
     | Set.null γs, Set.null γs'
@@ -1277,7 +1271,7 @@ solveQualifiers value αs qc τ = do
                       " ⊑ " ++ show (toQualifierType (QE q2 γs2))
            | otherwise →
                return ((q', βs') :)
-      let fvmap = if q2 == L
+      let fvmap = if q2 == maxBound
                     then id     -- (TOP-SAT)
                     else Map.unionWith mappend (setToMapWith bound γs')
           bound γ
@@ -1315,7 +1309,7 @@ solveQualifiers value αs qc τ = do
           (sq_vmap state)
   --
   -- Replace Q- or 0 variables by a single upper bound, if they have only
-  -- one (SUBST-NEG), or by L if they have none (SUBST-NEG-TOP).  If
+  -- one (SUBST-NEG), or by A if they have none (SUBST-NEG-TOP).  If
   -- 'doLossy', then we include SUBST-NEG-LOSSY as well, which uses
   -- approximate lower bounds for combining multiple upper bounds.
   substNeg doLossy state =
@@ -1440,11 +1434,10 @@ solveQualifiers value αs qc τ = do
       _   → return state
   --
   toSat state = foldr (SAT.:&&:) SAT.Yes $
-      [ (πr τftv q ==> πr τftv (U,βs)) SAT.:&&: (πa τftv q ==> πa τftv (U,βs))
+      [ (πa τftv q ==> πa τftv (U,βs))
       | (q, βs) ← sq_βlst state ]
     ++
-      [ (πr τftv (FreeVar α) ==> πr τftv (q,αs)) SAT.:&&:
-        (πa τftv (FreeVar α) ==> πa τftv (q,αs))
+      [ (πa τftv (FreeVar α) ==> πa τftv (q,αs))
       | (α, QEMeet qes) ← Map.toList (sq_vmap state)
       , QE q αs         ← qes
       , unifiable state α ]
@@ -1462,7 +1455,7 @@ solveQualifiers value αs qc τ = do
   getBounds state =
     map (id &&& getBound) (Set.toList (sq_αs state)) where
       getBound α = case Map.lookup α (sq_vmap state) of
-        Nothing           → L
+        Nothing           → maxBound
         Just (QEMeet qes) → bigMeet (map qeQLit qes)
   --
   -- Turn the decomposed constraint back into a list of pairs of types.
@@ -1512,71 +1505,53 @@ setToMapWith f = Map.fromDistinctAscList . map (id &&& f) . Set.toAscList
 
 class SATable a v where
   πa ∷ VarMap v → a → SAT.Boolean
-  πr ∷ VarMap v → a → SAT.Boolean
 
 instance SATable QLit v where
   πa _ ql | A ⊑ ql    = SAT.Yes
           | otherwise = SAT.No
-  πr _ ql | R ⊑ ql    = SAT.Yes
-          | otherwise = SAT.No
 
 instance Tv v ⇒ SATable (Var v) v where
-  πa vm (FreeVar β) = encodeSatVar A β vm
+  πa vm (FreeVar β) = encodeSatVar β vm
   πa _  _           = SAT.No
-  πr vm (FreeVar β) = encodeSatVar R β vm
-  πr _  _           = SAT.No
 
 instance (Tv v, SATable (Var v) v) ⇒ SATable (QLit, Set.Set v) v where
   πa vm (q, vs) = Set.fold ((SAT.:||:) . πa vm . FreeVar) (πa vm q) vs
-  πr vm (q, vs) = Set.fold ((SAT.:||:) . πr vm . FreeVar) (πr vm q) vs
 
 -- | Given a type variable and a SAT solution, return a bound
 --   for that type variable as implied by the solution.
 decodeSatVar ∷ Tv tv ⇒ tv → VarMap tv → SAT.SatSolver → (QLit, Variance)
 decodeSatVar β vm solver = (q, var) where
   (maximize, var) = maximizeVariance β vm
-  q   = case (maximize, mba, mbr) of
+  q   = case (maximize, mba) of
     -- For minimizing variables, each component tells us whether that
     -- component may be omitted from the substitution, so we choose the
     -- smallest qualifier literal that includes the required components.
-    (False, Just False, Just False) → L
-    (False, Just False, _         ) → A
-    (False, _         , Just False) → R
-    (False, _         , _         ) → U
+    (False, Just False) → A
+    (False, _         ) → U
     -- For maximizing variables, each component tells us whether that
     -- component may be included in the substitution, so we choose the
     -- largest qualifier literal that omits the forbidden components.
-    (True , Just False, Just False) → U
-    (True , Just False, _         ) → R
-    (True , _         , Just False) → A
-    (True , _         , _         ) → L
+    (True , Just False) → U
+    (True , _         ) → A
   mba = SAT.lookupVar βa solver
-  mbr = SAT.lookupVar βr solver
-  βa  = varComponent A β
-  βr  = varComponent R β
+  βa  = tvUniqueID β
 
 -- | Encode the 'q' component of type variable 'β'.  We want to maximize
 --   contravariant variables and minimize all the others.  Since the
 --   solver tries true before false, we use a positive literal to stand
 --   for the 'q' component of a maximized variable and a negative
 --   literal for a minimized variable.
-encodeSatVar ∷ Tv tv ⇒ QLit → tv → VarMap tv → SAT.Boolean
-encodeSatVar q β vm
+encodeSatVar ∷ Tv tv ⇒ tv → VarMap tv → SAT.Boolean
+encodeSatVar β vm
   | fst (maximizeVariance β vm) = SAT.Var z
-  | otherwise                 = SAT.Not (SAT.Var z)
-  where z = varComponent q β
+  | otherwise                   = SAT.Not (SAT.Var z)
+  where z = tvUniqueID β
 
 maximizeVariance ∷ Ord tv ⇒ tv → VarMap tv → (Bool, Variance)
 maximizeVariance γ vm = case Map.findWithDefault 0 γ vm of
   v@QCovariant  → (False, v)
   v@QInvariant  → (False, v)
   v             → (True,  v)
-
--- | We encode the A and R “components” of a variable via this
---   bijection.
-varComponent ∷ Tv tv ⇒ QLit → tv → Int
-varComponent A β = 2 * tvUniqueID β
-varComponent _ β = 2 * tvUniqueID β + 1
 
 instance Ppr SAT.Boolean where ppr = Ppr.text . show
 instance Ppr SAT.SatSolver where ppr = Ppr.text . show

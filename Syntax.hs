@@ -83,41 +83,35 @@ infixl 6 ⊔
 infixl 7 ⊓
 infix 4 ⊑, ⊒
 
-data QLit = U | R | A | L
+data QLit = U | A
   deriving (Eq, Ord, Show)
-  -- NB: Ord instance is not the subsumption order, but merely an order
-  -- used for binary search trees.
 
 instance Ppr QLit where ppr = Ppr.text . show
 
 readQLit ∷ String → Maybe QLit
 readQLit "U" = Just U
-readQLit "R" = Just R
 readQLit "A" = Just A
-readQLit "L" = Just L
 readQLit _   = Nothing
 
 instance Bounded QLit where
   minBound = U
-  maxBound = L
+  maxBound = A
 
 instance Lattice QLit where
-  U ⊔ q = q; q ⊔ U = q
-  R ⊔ A = L; R ⊔ R = R
-  A ⊔ A = A; A ⊔ R = L
-  L ⊔ _ = L; _ ⊔ L = L
+  A ⊔ _ = A
+  U ⊔ q = q
   --
-  U ⊓ _ = U; _ ⊓ U = U
-  R ⊓ A = U; R ⊓ R = R
-  A ⊓ A = A; A ⊓ R = U
-  L ⊓ q = q; q ⊓ L = q
+  A ⊓ q = q
+  U ⊓ _ = U
+  --
+  A ⊑ U = False
+  _ ⊑ _ = True
 
 -- | @a \-\ b@ is the least @c@ such that
 --   @a ⊑ b ⊔ c@.  (This is sort of dual to a pseudocomplement.)
 (\-\) ∷ QLit → QLit → QLit
-L \-\ R = A
-L \-\ A = R
-a \-\ b = if a ⊑ b then U else a
+A \-\ U = A
+_ \-\ _ = U
 
 -- | The intent is that only well-formed qualifiers should be wrapped
 --   in 'QExp'.
@@ -135,11 +129,9 @@ qvarexp v = QExp U [v]
 
 instance Monoid (QExp v) where
   mempty = qlitexp U
-  QExp L  _  `mappend` _            = qlitexp L
-  _          `mappend` QExp L   _   = qlitexp L
-  QExp R  _  `mappend` QExp A   _   = qlitexp L
-  QExp A  _  `mappend` QExp R   _   = qlitexp L
-  QExp ql vs `mappend` QExp ql' vs' = QExp (ql ⊔ ql') (vs ++ vs')
+  QExp A  _  `mappend` _            = qlitexp A
+  _          `mappend` QExp A   _   = qlitexp A
+  QExp U  vs `mappend` QExp U   vs' = QExp U (vs ++ vs')
 
 -- | For now, we hard-code the qualifiers of several type constructors
 --   and consider the rest to be like tuples by default.
@@ -148,9 +140,7 @@ instance Monoid (QExp v) where
 getQualifier ∷ Name → [QExp v] → QExp v
 getQualifier "->"    [_,qe,_] = qe
 getQualifier "U"     qes      = mconcat (qlitexp U : qes)
-getQualifier "R"     qes      = mconcat (qlitexp R : qes)
 getQualifier "A"     qes      = mconcat (qlitexp A : qes)
-getQualifier "L"     qes      = mconcat (qlitexp L : qes)
 getQualifier "Ref"   [_]      = qlitexp U
 getQualifier "Ref"   [qe,_]   = qe
 getQualifier "File"  [qe]     = qe
@@ -883,8 +873,8 @@ termFv e0 = case e0 of
 γ0' ∷ [(Name, String)]
 γ0' = [ ("id",          "∀ α. α → α")
       , ("ids",         "List (∀ α. α → α)")
-      , ("choose",      "∀ α : A. α → α -α> α")
-      , ("discard",     "∀ α : A. α → α")
+      , ("choose",      "∀ α. α → α -α> α")
+      , ("discard",     "∀ α. α → α")
       , ("apply",       "∀ α β γ. (α -γ> β) → α -γ> β")
       , ("revapp",      "∀ α β γ. α → (α -γ> β) -α γ> β")
       -- FCP
@@ -895,29 +885,26 @@ termFv e0 = case e0 of
       , ("nil",         "∀ α. List α")
       , ("cons",        "∀ α. α → List α -α> List α")
       , ("map",         "∀ α β. (α → β) → List α → List β")
-      , ("foldr",       "∀ α β. (α → β -L> β) → β → List α -β> β")
-      , ("head",        "∀ α : A. List α → α")
-      , ("tail",        "∀ α : A. List α → List α")
+      , ("foldr",       "∀ α β. (α → β -A> β) → β → List α -β> β")
+      , ("head",        "∀ α. List α → α")
+      , ("tail",        "∀ α. List α → List α")
       , ("app",         "∀ α. List α → List α → List α")
       -- Ref cells
-      , ("ref",         "∀ α: A, β. α → Ref β α")
-      , ("ref'",        "∀ α β. α → Ref (R β) α")
-      , ("uref",        "∀ α:A. α → Ref U α")
-      , ("rref",        "∀ α. α → Ref R α")
-      , ("aref",        "∀ α:A. α → Ref A α")
-      , ("lref",        "∀ α. α → Ref L α")
+      , ("ref",         "∀ α β. α → Ref β α")
+      , ("uref",        "∀ α. α → Ref U α")
+      , ("aref",        "∀ α. α → Ref A α")
       , ("swapRef",     "∀ α β. Ref β α × α → Ref β α × α")
-      , ("swapRef'",    "∀ α β γ. Ref (A β γ) α × β → \
-                        \         Ref (A β γ) β × α")
-      , ("readRef",     "∀ α:R, β. Ref β α → α")
-      , ("readRef'"  ,  "∀ α:R, β. Ref β α → Ref β α × α")
-      , ("freeRef'",    "∀ α β. Ref (A β) α → α")
-      , ("writeRef",    "∀ α β:A. Ref β α × α → T")
-      , ("writeRef'",   "∀ α:A, β γ. Ref (A β γ) α × β → Ref (A β γ) β")
+      , ("swapRef'",    "∀ α β. Ref A α × β → \
+                        \       Ref A β × α")
+      , ("readRef",     "∀ α:U, β. Ref β α → α")
+      , ("readRef'"  ,  "∀ α:U, β. Ref β α → Ref β α × α")
+      , ("freeRef'",    "∀ α. Ref A α → α")
+      , ("writeRef",    "∀ α β. Ref β α × α → T")
+      , ("writeRef'",   "∀ α β. Ref A α × β → Ref A β")
       -- Products
       , ("pair",        "∀ α β. α → β -α> α × β")
-      , ("fst",         "∀ α : L, β : A. α × β → α")
-      , ("snd",         "∀ α : A, β : L. α × β → β")
+      , ("fst",         "∀ α β. α × β → α")
+      , ("snd",         "∀ α β. α × β → β")
       -- Sums
       , ("inl",         "∀ α β. α → Either α β")
       , ("inr",         "∀ α β. β → Either α β")
@@ -935,17 +922,14 @@ termFv e0 = case e0 of
       , ("bindST",      "∀ α β s. ST s α → (α → ST s β) → ST s β")
       , ("returnST",    "∀ α s. α → ST s α")
       , ("newSTRef",    "∀ α s. α → ST s (STRef s α)")
-      , ("readSTRef",   "∀ α:R, s. STRef s α → ST s α")
+      , ("readSTRef",   "∀ α:U, s. STRef s α → ST s α")
       -- Any
       , ("eat",         "∀ α β. α → β → β")
       , ("eatU",        "∀ α:U, β. α → β → β")
       , ("eatA",        "∀ α:A, β. α → β → β")
-      , ("eatR",        "∀ α:R, β. α → β → β")
       , ("bot",         "∀ α. α")
       , ("botU",        "∀ α:U. α")
-      , ("botR",        "∀ α:R. α")
       , ("botA",        "∀ α:A. α")
-      , ("botL",        "∀ α:L. α")
       , ("cast",        "∀ α β. α → β")
       ]
 
@@ -1024,7 +1008,7 @@ closeWithNames ∷ Ord a ⇒
                  [(Perhaps Name, QLit)] → Quant → [a] → Type a → Type a
 closeWithNames _   _ []  ρ = ρ
 closeWithNames pns q tvs ρ = standardize (QuaTy q pns' (closeTy 0 tvs ρ))
-  where pns' = take (length tvs) (pns ++ repeat (Nope, L))
+  where pns' = take (length tvs) (pns ++ repeat (Nope, maxBound))
 
 {-
 -- | @substTy τ' α 't@ substitutes @τ'@ for free variable @α@ in @τ@.
@@ -1099,30 +1083,26 @@ inferKindsTy = varianceToKind <$$> loop 0 where
 
 {- | The number of occurrences of a variable in a term.  These
      are an abstraction of the natural numbers as zero, one, many, or
-     combinations thereof.
+     some combinations thereof.
      (Note: no { 0, 2+ })
 
-      U
-     / \
-    /   \
-   A     R
-   |\   /|
-   | \ / |
-   Z  L  /
-    \ | /
-     \|/
-      E
+   U
+   |
+   |
+   A
+   |
+   |
+   Z
+   |
+   |
+   E
 
 -}
 data Occurrence
   -- | Any number of times { 0, 1, 2+ }
   = UO
-  -- | One or more times { 1, 2+ }
-  | RO
   -- | Zero or one times { 0, 1 }
   | AO
-  -- | Exactly one time { 1 }
-  | LO
   -- | Zero times { 0 }
   | ZO
   -- | Dead code / error { }
@@ -1134,20 +1114,16 @@ instance Ppr Occurrence where ppr = Ppr.text . show
 -- | Convert an occurrence to a representative list of numbers
 occToInts ∷ Occurrence → [Int]
 occToInts UO = [0, 1, 2]
-occToInts RO = [1, 2]
 occToInts AO = [0, 1]
-occToInts LO = [1]
 occToInts ZO = [0]
 occToInts EO = []
 
 -- | Convert an occurrence to the best qualifier literal
 occToQLit ∷ Occurrence → QLit
 occToQLit UO = U
-occToQLit RO = R
 occToQLit AO = A
-occToQLit LO = L
 occToQLit ZO = A
-occToQLit EO = L
+occToQLit EO = A
 
 instance Bounded Occurrence where
   minBound = EO
@@ -1155,39 +1131,26 @@ instance Bounded Occurrence where
 
 instance Lattice Occurrence where
   EO ⊔ o  = o;  o  ⊔ EO = o
-  ZO ⊔ LO = AO; LO ⊔ ZO = AO
-  ZO ⊔ AO = AO; AO ⊔ ZO = AO
-  LO ⊔ RO = RO; RO ⊔ LO = RO
-  LO ⊔ AO = AO; AO ⊔ LO = AO
-  o  ⊔ o' | o == o'   = o
-          | otherwise = UO
+  ZO ⊔ o  = o;  o  ⊔ ZO = o
+  AO ⊔ o  = o;  o  ⊔ AO = o
+  _  ⊔ _  = UO
   --
   UO ⊓ o  = o;  o  ⊓ UO = o
-  RO ⊓ AO = LO; AO ⊓ RO = LO
-  RO ⊓ LO = LO; LO ⊓ RO = LO
-  AO ⊓ LO = LO; LO ⊓ AO = LO
-  AO ⊓ ZO = ZO; ZO ⊓ AO = ZO
-  o  ⊓ o' | o == o'   = o
-          | otherwise = EO
+  AO ⊓ o  = o;  o  ⊓ AO = o
+  ZO ⊓ o  = o;  o  ⊓ ZO = o
+  _  ⊓ _  = EO
 
 -- Abstract arithmetic
 instance Num Occurrence where
   fromInteger 0             = ZO
-  fromInteger 1             = LO
-  fromInteger z | z > 1     = RO
+  fromInteger 1             = AO
+  fromInteger z | z > 1     = UO
                 | otherwise = EO
   abs = id
   negate = const EO
   signum o = bigJoin (map (fromInteger . toInteger . signum) (occToInts o))
   EO + _  = EO; _  + EO = EO
   ZO + o  = o;  o  + ZO = o
-  LO + LO = RO;
-  LO + AO = RO; AO + LO = RO
-  LO + RO = RO; RO + LO = RO
-  LO + UO = RO; UO + LO = RO
-  AO + RO = RO; RO + AO = RO
-  RO + RO = RO;
-  RO + UO = RO; UO + RO = RO
   _  + _  = UO
   --
   o  * o' = bigJoin $ do
@@ -1494,7 +1457,7 @@ instance Ord v ⇒ Standardizable (Type v) v where
         rn ← newRef []
         let (pns, t) = unfoldRec t0
             i        = length pns
-            g'       = (depth + i, rn, True,) <$$> replicate i [L]
+            g'       = (depth + i, rn, True,) <$$> replicate i [A]
         t' ← loop (depth + i) (g' ++ g) t
         nl ← readRef rn
         return $
@@ -1523,7 +1486,8 @@ instance Ord v ⇒ Standardizable (Type v) v where
                   return (length s)
               return (BoundVar (depth - olddepth) j' n, keep ql)
         | otherwise   → return (v0, True)
-      FreeVar r       → return (FreeVar r, keep (Map.findWithDefault L r qm))
+      FreeVar r       → return (FreeVar r,
+                                keep (Map.findWithDefault maxBound r qm))
     --
     doQual depth g t = do
       let QExp q vs = pureQualifier t
@@ -1677,23 +1641,20 @@ parseQuantifiers = many1 ((,) <$> quant <*> tvs) <* dot tok where
     return (concat idss)
   tvGroup = do
     ids ← many1 lowerIdentifier
-    ql  ← option L (colon tok >> parseQLit)
+    ql  ← option maxBound (colon tok >> parseQLit)
     return (map (,ql) ids)
 
 -- | To parse a qualifier literal
 parseQLit ∷ P QLit
-parseQLit = choice
-              [ symbol tok "U" >> return U
-              , symbol tok "R" >> return R
-              , symbol tok "A" >> return A
-              , symbol tok "L" >> return L ]
+parseQLit = U <$ symbol tok "U"
+        <|> A <$ symbol tok "A"
 
 parseTypeArrow ∷ P (Var a) → P (Type a) → P (Type a → Type a → Type a)
 parseTypeArrow tyvarp typep = flip arrTy <$> choice
   [ qlitexp U <$ reservedOp tok "→"
   , qlitexp U <$ reservedOp tok "->"
-  , qlitexp L <$ reservedOp tok "⊸"
-  , qlitexp L <$ try (symbol tok "-o")
+  , qlitexp A <$ reservedOp tok "⊸"
+  , qlitexp A <$ try (symbol tok "-o")
   , between (try (symbol tok "-{")) (try (symbol tok "}>")) $
       pureQualifier <$> typep
   , between (symbol tok "-") (symbol tok ">") $ do
@@ -1884,7 +1845,7 @@ pprType  = loop where
                (Ppr.fsep $ Ppr.punctuate Ppr.comma
                 [ Ppr.fsep $
                     map Ppr.text names ++
-                    if ql == L
+                    if ql == maxBound
                       then []
                       else [Ppr.char ':' Ppr.<+> Ppr.text (show ql)]
                 | (ql,names) ← btvs ])
@@ -1941,7 +1902,7 @@ pprQExp arrowStyle p g t =
     QExp U [] | arrowStyle → Ppr.char '→'
     QExp U [v]             → addArrow $ pprType 0 g (VarTy v)
     QExp U vs | arrowStyle → addArrow $ Ppr.fsep (pprType 0 g . VarTy <$> vs)
-    QExp L _  → addArrow $ Ppr.char 'L'
+    QExp A _  → addArrow $ Ppr.char 'A'
     QExp q vs → addArrow $ pprType p g (ConTy (show q) (VarTy <$> vs))
   where addArrow doc
           | arrowStyle = Ppr.char '-' Ppr.<> doc Ppr.<> Ppr.char '>'
@@ -2054,34 +2015,32 @@ parseTypeTests ∷ T.Test
 parseTypeTests = T.test
   [ "A"                         ==> a
   , "A → B"                     ==> (a ↦ b)
-  , "∀ α. α"                    ==> allTy [L] (bv 0 0)
+  , "∀ α. α"                    ==> allTy [A] (bv 0 0)
   , "∀ α : U. α"                ==> allTy [U] (bv 0 0)
-  , "∀ α : R. α"                ==> allTy [R] (bv 0 0)
   , "∀ α : A. α"                ==> allTy [A] (bv 0 0)
-  , "∀ α : L. α"                ==> allTy [L] (bv 0 0)
-  , "∀ α β. α"                  ==> allTy [L,L] (bv 0 0)
-  , "∀ α β. β"                  ==> allTy [L,L] (bv 0 1)
-  , "∀ α, β. α"                 ==> allTy [L,L] (bv 0 0)
-  , "∀ α, β : U. β"             ==> allTy [L,U] (bv 0 1)
-  , "∃ α. α"                    ==> exTy [L] (bv 0 0)
-  , "∃ α β. α"                  ==> exTy [L,L] (bv 0 0)
-  , "∃ α β. β"                  ==> exTy [L,L] (bv 0 1)
+  , "∀ α β. α"                  ==> allTy [A,A] (bv 0 0)
+  , "∀ α β. β"                  ==> allTy [A,A] (bv 0 1)
+  , "∀ α, β. α"                 ==> allTy [A,A] (bv 0 0)
+  , "∀ α, β : U. β"             ==> allTy [A,U] (bv 0 1)
+  , "∃ α. α"                    ==> exTy [A] (bv 0 0)
+  , "∃ α β. α"                  ==> exTy [A,A] (bv 0 0)
+  , "∃ α β. β"                  ==> exTy [A,A] (bv 0 1)
   , "∀ α β. C α → C β"
-      ==> allTy [L,L] (c (bv 0 0) ↦ c (bv 0 1))
+      ==> allTy [A,A] (c (bv 0 0) ↦ c (bv 0 1))
   , "∀ α. ∀ β. C α → C β → A"
-      ==> allTy [L] (allTy [L] (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
+      ==> allTy [A] (allTy [A] (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
   , "∀ α. α → ∀ β. β → α"
-      ==> allTy [L] (bv 0 0 ↦ allTy [L] (bv 0 0 ↦ bv 1 0))
+      ==> allTy [A] (bv 0 0 ↦ allTy [A] (bv 0 0 ↦ bv 1 0))
   , "∃ α β. C α → C β"
-      ==> exTy [L,L] (c (bv 0 0) ↦ c (bv 0 1))
+      ==> exTy [A,A] (c (bv 0 0) ↦ c (bv 0 1))
   , "∃ α. ∃ β. C α → C β → A"
-      ==> exTy [L] (exTy [L] (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
+      ==> exTy [A] (exTy [A] (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
   , "∃ α. α → ∃ β. β → α"
-      ==> exTy [L] (bv 0 0 ↦ exTy [L] (bv 0 0 ↦ bv 1 0))
+      ==> exTy [A] (bv 0 0 ↦ exTy [A] (bv 0 0 ↦ bv 1 0))
   , "∃ α ∀ β. C α → C β → A"
-      ==> exTy [L] (allTy [L] (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
+      ==> exTy [A] (allTy [A] (c (bv 1 0) ↦ c (bv 0 0) ↦ a))
   , "∃ α. α → ∀ β. β → α"
-      ==> exTy [L] (bv 0 0 ↦ allTy [L] (bv 0 0 ↦ bv 1 0))
+      ==> exTy [A] (bv 0 0 ↦ allTy [A] (bv 0 0 ↦ bv 1 0))
   , "[ A : A ]"
       ==> RowTy "A" a endTy
   , "[ A : A | B : B ]"
@@ -2089,11 +2048,11 @@ parseTypeTests = T.test
   , "[ A : A | B : B | A : C B ]"
       ==> RowTy "A" a (RowTy "B" b (RowTy "A" (c b) endTy))
   , "∀ α. [ A : A | B : B | α ]"
-      ==> allTy [L] (RowTy "A" a (RowTy "B" b (bv 0 0)))
+      ==> allTy [A] (RowTy "A" a (RowTy "B" b (bv 0 0)))
   , "∀ α β γ. [ A : α | B : β | γ ]"
-      ==> allTy [L,L,L] (RowTy "A" (bv 0 0) (RowTy "B" (bv 0 1) (bv 0 2)))
+      ==> allTy [A,A,A] (RowTy "A" (bv 0 0) (RowTy "B" (bv 0 1) (bv 0 2)))
   , "∀ β. μ α. [ A : α | β ]"
-      ==> allTy [L] (RecTy Nope (RowTy "A" (bv 0 0) (bv 1 0)))
+      ==> allTy [A] (RecTy Nope (RowTy "A" (bv 0 0) (bv 1 0)))
   , "∀ α β. α → β"              <==> "∀ β α. β → α"
   , "∀ α. C α → ∀ α. C α"       <==> "∀ δ. C δ → ∀ e. C e"
   , "∃ α β. α → β"              <==> "∃ β α. β → α"
@@ -2162,8 +2121,8 @@ standardizeTypeTests = T.test
   , let str = "∀ α. α → ∀ β. β → α" in
     T.assertBool str
       ((standardize (read str) ∷ Type Empty) ==
-       allTy [L] (VarTy (boundVar 0 0 "α") ↦
-                  allTy [L] (VarTy (boundVar 0 0 "β") ↦
+       allTy [A] (VarTy (boundVar 0 0 "α") ↦
+                  allTy [A] (VarTy (boundVar 0 0 "β") ↦
                              VarTy (boundVar 1 0 "α"))))
   ]
 
