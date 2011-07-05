@@ -27,12 +27,6 @@ import Control.Monad.State.Lazy    as Lazy
 import Control.Monad.Writer.Strict as Strict
 import Control.Monad.Writer.Lazy   as Lazy
 
-{-
-import Control.Monad.ST
-import Control.Monad.STM
-import Unsafe.Coerce
--}
-
 import System.IO.Unsafe
 import Data.IORef
 
@@ -125,17 +119,6 @@ instance Alternative f ⇒ Defaultable (DefaultEmpty f) where
 ---
 --- Extractable instances
 ---
-
-{-
-instance Extractable IO where
-  extract = unsafePerformIO
-
-instance Extractable STM where
-  extract = extract . atomically
-
-instance Extractable (ST s) where
-  extract = runST . unsafeCoerce
--}
 
 instance Extractable Identity where
   extract = runIdentity

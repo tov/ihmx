@@ -859,13 +859,6 @@ removeByRank γrank αs = do
         return (rank > γrank && α `Set.notMember` pinned)
   filterM keep αs
 
--- | Tracing facility for constraint solving; shows the supplied
---   argument and the state of the constraint solver.
-{-
-gtrace ∷ (MonadTV tv r m, TraceMessage a) ⇒ a → ConstraintT tv r m ()
-gtrace = if debug then gtraceN debugLevel else \_ → return ()
--}
-
 gtraceN ∷ (MonadTV tv r m, TraceMessage a) ⇒ Int → a → ConstraintT tv r m ()
 gtraceN =
   if debug then \n info →
