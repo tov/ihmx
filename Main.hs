@@ -5,8 +5,8 @@ import System.Console.Editline.Readline
 import Text.ParserCombinators.Parsec
 import IO
 
-import Infer
-import Parsable
+import Infer (showInfer)
+import Syntax (genParser)
 
 main = do
   initialize
