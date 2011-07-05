@@ -86,9 +86,9 @@ import Util
 inferTm ∷ (MonadTV tv r m, Show tv, Tv tv) ⇒
           Γ tv → Term Empty → m (Type tv, String)
 inferTm γ e = do
-  δ ← mapM (newTVTy' . varianceToKind) (ftvPure e)
-  traceN 2 ("inferTm", δ, γ, e)
+  traceN 2 ("inferTm", γ, e)
   runConstraintT $ do
+    δ ← instAnnotTVs (ftvPure e)
     τ ← infer (request AllQu ExQu) δ γ e Nothing
     σ ← generalize False (rankΓ γ) τ
     c ← showConstraint
@@ -595,6 +595,18 @@ splitRow (<*) (Just σ) name = do
           return (Just τ1, Just τ2)
     _ → fail $ "got " ++ show σ ++ " where `" ++ name ++ " expected"
 
+-- | Given a map from type variables names and qualifiers to variances,
+--   create an initial type variable environment.
+instAnnotTVs ∷ MonadC tv r m ⇒ VarMap (Name, QLit) → m (Δ tv)
+instAnnotTVs vmap = foldM each Map.empty (Map.toList vmap) where
+  each δ ((name, ql), variance) = do
+    α ← newTVTy' (ql, varianceToKind variance)
+    case Map.insertLookupWithKey (\_ _ → id) name α δ of
+      (Nothing, δ') → return δ'
+      (Just _,  _)  → fail $
+        "Used type variable " ++ name ++
+        " as both A and U in annotations of same term"
+
 -- | Given a tyvar environment (mapping some-bound names to tyvars) and
 --   an annotation, create new universal type variables for any new
 --   some-bound names in the annotation and update the environment
@@ -602,7 +614,8 @@ splitRow (<*) (Just σ) name = do
 --   list of universal tyvars.
 instAnnot ∷ MonadTV tv r m ⇒
             Δ tv → Annot → m (Type tv)
-instAnnot δ (Annot names σ0) = do
+instAnnot δ (Annot nqls σ0) = do
+  let names = fst <$> nqls
   αs ← mapM eachName names
   let σ = totalSubst names αs =<< σ0
   traceN 4 ("instAnnot", δ, σ, αs)
@@ -724,7 +737,7 @@ inferFnTests = T.test
                 -: "∀ α β γ. α → (β -γ> β) -γ> β -γ> β"
   , te "λf. P (f A) (f B)"
   , "λ_. single id" -: "∀ α β. α → List (β → β)"
-  , "λf x. f (f x)"     -: "∀α, β:U. (α -β> α) → α -β> α"
+  , "λf x. f (f x)" -: "∀α 'β. (α → α) → α → α"
   -- Patterns
   , "λC. B"     -: "C → B"
   , "λA. B"     -: "A → B"
@@ -738,7 +751,7 @@ inferFnTests = T.test
                 -: "∀ α β γ δ. B (α -δ> β -A> γ) → C α β -δ> γ"
   , pe "λ(A x x). B"
   , "λ(B a (C b c) (D d (E e f g))). F"
-                -: "∀ α β γ δ e f g: A. B α (C β γ) (D δ (E e f g)) → F"
+                -: "∀ α β γ δ e f g. B α (C β γ) (D δ (E e f g)) → F"
   -- Let rec
   , "let rec f = λx. f x in f"
       -: "∀α β. α → β"
@@ -747,7 +760,7 @@ inferFnTests = T.test
   , "let rec f = λx. match Z with _ → f x | _ → x in f"
       -: "∀α. α → α"
   , "let rec f = λx. match Z with _ → f x | _ → Z in f"
-      -: "∀α:A. α → Z"
+      -: "∀α. α → Z"
   , "let rec f = λx. match Z with _ → f (f x) | _ → x in f"
       -: "∀α. α → α"
   , "let rec f = λx. match Z with _ → f (f x) | _ → Z in f"
@@ -801,17 +814,17 @@ inferFnTests = T.test
   , "λf x. C (f x : Z -A> Z)"
                   -: "∀ α β. (α -β> Z -A> Z) → α -β> C (Z -A> Z)"
   , "λf x. C (f x : Z -A> Z) (f x : Z -A> Z)"
-                  -: "∀ α:U. (α → Z -A> Z) → α → C (Z -A> Z) (Z -A> Z)"
+                  -: "∀ 'α. ('α → Z -A> Z) → 'α → C (Z -A> Z) (Z -A> Z)"
   , "λf x. C (f x : Z → Z) (f x : Z -A> Z)"
-                  -: "∀ α:U. (α → Z → Z) → α → C (Z → Z) (Z -A> Z)"
+                  -: "∀ 'α. ('α → Z → Z) → 'α → C (Z → Z) (Z -A> Z)"
   , "λf x. C (f x : Z -A> Z) (f x : Z → Z)"
-                  -: "∀ α:U. (α → Z → Z) → α → C (Z -A> Z) (Z → Z)"
+                  -: "∀ 'α. ('α → Z → Z) → 'α → C (Z -A> Z) (Z → Z)"
   , "λf x. C (f x : Z → Z) (f x : Z → Z)"
-                  -: "∀ α:U. (α → Z → Z) → α → C (Z → Z) (Z → Z)"
+                  -: "∀ 'α. ('α → Z → Z) → 'α → C (Z → Z) (Z → Z)"
   , te "λf x. C (f x : Y → Y) (f x : Z → Z)"
   --
   , "λ(f : α -β> α) x. C (f x : B) (f x : B)"
-                  -: "∀α:U. (B -α> B) → B -α> C B B"
+                  -: "∀'α. (B → B) → B → C B B"
   , "λ(f : α → α) x. C (f x : Z → Z) (f x : Z → Z)"
                   -: "((Z → Z) → (Z → Z)) → (Z → Z) → C (Z → Z) (Z → Z)"
   , "λ(f : α → α) x. C (f x : Z -A> Z) (f x : Z -A> Z)"
@@ -829,15 +842,15 @@ inferFnTests = T.test
   , "λf g x. f (g x)"
       -: "∀ α β γ δ1 δ2. (β -δ2> γ) → (α -δ1> β) -δ2> α -δ1 δ2> γ"
   , "λf g x. f (f (g x))"
-      -: "∀ α β δ1, δ2 : U. (β -δ2> β) → (α -δ1> β) -δ2> α -δ1 δ2> β"
+      -: "∀ α β δ1. (β → β) → (α -δ1> β) → α -δ1> β"
   , "λf g x. f (f (g x x))"
-      -: "∀ α:U, β δ1, δ2:U. (β -δ2> β) → (α -δ1> α -A> β) -δ2> α -δ1 δ2> β"
+      -: "∀ 'α β δ1. (β → β) → ('α -δ1> 'α -A> β) → 'α -δ1> β"
   , "λf. f (f X X) X"
       -: "(X -U> X -A> X) → X"
   , "λf g x. f (f (g x) C) C"
-      -: "∀ α β, δ1:U, δ2. (β -δ1> C -A> β) → (α -δ2> β) -δ1> α -δ2 δ1> β"
+      -: "∀ α β δ2. (β → C -A> β) → (α -δ2> β) → α -δ2> β"
   , "λf g x. f (f (g x) (g x)) (g x)"
-      -: "∀ α:U, β, δ1 δ2:U. (β -δ2> β -A> β) → (α -δ1> β) -δ2> α -δ1 δ2> β"
+      -: "∀ 'α β. (β → β -A> β) → ('α → β) → 'α → β"
   , "let f = bot : (B -A> B) → B in let g = bot : B -U> B in f g"
       -: "B"
   , te "let f = bot : (B -U> B) → B in let g = bot : B -A> B in f g"
@@ -867,10 +880,10 @@ inferFnTests = T.test
       -: "∀α. α → B"
   , "λ(x:α). let f = cast B : (B -U> B) → B in \
     \        let g = cast B : B -α> B in f g"
-      -: "∀α:U. α → B"
+      -: "∀'α. 'α → B"
   , "λ(x:α). let f = cast B : (B -U> B) → B in \
     \        let g = cast B : B -α> B in f g"
-      -: "∀α:U. α → B"
+      -: "∀'α. 'α → B"
   , te "λ(x:α). let f = cast B: (B -α> B) → B in \
     \           let g = cast B: B -A> B in f g"
   , "λ(f : (B -A> B) → B) (g : B -α> B). f g"
@@ -893,9 +906,9 @@ inferFnTests = T.test
   , "λ(_:α) (_:β). (cast B: (B -α β> B) → B) (cast B: B -α> B)"
       -: "∀α β. α → β → B"
   , "λ(_:α) (_:β). (cast B: (B -α> B) → B) (cast B: B -α β> B)"
-      -: "∀α, β:U. α → β → B"
+      -: "∀α 'β. α → 'β → B"
   , "λ(x:α) (y:β). eat (P x y) ((cast B: (B -α> B) → B) (cast B: B -α β> B))"
-      -: "∀α, β:U. α → β -α> B"
+      -: "∀α 'β. α → 'β -α> B"
   --
   , "let rec f = λg x. let C = f ((λC.C) : C -U> C) C in g x in f"
       -: "∀α. (C -U α> C) → (C -U α> C)"
@@ -920,7 +933,7 @@ inferFnTests = T.test
   -- Generalization with non-empty Γ
   --
   , "λ(f : B -α> B). let g = λh. h f in (f, g)"
-      -: "∀ α:U, β. (B -α> B) → (B -α> B) × (((B -α> B) -A> β) -α> β)"
+      -: "∀ β. (B → B) → (B → B) × (((B → B) -A> β) → β)"
   , "λ(f : B -α> B). let g = λh. h f in g"
       -: "∀ α β. (B -α> B) → ((B -α> B) -A> β) -α> β"
   --
@@ -953,8 +966,8 @@ inferFnTests = T.test
       -: "∀ α. [ A: M α | B: α ] → M α"
   , "λx. match x with `A y → y | `A y → M y"
       -: "∀ α. [ A: M α | A: α ] → M α"
-  , "λx. match x with `A y → y | `B y → y | _ → botU"
-      -: "∀ α, r. [ A: α | B: α | r ] → α"
+  , "λx. match x with `A y → y | `B y → y | _ → bot"
+      -: "∀ α r. [ A: α | B: α | r ] → α"
   , "λx. match x with `A y → `B y | `B y → `A y | y → #A (#B y)"
       -: "∀ α β r. [ A: α | B: β | r ] → [ A: β | B: α | r]"
   , "λx. match x with `A y → `B y | `B y → `A y | y → #B (#A y)"
@@ -967,48 +980,48 @@ inferFnTests = T.test
       -: "∀ α. [ A: α | B: M ] → M"
   , "choose (`A ((λ_ _.X) : X -> X -U> X)) (`A ((λ_ _.X) : X -> X -A> X))"
       -: "∀ r. [ A: X → X -A> X | r ]"
-  , "λx y. match x with `A U → y"
-      -: "∀ α. [ A: U ] → α → α"
-  , "λx y. match x with `A U → y | `B (U, U) → y"
-      -: "∀ α. [ A: U | B: U × U ] → α → α"
+  , "λx y. match x with `A T → y"
+      -: "∀ α. [ A: T ] → α → α"
+  , "λx y. match x with `A T → y | `B (T, T) → y"
+      -: "∀ α. [ A: T | B: T × T ] → α → α"
   -- Equirecursive types
-  , te "(botU : μa. M → [ A: a ]) N"
-  , "(botU : μa. M → [ A: a ]) M"
+  , te "(bot : μa. M → [ A: a ]) N"
+  , "(bot : μa. M → [ A: a ]) M"
       -: "μβ. [ A: M → β ]"
   , "let rec x = `A x in x"
       -: "∀γ. μα. [ A: α | γ ]"
   , "let rec x = #B (`A x) in x"
       -: "∀β γ. μα. [ A: α | B: β | γ ]"
   , "λx. choose x (`A x)"
-      -: "∀γ: U. (μα. [ A: α | γ ]) → μα. [ A: α | γ ]"
+      -: "∀'γ. (μα. [ A: α | 'γ ]) → μα. [ A: α | 'γ ]"
   , "λx. choose x (#B (`A x))"
-      -: "∀β γ: U. (μα. [ A: α | B: β | γ ]) → \
-         \         μα. [ A: α | B: β | γ ]"
+      -: "∀'β 'γ. (μα. [ A: α | B: 'β | 'γ ]) → \
+         \         μα. [ A: α | B: 'β | 'γ ]"
   , "let rec f = λz x. match x with `A x' -> f z x' | _ -> z in f"
       -: "∀ α, β. α → (μγ. [ A: γ | β]) -α> α"
   , "let rec foldr = λf z xs.                   \
     \  match xs with                            \
     \  | `Cons (x, xs') → f x (foldr f z xs')   \
-    \  | `Nil U         → z                     \
+    \  | `Nil T         → z                     \
     \  in foldr                                 "
       -: "∀ α β. (α → β -A> β) → β →                 \
-         \       (μγ. [ Cons: α × γ | Nil: U ]) -β> β"
+         \       (μγ. [ Cons: α × γ | Nil: T ]) -β> β"
   , "let rec foldl = λf z xs.                   \
     \  match xs with                            \
     \  | `Cons (x, xs') → foldl f (f x z) xs'   \
-    \  | `Nil U         → z                     \
+    \  | `Nil T         → z                     \
     \  in foldl                                 "
       -: "∀ α β. (α → β -A> β) → β →                 \
-         \       (μγ. [ Cons: α × γ | Nil: U ]) -β> β"
-  , "botU : μγ. [ Cons: Q U × γ | Nil: U ]"
-      -: "μγ. [ Cons: Q U × γ | Nil: U ]"
-  , "botU : (μγ. [ Cons: Q A × γ | Nil: U ]) → Z"
-      -: "(μγ. [ Cons: Q A × γ | Nil: U ]) → Z"
-  , "(botU : (μγ. [ Cons: Q A × γ | Nil: U ]) → Z) \
-    \(botU : μγ. [ Cons: Q U × γ | Nil: U ])"
+         \       (μγ. [ Cons: α × γ | Nil: T ]) -β> β"
+  , "bot : μγ. [ Cons: Q T × γ | Nil: T ]"
+      -: "μγ. [ Cons: Q T × γ | Nil: T ]"
+  , "bot : (μγ. [ Cons: Q A × γ | Nil: T ]) → Z"
+      -: "(μγ. [ Cons: Q A × γ | Nil: T ]) → Z"
+  , "(bot : (μγ. [ Cons: Q A × γ | Nil: T ]) → Z) \
+    \(bot : μγ. [ Cons: Q T × γ | Nil: T ])"
       -: "Z"
-  , te "(botU : (μγ. [ Cons: Q U × γ | Nil: U ]) → Z) \
-       \(botU : μγ. [ Cons: Q A × γ | Nil: U ])"
+  , te "(bot : (μγ. [ Cons: Q T × γ | Nil: T ]) → Z) \
+       \(bot : μγ. [ Cons: Q A × γ | Nil: T ])"
   --- First class polymorphism
   , te "λf. P (f A) (f B)"
   , "λ(f : ∀ α. α → α). P (f A) (f B)"
@@ -1053,14 +1066,14 @@ inferFnTests = T.test
                 -: "Int × Bool"
   , "revapp (single (id : ∀ α. α → α)) single"
                 -: "List (List (∀ α. α → α))"
-  , "(cast X : (X → ∀α:U. α → α) → Y) (cast X : (X → ∀α. α → α))"
+  , "(cast X : (X → ∀'α. 'α → 'α) → Y) (cast X : (X → ∀α. α → α))"
                 -: "Y"
-  , te "(cast X : (X → ∀α. α → α) → Y) (cast X : (X → ∀α:U. α → α))"
+  , te "(cast X : (X → ∀α. α → α) → Y) (cast X : (X → ∀'α. 'α → 'α))"
   , "bot : ∀α. α → α : ∀α. α → α"
                 -: "∀α. α → α"
-  , "bot : ∀α. α → α : ∀α:U. α → α"
-                -: "∀α:U. α → α"
-  , te "bot : ∀α:U. α → α : ∀α. α → α"
+  , "bot : ∀α. α → α : ∀'α. 'α → 'α"
+                -: "∀'α. 'α → 'α"
+  , te "bot : ∀'α. 'α → 'α : ∀α. α → α"
   -- ST Monad
   , "runST (λ_. returnST X)"
                 -: "X"
@@ -1145,6 +1158,10 @@ inferFnTests = T.test
                 -: "Z → Z"
   , te "((λx.x) : Z → Z) : ∀α. α → α"
   , te "(λ(x : Z).x) : ∀α. α → α"
+  , "λ(x: `α). x"
+                -: "∀`α. `α → `α"
+  , "λ(x: 'α). x"
+                -: "∀'α. 'α → 'α"
   -- Type annotation propagation
   , te "λ f . (f A, f B)"
   , "λ(f : ∀ α. α → α). (f A, f B)"
@@ -1293,28 +1310,28 @@ inferFnTests = T.test
   , "let rec f = λx y z. f x z y in f"
                 -: "∀α β γ. α → β -α> β -α β> γ"
   , "let rec f = λx. app x (f x) in f"
-                -: "∀α:U. List α → List α"
+                -: "∀'α. List 'α → List 'α"
   , "let rec f = λx. app x (f x) in (f (List B), f (List C))"
                 -: "List B × List C"
   , te "let rec f : ∀α. List α → List α = (λx. app x (f x)) in f"
-  , "let rec f : ∀α:U. List α → List α = (λx. app x (f x)) in f"
-                -: "∀α:U. List α → List α"
-  , "let rec f : ∀α:U. List α → List α = (λx. app x (f x)) \
+  , "let rec f : ∀'α. List 'α → List 'α = (λx. app x (f x)) in f"
+                -: "∀'α. List 'α → List 'α"
+  , "let rec f : ∀'α. List 'α → List 'α = (λx. app x (f x)) \
     \ in (f (List B), f (List C))"
                 -: "List B × List C"
   , te "let rec f = (λx.x) (λx y z. f x z y) in f"
   , "let rec f = λx. app x (g x) \
     \    and g = λy. app (f y) y \
     \ in (f, g)"
-                -: "∀α β:U. (List α → List α) × (List β → List β)"
+                -: "∀'α 'β. (List 'α → List 'α) × (List 'β → List 'β)"
   , "let rec f = λx. app x (g x) \
     \    and g = λy. app (f y) y \
-    \ in (f: ∀α:U. List α → List α, g: ∀α:U. List α → List α)"
-                -: "(∀α:U. List α → List α) × (∀β:U. List β → List β)"
+    \ in (f: ∀'α. List 'α → List 'α, g: ∀'α. List 'α → List 'α)"
+                -: "(∀'α. List 'α → List 'α) × (∀'β. List 'β → List 'β)"
   , "let rec y = λf. f (y f) in y"
                 -: "∀α. (α -U> α) → α"
   , "let rec y = λf x. f (y f) x in y"
-                -: "∀α β, γ:U. ((α -γ> β) -γ> α -A> β) → α -γ> β"
+                -: "∀α β. ((α → β) → α -A> β) → α → β"
   , "let rec cf = C (λx. let C f = cf in f (f x)) in cf"
                 -: "∀α. C (α → α)"
   -- (Let rec polymorphic recursion:)
@@ -1324,9 +1341,9 @@ inferFnTests = T.test
   , "let rec f : ∀α. B α → Z = λx. f (B (f (B x))) in f"
                 -: "∀α. B α → Z"
   , te "let rec f = λx. choose (single x) (head (f (single x))) in f"
-  , "let rec f : ∀α:U. α → List α = \
+  , "let rec f : ∀'α. 'α → List 'α = \
     \       λx. choose (single x) (head (f (single x))) in f"
-                -: "∀α:U. α → List α"
+                -: "∀'α. 'α → List 'α"
   ----
   ---- Existential quantification
   ----
@@ -1346,16 +1363,16 @@ inferFnTests = T.test
                 -: "∃α. Z × α"
   , "(Z, Z) : ∃α. ε × α"
                 -: "∃α. Z × α"
-  , "Z : ∃α:U. α"
-                -: "∃α:U. α"
+  , "Z : ∃'α. 'α"
+                -: "∃'α. 'α"
   , "A : ∃α. α"
                 -: "∃α. α"
   , "A : ∃α. α"
                 -: "∃α. α"
-  , te "A : ∃α:U. α"
+  , te "A : ∃'α. 'α"
   , "let x = (Q U, Q A) in x : ∃α. α × α"
                 -: "∃α. α × α"
-  , te "let x = (Q U, Q A) in x : ∃α:U. α × α"
+  , te "let x = (Q U, Q A) in x : ∃'α. 'α × 'α"
   -- Impredicative instantiation to ∃
   , "(λx.x) (Z : ∃α. α)"
                 -: "∃α. α"
@@ -1370,10 +1387,10 @@ inferFnTests = T.test
     \  f x"
                 -: "Z"
   , "let f : ∀ α. A α → Z = λ_. Z in \
-    \let x : ∃ α:U. A α = A B in \
+    \let x : ∃ 'α. A 'α = A B in \
     \  f x"
                 -: "Z"
-  , "let x : ∃α:A. B α = B A in (λ(B _). Z) x"
+  , "let x : ∃α. B α = B A in (λ(B _). Z) x"
                 -: "Z"
   -- Constructing data with ∃
   , "let x : ∃α. B α = B A in C x"
@@ -1398,8 +1415,8 @@ inferFnTests = T.test
   , "λ(f : ∀α. C α → D α α) (e : ∃α. C α). f e"
                 -: "(∀α. C α → D α α) → (∃α. C α) → ∃α. D α α"
   , te "λ(f : ∀α β. C α → C β → D α β) (e : ∃α. C α). f e e"
-  , "λ(f : ∀α β. C α → C β → D α β) (e : ∃α:U. C α). f e e"
-                -: "(∀α β. C α → C β → D α β) → (∃α:U. C α) → ∃α β:U. D α β"
+  , "λ(f : ∀α β. C α → C β → D α β) (e : ∃'α. C 'α). f e e"
+                -: "(∀α β. C α → C β → D α β) → (∃'α. C 'α) → ∃'α 'β. D 'α 'β"
   , "λ(f : ∀α. α → D α) (C e : ∃α. C α). f e"
                 -: "(∀α. α → D α) → (∃α. C α) → ∃α. D α"
   , "λ(f : ∀α. α → D α) (C e : ∃α. C α). (f e : ∃α. D α)"
@@ -1411,8 +1428,8 @@ inferFnTests = T.test
                 -: "(∀α. C α → D α) → (∃α. C α) → ∃α. D α"
   , "(λf e. f e) : (∀α. C α → D α α) → (∃α. C α) → ∃α. D α α"
                 -: "(∀α. C α → D α α) → (∃α. C α) → ∃α. D α α"
-  , "(λf e. f e e) : (∀α β. C α → C β → D α β) → (∃α:U. C α) → ∃α β:U. D α β"
-                -: "(∀α β. C α → C β → D α β) → (∃α:U. C α) → ∃α β:U. D α β"
+  , "(λf e. f e e) : (∀α β. C α → C β → D α β) → (∃'α. C 'α) → ∃'α 'β. D 'α 'β"
+                -: "(∀α β. C α → C β → D α β) → (∃'α. C 'α) → ∃'α 'β. D 'α 'β"
   , "(λf e. f e) : (∀α. α → D α) → (∃β. C β) → D (∃α. C α)"
                 -: "(∀α. α → D α) → (∃β. C β) → D (∃α. C α)"
   -- Destruction by pattern matching
@@ -1434,50 +1451,50 @@ inferFnTests = T.test
                 -: "∃ α. S α"
   , te "λf. let x = bot : ∃ α. T α in (λ(T y). f y) x"
   , "λ_. S (bot : ∃α. T α : T b)"
-                -: "∀α:A. α → ∃β. S (T β)"
+                -: "∀α. α → ∃β. S (T β)"
   , te "λf. f (bot : ∃α. T α : T b)"
   , "λ_. let x = bot : ∃α. T α : T b in S x"
-                -: "∀α:A. α → ∃β. S (T β)"
+                -: "∀α. α → ∃β. S (T β)"
   , te "λf. let x = bot : ∃α. T α : T b in f x"
-  , "λ(e : ∃α:A. C (D α) (D α)).          \
+  , "λ(e : ∃α. C (D α) (D α)).          \
     \let C x y = e in           \
     \  choose x y"
-                -: "(∃α:A. C (D α) (D α)) → ∃α:A. D α"
-  , "λ(e : ∃α:A. C (D α) (D α)).          \
+                -: "(∃α. C (D α) (D α)) → ∃α. D α"
+  , "λ(e : ∃α. C (D α) (D α)).          \
     \  let C x y = e in                   \
-    \    (choose x y : ∃α:A. D α)"
-                -: "(∃α:A. C (D α) (D α)) → ∃α:A. D α"
+    \    (choose x y : ∃α. D α)"
+                -: "(∃α. C (D α) (D α)) → ∃α. D α"
   -- Existentials don't match other stuff
-  , "let x : ∃α:U. C α = C T in        \
+  , "let x : ∃'α. C 'α = C T in        \
     \let (C x', C y') = (x, x) in      \
     \  choose x x"
-                -: "∃α:U. C α"
-  , te "let x : ∃α:U. C α = C T in        \
+                -: "∃'α. C 'α"
+  , te "let x : ∃'α. C 'α = C T in        \
        \let (C x', C y') = (x, x) in      \
        \ choose x' y'"
-  , te "let x : ∃α:U. C α = C T in        \
+  , te "let x : ∃'α. C 'α = C T in        \
        \ λ(f : ∀α. C α → C α → Z). f x x"
-  , "let x : ∃α:U. C α = C T in        \
+  , "let x : ∃'α. C 'α = C T in        \
     \ λ(f : ∀α β. C α → C β → Z). f x x"
                 -: "(∀α β. C α → C β → Z) → Z"
-  , "let x : ∃α:U. C α = C T in        \
+  , "let x : ∃'α. C 'α = C T in        \
     \λ(f : ∀α. C α → C α → Z). let z : C δ = x in f z z"
               -: "(∀α. C α → C α → Z) → Z"
-  , te "let x : ∃α:U. C α = C T in        \
-       \let y : ∃α:U. C α = C T in        \
+  , te "let x : ∃'α. C 'α = C T in        \
+       \let y : ∃'α. C 'α = C T in        \
        \λ(f : ∀α. C α → C α → Z). f x y"
-  , "let x : ∃α:U. C α = C T in        \
-    \let y : ∃α:U. C α = C T in        \
+  , "let x : ∃'α. C 'α = C T in        \
+    \let y : ∃'α. C 'α = C T in        \
     \λ(f : ∀α. α → α → Z). f x y"
                 -: "(∀α. α → α → Z) → Z"
-  , te "let e : ∃α:U. α × (α → Int) = (Int, λx.x) in (snd e) (fst e)"
-  , "let e : ∃α:U. α × (α → Int) = (Int, λx.x) in  \
+  , te "let e : ∃'α. 'α × ('α → Int) = (Int, λx.x) in (snd e) (fst e)"
+  , "let e : ∃'α. 'α × ('α → Int) = (Int, λx.x) in  \
     \(λp. (snd p) (fst p)) e"
                 -: "Int"
-  , te "let e : ∃α:U. α × (α → C α) = (Int, λx.C x) in (snd e) (fst e)"
-  , "let e : ∃α:U. α × (α → C α) = (Int, λx.C x) in  \
+  , te "let e : ∃'α. 'α × ('α → C 'α) = (Int, λx.C x) in (snd e) (fst e)"
+  , "let e : ∃'α. 'α × ('α → C 'α) = (Int, λx.C x) in  \
     \(λp. (snd p) (fst p)) e"
-                -: "∃α:U. C α"
+                -: "∃'α. C 'α"
   ]
   where
   a -: b = limit a $ case readsPrec 0 a of

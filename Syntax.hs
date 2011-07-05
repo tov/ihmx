@@ -33,7 +33,6 @@ import qualified Unsafe.Coerce
 import qualified Test.HUnit as T
 
 import Util
-import Parsable
 import Ppr
 import MonadRef
 
@@ -92,6 +91,10 @@ readQLit ∷ String → Maybe QLit
 readQLit "U" = Just U
 readQLit "A" = Just A
 readQLit _   = Nothing
+
+qLitSigil ∷ QLit → Char
+qLitSigil U = '\''
+qLitSigil A = '`'
 
 instance Bounded QLit where
   minBound = U
@@ -448,12 +451,8 @@ infixr 6 ↦
 
 -- | A type annotation. The list of 'Name's records the free
 --   type variables in the 'Type'.
-data Annot = Annot [Name] (Type Name)
+data Annot = Annot [(Name, QLit)] (Type Name)
   deriving Eq
-
--- | The empty annotation
-annot0 :: Annot
-annot0  = Annot ["_"] (fvTy "_")
 
 ---
 --- GENERIC DEREFERENCING
@@ -786,6 +785,7 @@ totalPatt (VarPa _)         = True
 totalPatt WldPa             = True
 totalPatt (ConPa "Pair" πs) = all totalPatt πs
 totalPatt (ConPa "U" [])    = True
+totalPatt (ConPa "T" [])    = True
 totalPatt (ConPa _ _)       = False
 totalPatt (InjPa _ _)       = False
 totalPatt (AnnPa π _)       = totalPatt π
@@ -897,8 +897,8 @@ termFv e0 = case e0 of
       , ("swapRef",     "∀ α β. Ref β α × α → Ref β α × α")
       , ("swapRef'",    "∀ α β. Ref A α × β → \
                         \       Ref A β × α")
-      , ("readRef",     "∀ α:U, β. Ref β α → α")
-      , ("readRef'"  ,  "∀ α:U, β. Ref β α → Ref β α × α")
+      , ("readRef",     "∀ 'α β. Ref β 'α → 'α")
+      , ("readRef'"  ,  "∀ 'α β. Ref β 'α → Ref β 'α × 'α")
       , ("freeRef'",    "∀ α. Ref A α → α")
       , ("writeRef",    "∀ α β. Ref β α × α → T")
       , ("writeRef'",   "∀ α β. Ref A α × β → Ref A β")
@@ -923,14 +923,14 @@ termFv e0 = case e0 of
       , ("bindST",      "∀ α β s. ST s α → (α → ST s β) → ST s β")
       , ("returnST",    "∀ α s. α → ST s α")
       , ("newSTRef",    "∀ α s. α → ST s (STRef s α)")
-      , ("readSTRef",   "∀ α:U, s. STRef s α → ST s α")
+      , ("readSTRef",   "∀ 'α s. STRef s 'α → ST s 'α")
       -- Any
       , ("eat",         "∀ α β. α → β → β")
-      , ("eatU",        "∀ α:U, β. α → β → β")
-      , ("eatA",        "∀ α:A, β. α → β → β")
+      , ("eatU",        "∀ 'α β. 'α → β → β")
+      , ("eatA",        "∀ α β. α → β → β")
       , ("bot",         "∀ α. α")
-      , ("botU",        "∀ α:U. α")
-      , ("botA",        "∀ α:A. α")
+      , ("botU",        "∀ 'α. 'α")
+      , ("botA",        "∀ α. α")
       , ("cast",        "∀ α β. α → β")
       ]
 
@@ -1209,6 +1209,7 @@ data FtvTree v
   | FTGuard (FtvTree v)
   -- | A forest of 'FtvTree's
   | FTBranch [FtvTree v]
+  deriving Functor
 
 instance Monoid (FtvTree v) where
   mempty      = FTBranch []
@@ -1255,9 +1256,12 @@ class Ord v ⇒ Ftv a v | a → v where
   ftvSet   ∷ MonadReadTV v m ⇒ a → m (Set.Set v)
   -- | To get a list of the free type variables in a type (with no repeats).
   ftvList  ∷ MonadReadTV v m ⇒ a → m [v]
+  -- | To get the tree of (apparent) free variables without trying to
+  --   dereference anything
+  ftvTreePure ∷ a → FtvTree v
   -- | To get the set of (apparent) free variables without trying to
   --   dereference anything
-  ftvPure  ∷ a → VarMap v
+  ftvPure     ∷ a → VarMap v
   -- 
   --
   ftvFold fsingle fguard zero a
@@ -1266,6 +1270,7 @@ class Ord v ⇒ Ftv a v | a → v where
   ftvG           = ftvFold (\v _ → Map.insert v False) (True <$) Map.empty
   ftvSet         = ftvFold (const . Set.insert) id Set.empty
   ftvList        = liftM Set.toAscList . ftvSet
+  ftvTreePure a  = runPureDeref (ftvTree a ∷ PureDeref v (FtvTree v))
   ftvPure a      = runPureDeref (ftvV a ∷ PureDeref v (VarMap v))
 
 instance Ord v ⇒ Ftv (Type v) v where
@@ -1300,17 +1305,19 @@ instance (Ftv a v, Ftv b v) ⇒ Ftv (Either a b) v where
 
 -- The free type variables in annotations, patterns, and terms give
 -- the free names that are shared between annotations.
-instance Ftv Annot Name where
-  ftvTree (Annot _ τ)  = ftvTree τ
+instance Ftv Annot (Name, QLit) where
+  ftvTree (Annot nqls τ)   = return (addQLit <$> ftvTreePure τ)
+    where
+      addQLit name = (name, fromMaybe maxBound (lookup name nqls))
 
-instance Ftv (Patt Empty) Name where
+instance Ftv (Patt Empty) (Name, QLit) where
   ftvTree (VarPa _)        = return mempty
   ftvTree WldPa            = return mempty
   ftvTree (ConPa _ πs)     = ftvTree πs
   ftvTree (InjPa _ π)      = ftvTree π
   ftvTree (AnnPa π annot)  = ftvTree (π, annot)
 
-instance Ftv (Term Empty) Name where
+instance Ftv (Term Empty) (Name, QLit) where
   ftvTree e0 = case e0 of
     AbsTm π e      → ftvTree (π, e)
     MatTm e bs     → ftvTree (e, bs)
@@ -1321,16 +1328,6 @@ instance Ftv (Term Empty) Name where
     LabTm _ _      → return mempty
     AppTm e1 e2    → ftvTree (e1, e2)
     AnnTm e annot  → ftvTree (e, annot)
-
----
---- Some-quantified type variable names in annotations
----
-
-class AnnotNames a where
-  annotNames ∷ a → Set.Set Name
-
-instance AnnotNames a ⇒ AnnotNames [a] where
-  annotNames = Set.unions . map annotNames
 
 ---
 --- Unfolds for syntax
@@ -1500,6 +1497,18 @@ instance Ord v ⇒ Standardizable (Type v) v where
 instance Standardizable Annot Name where
   standardizeQuals qm (Annot ns t) = Annot ns (standardizeQuals qm t)
 
+-- | Parser monad with the type variables in state.
+type P a = Parsec String [(String, QLit)] a
+
+-- | A type class for generic parsing. It's especially useful for
+--   building Read instances from Parsec parsers.
+class Parsable a where
+  genParser :: P a
+  readsPrecFromParser :: ReadS a
+  readsPrecFromParser =
+    either (fail . show) return .
+      runParser ((,) <$> genParser <*> getInput) [] ""
+
 -- | A Parsec tokenizer
 tok ∷ TokenParser st
 tok  = makeTokenParser LanguageDef {
@@ -1555,25 +1564,30 @@ instance Parsable Empty where
 --   doesn't appear in the environment, it also looks in the parser
 --   state, which is considered to be the next rib after the given
 --   environment.
-findVar ∷ Name → [[Name]] → P (Var a)
-findVar name = loop 0 where
+findVar ∷ (Name, QLit) → [[(Name, QLit)]] → P (Var a)
+findVar (name, ql) = loop 0 where
   loop !ix [] = do
     somes ← getState
-    case List.findIndex (== name) somes of
-      Just jx → return (boundVar ix jx name)
+    case lookupWithIndex name somes of
+      Just (ql', jx) → finish ix jx ql'
       Nothing → do
-        setState (somes ++ [name])
+        setState (somes ++ [(name, ql)])
         return (boundVar ix (length somes) name)
-  loop !ix (rib:ribs) = case findLastIndex (== name) rib of
-    Just jx → return (boundVar ix jx name)
-    Nothing → loop (ix + 1) ribs
+  loop !ix (rib:ribs) = case lookupWithIndex name rib of
+    Just (ql', jx) → finish ix jx ql'
+    Nothing        → loop (ix + 1) ribs
+  finish ix jx ql' =
+    if ql == ql'
+      then return (boundVar ix jx name)
+      else fail $ "Used both type variables '" ++ name ++ " and `" ++
+                  " in the same expression"
 
 -- | To parse an annotation
 instance Parsable Annot where
   genParser  = withState [] $ do
     τ0    ← parseType
     somes ← getState
-    let τ = openTy 0 (map fvTy somes) τ0
+    let τ = openTy 0 (map (fvTy . fst) somes) τ0
     return (standardize (Annot somes τ))
 
 -- | To parse a closed type.
@@ -1593,13 +1607,13 @@ parseType  = level0 []
   where
   level0 g = do
                (quants, tvss) ← unzip <$> parseQuantifiers
-               body   ← level0 (reverse (fst <$$> tvss) ++ g)
+               body   ← level0 (reverse tvss ++ g)
                return (foldr2 QuaTy body quants (first Here <$$> tvss))
          <|> do
                reservedOp tok "μ" <|> reserved tok "rec"
-               tv   ← lowerIdentifier
+               (tv, ql) ← parseTV
                dot tok
-               body ← level0 ([tv]:g)
+               body ← level0 ([(tv, ql)]:g)
                if contractiveTy body
                  then return (RecTy (Here tv) body)
                  else fail "Recursive type not contractive"
@@ -1627,7 +1641,7 @@ parseType  = level0 []
           reservedOp tok "|"
           (VarTy <$> tyvarp g) <|> (entry <*> loop)
      in option endTy (entry <*> loop)
-  tyvarp g = join (findVar <$> lowerIdentifier <*> pure g)
+  tyvarp g = join (findVar <$> parseTV <*> pure g)
 
 -- To parse a sequence of quantifiers along with their bound variables.
 parseQuantifiers ∷ P [(Quant, [(Name, QLit)])]
@@ -1637,13 +1651,17 @@ parseQuantifiers = many1 ((,) <$> quant <*> tvs) <* dot tok where
   tvs     = do
     idss ← sepBy1 tvGroup (comma tok)
     let ids = concatMap (map fst) idss
-    when (List.nub ids /= ids) $
+    when (ordNub ids /= ids) $
       fail "repeated tyvar in quantifier group"
     return (concat idss)
-  tvGroup = do
-    ids ← many1 lowerIdentifier
-    ql  ← option maxBound (colon tok >> parseQLit)
-    return (map (,ql) ids)
+  tvGroup = many1 parseTV
+
+parseTV ∷ P (Name, QLit)
+parseTV = flip (,) <$> option A (choice (parseQLitSigil <$> [U, A]))
+                   <*> lowerIdentifier
+
+parseQLitSigil ∷ QLit → P QLit
+parseQLitSigil ql = ql <$ char (qLitSigil ql)
 
 -- | To parse a qualifier literal
 parseQLit ∷ P QLit
@@ -1680,9 +1698,10 @@ parsePatt p = withState [] (level p) where
   variable = do
     name  ← lowerIdentifier
     names ← getState
-    if name `elem` names
+    -- On the next three lines A is arbitrary, but needs to match. Ugh!
+    if (name, A) `elem` names
       then unexpected ("repeated variable in pattern: " ++ name)
-      else putState (names++[name])
+      else putState (names++[(name, A)])
     return name
 
 -- | To parse a closed term.
@@ -1838,18 +1857,12 @@ pprType  = loop where
     QuaTy u e t           →
       let quant = case u of AllQu → "∀"; ExQu → "∃"
           (tvs0, qls) = unzip e
-          tvs         = freshNames tvs0 (concat g) tvNames
-          btvs        = groupByQLits tvs qls
+          tvs1        = freshNames tvs0 (concat g) tvNames
+          tvs         = zipWith ((:) . qLitSigil) qls tvs1
        in parensIf (p > 0) $
             Ppr.hang
               (Ppr.text quant Ppr.<+>
-               (Ppr.fsep $ Ppr.punctuate Ppr.comma
-                [ Ppr.fsep $
-                    map Ppr.text names ++
-                    if ql == maxBound
-                      then []
-                      else [Ppr.char ':' Ppr.<+> Ppr.text (show ql)]
-                | (ql,names) ← btvs ])
+                 Ppr.fsep (Ppr.text <$> tvs)
                Ppr.<> Ppr.char '.')
               2
               (loop 0 (tvs : g) t)
@@ -1891,11 +1904,6 @@ pprType  = loop where
           (Ppr.char 'μ' Ppr.<> ppr tv Ppr.<> Ppr.char '.')
           2
           (loop 0 ([tv]:g) t)
-
-  groupByQLits = foldr2 each [] where
-    each tv ql ((ql',tvs):rest)
-      | ql == ql'   = ((ql',tv:tvs):rest)
-    each tv ql rest = (ql,[tv]):rest
 
 pprQExp ∷ Ppr a ⇒ Bool → Int → [[Name]] → Type a → Ppr.Doc
 pprQExp arrowStyle p g t =
@@ -2017,12 +2025,12 @@ parseTypeTests = T.test
   [ "A"                         ==> a
   , "A → B"                     ==> (a ↦ b)
   , "∀ α. α"                    ==> allTy [A] (bv 0 0)
-  , "∀ α : U. α"                ==> allTy [U] (bv 0 0)
-  , "∀ α : A. α"                ==> allTy [A] (bv 0 0)
+  , "∀ 'α. 'α"                  ==> allTy [U] (bv 0 0)
+  , "∀ `α. `α"                  ==> allTy [A] (bv 0 0)
   , "∀ α β. α"                  ==> allTy [A,A] (bv 0 0)
   , "∀ α β. β"                  ==> allTy [A,A] (bv 0 1)
   , "∀ α, β. α"                 ==> allTy [A,A] (bv 0 0)
-  , "∀ α, β : U. β"             ==> allTy [A,U] (bv 0 1)
+  , "∀ α 'β. 'β"                ==> allTy [A,U] (bv 0 1)
   , "∃ α. α"                    ==> exTy [A] (bv 0 0)
   , "∃ α β. α"                  ==> exTy [A,A] (bv 0 0)
   , "∃ α β. β"                  ==> exTy [A,A] (bv 0 1)

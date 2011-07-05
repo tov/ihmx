@@ -639,7 +639,6 @@ solveConstraint value γrank τ = do
     --
     -- Remove redundant edges:
     --  • Edges implied by transitivity
-    --  • Edges relating type constructors to type constructors
     untransitive = NM.modifyGraph Gr.untransitive
     --
     -- Remove type variables based on polarity-related rules:

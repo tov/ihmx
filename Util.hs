@@ -25,7 +25,7 @@ module Util (
   module Perhaps,
   module Prelude,
   -- * Extra list operations
-  findLastIndex, listNth, ordNub, partitionJust,
+  lookupWithIndex, listNth, ordNub, partitionJust,
   -- * Extra 'Traversable' operations
   mapHead, mapTail, mapInit, mapLast, foldr2,
   -- * 'Maybe' and 'Either' operations
@@ -75,10 +75,12 @@ import Perhaps
 
 import qualified Data.Set as Set
 
-findLastIndex ∷ (a → Bool) → [a] → Maybe Int
-findLastIndex pred = loop 0 Nothing where
-  loop _  acc [] = acc
-  loop !ix acc (x:xs) = loop (ix + 1) (if pred x then Just ix else acc) xs
+lookupWithIndex ∷ Eq a ⇒ a → [(a, b)] → Maybe (b, Int)
+lookupWithIndex k = loop 0 where
+  loop _   []   = Nothing
+  loop !ix ((k',v):rest)
+    | k == k'   = Just (v, ix)
+    | otherwise = loop (ix + 1) rest
 
 listNth ∷ Int → [a] → Maybe a
 listNth i = foldr (const . Just) Nothing . drop i
