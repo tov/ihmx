@@ -804,7 +804,7 @@ data Term a
   = AbsTm (Patt a) (Term a)
   | LetTm (Patt a) (Term a) (Term a)
   | MatTm (Term a) [(Patt a, Term a)]
-  | RecTm [(Name, Maybe Annot, Term a)] (Term a)
+  | RecTm [(Name, Term a)] (Term a)
   | VarTm Name
   | ConTm Name [Term a]
   | LabTm Bool Name
@@ -837,13 +837,17 @@ isAnnotated (LabTm _ _)      = False
 isAnnotated (AppTm _ _)      = False
 isAnnotated (AnnTm _ _)      = True
 
+getTermAnnot ∷ Term a → Maybe Annot
+getTermAnnot (AnnTm _ annot) = Just annot
+getTermAnnot _               = Nothing
+
 termFv ∷ Term a → Set.Set Name
 termFv e0 = case e0 of
   AbsTm π e      → mask π e
   MatTm e bs     → Set.unions (termFv e : map (uncurry mask) bs)
   LetTm π e1 e2  → termFv e1 `Set.union` mask π e2
-  RecTm bs e2    → Set.unions (termFv e2 : map (termFv . sel3) bs)
-                     Set.\\ Set.fromList (map sel1 bs)
+  RecTm bs e2    → Set.unions (termFv e2 : map (termFv . snd) bs)
+                     Set.\\ Set.fromList (map fst bs)
   VarTm n        → Set.singleton n
   ConTm _ es     → Set.unions (map termFv es)
   LabTm _ _      → Set.empty
@@ -1160,7 +1164,7 @@ countOccs x = loop where
                                               , x `notElem` pattBv πi ]
   loop (RecTm bs e2)
     | x `elem` map sel1 bs= 0
-    | otherwise           = loop e2 + sum (map (loop . sel3) bs)
+    | otherwise           = loop e2 + sum (map (loop . snd) bs)
   loop (VarTm x')
     | x == x'             = 1
     | otherwise           = 0
@@ -1307,7 +1311,7 @@ instance Ftv (Term Empty) (Name, QLit) where
     AbsTm π e      → ftvTree (π, e)
     MatTm e bs     → ftvTree (e, bs)
     LetTm π e1 e2  → ftvTree (π, e1, e2)
-    RecTm bs e2    → ftvTree (map sel2 bs, map sel3 bs, e2)
+    RecTm bs e2    → ftvTree (map snd bs, e2)
     VarTm _        → return mempty
     ConTm _ es     → ftvTree es
     LabTm _ _      → return mempty
@@ -1714,10 +1718,11 @@ parseTerm = level0 where
                 [ reserved tok "rec" *>
                   (RecTm
                     <$> sepBy1
-                          ((,,) <$> lowerIdentifier
-                                <*> optional (colon tok *> genParser)
-                                <*  reservedOp tok "="
-                                <*> level0)
+                          ((,) <$> lowerIdentifier
+                               <*> (option id
+                                     (flip AnnTm <$ colon tok <*> genParser)
+                                     <*  reservedOp tok "="
+                                     <*> level0))
                           (reserved tok "and")
                     <*  reserved tok "in"
                     <*> level0)
@@ -1963,13 +1968,11 @@ instance Ppr (Term a) where
           Ppr.vcat
             [ Ppr.text kw Ppr.<+>
               Ppr.hang
-                (Ppr.text ni Ppr.<+>
-                 maybe Ppr.empty ((Ppr.char ':' Ppr.<+>) . ppr) mai
-                 Ppr.<+> Ppr.char '=')
+                (Ppr.text ni Ppr.<+> Ppr.char '=')
                 2
                 (loop 0 ei)
-            | (ni,mai,ei) ← bs
-            | kw          ← "rec" : repeat "and" ]
+            | (ni,ei) ← bs
+            | kw      ← "rec" : repeat "and" ]
           Ppr.$$ Ppr.text " in" Ppr.<+> loop 0 e2
       VarTm name          → Ppr.text name
       ConTm name es       → parensIf (p > 2 && not (null es)) $

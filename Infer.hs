@@ -144,18 +144,20 @@ infer φ0 δ γ e0 mσ0 = do
       (σ1, αs)         ← collectTV (infer request δ γ e1 Nothing)
       inferMatch (request φ γ αs) δ γ σ1 bs mσ
     RecTm bs e2                   → do
-      σs               ← mapM (maybe newTVTy (instAnnot δ) . sel2) bs
-      let ns           = map sel1 bs
-      γ'               ← γ &+&! ns &:& σs
-      σs'              ← sequence
+      let (ns, es) = unzip bs
+          mas      = getTermAnnot <$> es
+      σs           ← mapM (maybe newTVTy (instAnnot δ)) mas
+      γ'           ← γ &+&! ns &:& σs
+      σs'          ← sequence
         [ do
             unless (syntacticValue ei) $
               fail $ "In let rec, binding for ‘" ++ ni ++
                      "’ is not a syntactic value"
             σi ⊏: U
             infer request δ γ' ei (σi <$ mai)
-        | (ni, mai, ei) ← bs
-        | σi            ← σs ]
+        | (ni, ei) ← bs
+        | mai      ← mas
+        | σi       ← σs ]
       zipWithM (<:) σs' σs
       σs''             ← generalizeList True (rankΓ γ) σs'
       γ'               ← γ &+&! ns &:& σs''
