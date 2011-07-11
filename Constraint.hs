@@ -30,7 +30,6 @@ import qualified Text.PrettyPrint as Ppr
 -- From fgs:
 import Data.Graph.Inductive.PatriciaTree (Gr)
 import qualified Graph   as Gr
-import qualified NodeMap as NM
 
 -- From incremental-sat-solver
 import qualified Data.Boolean.SatSolver as SAT
@@ -178,7 +177,7 @@ data CTState tv r
       csGraph   ∷ !(Gr tv ()),
       -- | Reverse lookup for turning atoms into node numbers for the
       --   'csGraph' graph
-      csNodeMap ∷ !(NM.NodeMap tv),
+      csNodeMap ∷ !(Gr.NodeMap tv),
       -- | Maps type variables to same-size equivalence classes
       csEquivs  ∷ !(ProxyMap tv r),
       -- | Types to relate by the subqualifier relation
@@ -242,7 +241,7 @@ runConstraintT ∷ MonadTV tv r m ⇒ ConstraintT tv r m a → m a
 runConstraintT m = evalStateT (unConstraintT_ m) cs0
   where cs0        = CTState {
                        csGraph   = Gr.empty,
-                       csNodeMap = NM.new,
+                       csNodeMap = Gr.new,
                        csEquivs  = Map.empty,
                        csQuals   = [],
                        csPinned  = []
@@ -276,7 +275,7 @@ instance MonadTV tv r m ⇒ MonadReadTV tv (ConstraintT tv r m) where
 -- | 'ConstraintT' implements 'Graph'/'NodeMap' transformer operations
 --   for accessing its graph and node map.
 instance (Ord tv, Monad m) ⇒
-         NM.MonadNM tv () Gr (ConstraintT tv r m) where
+         Gr.MonadNM tv () Gr (ConstraintT tv r m) where
   getNMState = ConstraintT (gets (csNodeMap &&& csGraph))
   getNodeMap = ConstraintT (gets csNodeMap)
   getGraph   = ConstraintT (gets csGraph)
@@ -427,9 +426,9 @@ subtypeTypes unify τ10 τ20 = do
              " ‘" ++ show τ2 ++ "’"
   --
   addEdge a1 a2 = do
-    NM.insNewMapNodeM a1
-    NM.insNewMapNodeM a2
-    NM.insMapEdgeM (a1, a2, ())
+    Gr.insNewMapNodeM a1
+    Gr.insNewMapNodeM a2
+    Gr.insMapEdgeM (a1, a2, ())
 
 -- | Relate two types at the given variance.
 relateTypes ∷ MonadTV tv r m ⇒
@@ -480,12 +479,12 @@ unifyVar α τ0 = do
     fail $ "Type error: Cannot unify because insufficiently polymorphic"
   writeTV α τ
   updatePinnedTVs α τ
-  (n, _) ← NM.mkNodeM α
-  gr     ← NM.getGraph
+  (n, _) ← Gr.mkNodeM α
+  gr     ← Gr.getGraph
   case Gr.match n gr of
     (Nothing,                 _)   → return ()
     (Just (pres, _, _, sucs), gr') → do
-      NM.putGraph gr'
+      Gr.putGraph gr'
       sequence_ $
         [ case Gr.lab gr' n' of
             Nothing → return ()
@@ -537,7 +536,7 @@ checkEquivTVs α β = do
 resetEquivTVs ∷ MonadTV tv r m ⇒ ConstraintT tv r m ()
 resetEquivTVs = do
   ConstraintT (modify (csEquivsUpdate (const Map.empty)))
-  g     ← NM.getGraph
+  g     ← Gr.getGraph
   mapM_ (uncurry makeEquivTVs)
         [ (α, β) | (α, β) ← Gr.labNodeEdges g ]
 
@@ -564,7 +563,7 @@ solveConstraint value γrank τ = do
   gtraceN 2 (TraceIn ("gen", "begin", value, γrank, τftv, τ))
   τftv ← coalesceSCCs τftv
   gtraceN 3 ("gen", "scc", τftv, τ)
-  NM.modifyGraph Gr.trcnr
+  Gr.modifyGraph Gr.trcnr
   gtraceN 4 ("gen", "trc", τftv, τ)
   eliminateExistentials True (γrank, τftv)
   gtraceN 3 ("gen", "existentials 1", τftv, τ)
@@ -581,7 +580,7 @@ solveConstraint value γrank τ = do
   gtraceN 3 ("gen", "components", τftv, τ)
   -- Guessing ends here
   qc    ← ConstraintT (gets csQuals)
-  cftv  ← ftvSet . map snd =<< NM.getsGraph Gr.labNodes
+  cftv  ← ftvSet . map snd =<< Gr.getsGraph Gr.labNodes
   qcftv ← ftvSet qc
   αs    ← Set.fromDistinctAscList <$>
             filter (tvFlavorIs Universal) <$>
@@ -603,7 +602,7 @@ solveConstraint value γrank τ = do
       mapM (eliminateNode trans) (Set.toList extvs)
     -- Get the existential type variables
     getExistentials (γrank, τftv) = do
-      lnodes ← NM.getsGraph Gr.labNodes
+      lnodes ← Gr.getsGraph Gr.labNodes
       cftv   ← removeByRank γrank [ α | (_, α) ← lnodes ]
       return (Set.fromList cftv Set.\\ Map.keysSet τftv)
     -- Remove a node unless it is necessary to associate some of its
@@ -611,7 +610,7 @@ solveConstraint value γrank τ = do
     -- but no successor (or dually, multiple successors but no
     -- predecessor) should not be removed.
     eliminateNode trans α = do
-      (nm, g) ← NM.getNMState
+      (nm, g) ← Gr.getNMState
       let node = Gr.nmLab nm α
       case (Gr.pre g node, Gr.suc g node) of
         (_:_:_, []) → return ()
@@ -631,7 +630,7 @@ solveConstraint value γrank τ = do
             [ β ⊏: fvTy α2
             | n2 ← suc
             , let Just α2 = Gr.lab g n2 ]
-          NM.putGraph $
+          Gr.putGraph $
             let g' = Gr.delNode node g in
             if trans
               then g'
@@ -642,7 +641,7 @@ solveConstraint value γrank τ = do
     --
     -- Remove redundant edges:
     --  • Edges implied by transitivity
-    untransitive = NM.modifyGraph Gr.untransitive
+    untransitive = Gr.modifyGraph Gr.untransitive
     --
     -- Remove type variables based on polarity-related rules:
     --  • Coalesce positive type variables with a single predecessor
@@ -651,13 +650,13 @@ solveConstraint value γrank τ = do
     --    predecessors and negative type variables that share all
     --    their successors.
     polarizedReduce = iterChanging $ \τftv → do
-      nm ← NM.getNodeMap
+      nm ← Gr.getNodeMap
       foldM tryRemove τftv (findPolar nm τftv)
         where
         tryRemove τftv (n, α, var) = do
           let ln = (n, α)
           mτ ← readTV α
-          g  ← NM.getGraph
+          g  ← Gr.getGraph
           case (mτ, Gr.gelem n g) of
             (Left _, True) →
               case (var, Gr.pre g n, Gr.suc g n) of
@@ -692,7 +691,7 @@ solveConstraint value γrank τ = do
     --
     -- Coalesce the strongly-connected components to single atoms
     coalesceSCCs τftv = do
-      foldM (liftM snd <$$> coalesceList) τftv =<< NM.getsGraph Gr.labScc 
+      foldM (liftM snd <$$> coalesceList) τftv =<< Gr.getsGraph Gr.labScc 
     -- Given a list of atoms, coalesce them to one atom
     coalesceList τftv0 (ln:lns) =
       foldM (\(ln1, state) ln2 → coalesce ln1 ln2 state) (ln, τftv0) lns
@@ -709,7 +708,7 @@ solveConstraint value γrank τ = do
           return ((n2, α2), τftv')
     -- Update the graph to remove node n1, assigning all of its
     -- neighbors to n2
-    assignNode n1 n2 = NM.modifyGraph $ \g →
+    assignNode n1 n2 = Gr.modifyGraph $ \g →
       Gr.insEdges [ (n', n2, ())
                   | n' ← Gr.pre g n1, n' /= n1, n' /= n2 ] $
       Gr.insEdges [ (n2, n', ())
@@ -738,11 +737,11 @@ solveConstraint value γrank τ = do
             = do
                 ((node, _), τftv')
                   ← coalesceList τftv component
-                NM.getGraph >>= NM.putGraph . Gr.delNode node
+                Gr.getGraph >>= Gr.putGraph . Gr.delNode node
                 return τftv'
           each τftv _
             = return τftv
-      foldM each τftv =<< NM.getsGraph Gr.labComponents
+      foldM each τftv =<< Gr.getsGraph Gr.labComponents
     -- Find the generalization candidates, which are free in τ but
     -- not in γ (restricted further if not a value)
     genCandidates value τftv γrank =

@@ -2,10 +2,7 @@
   LANGUAGE
     FlexibleInstances,
     FunctionalDependencies,
-    GeneralizedNewtypeDeriving,
     MultiParamTypeClasses,
-    RankNTypes,
-    TypeFamilies,
     UndecidableInstances,
     UnicodeSyntax
   #-}

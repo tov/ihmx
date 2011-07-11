@@ -12,6 +12,7 @@ module Graph (
   module Data.Graph.Inductive.Graph,
   module Data.Graph.Inductive.Query.DFS,
   module Data.Graph.Inductive.Query.TransClos,
+  module NM,
 ) where
 
 import qualified Data.List as List

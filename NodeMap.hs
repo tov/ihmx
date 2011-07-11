@@ -1,13 +1,8 @@
 {-#
   LANGUAGE
-    FlexibleContexts,
     FlexibleInstances,
     FunctionalDependencies,
-    GeneralizedNewtypeDeriving,
     MultiParamTypeClasses,
-    OverlappingInstances,
-    RankNTypes,
-    TypeSynonymInstances,
     UndecidableInstances,
     UnicodeSyntax
   #-}
@@ -28,7 +23,6 @@ import Control.Monad.Writer.Lazy as Lazy
 import Control.Monad.Writer.Strict as Strict
 import Control.Monad.RWS.Lazy as Lazy
 import Control.Monad.RWS.Strict as Strict
-import Control.Applicative hiding (empty)
 import Control.Arrow
 
 insNewMapNode ∷ (Ord a, DynGraph gr) ⇒
