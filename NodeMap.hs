@@ -14,7 +14,6 @@
 module NodeMap (
   MonadNM(..),
   module Data.Graph.Inductive.NodeMap,
-  NodeMapT(..), mapNodeMapT, runNodeMapT, execNodeMapT, runNodeMapT_,
 ) where
 
 import Data.Graph.Inductive (DynGraph, LNode, LEdge, insNode, lab)
@@ -163,47 +162,3 @@ instance (Ord a, DynGraph g, Monad m) ⇒
          MonadNM a b g (Lazy.StateT (NodeMap a, g a b) m) where
   getNMState = get
   putNMState = put
-
----
---- An transformer instance
----
-
-newtype NodeMapT a b g m r
-  = NodeMapT { unNodeMapT ∷ Strict.StateT (NodeMap a, g a b) m r }
-  deriving (Functor, Applicative, Monad, MonadTrans)
-
-mapNodeMapT   ∷ (∀s. m (y, s) → n (z, s)) →
-                NodeMapT a b g m y → NodeMapT a b g n z
-mapNodeMapT f = NodeMapT . Strict.mapStateT f . unNodeMapT
-
-instance (Ord a, DynGraph g, Monad m) ⇒ MonadNM a b g (NodeMapT a b g m) where
-  getNMState = NodeMapT get
-  putNMState = NodeMapT . put
-
-instance MonadReader r m ⇒ MonadReader r (NodeMapT a b g m) where
-  ask       = NodeMapT ask
-  local f m = NodeMapT (local f (unNodeMapT m))
-
-instance MonadWriter w m ⇒ MonadWriter w (NodeMapT a b g m) where
-  tell      = lift . tell
-  listen    = NodeMapT . listen . unNodeMapT
-  pass      = NodeMapT . pass . unNodeMapT
-
-instance MonadState s m ⇒ MonadState s (NodeMapT a b g m) where
-  get       = lift get
-  put       = lift . put
-
-runNodeMapT  ∷ (DynGraph g, Ord a, Monad m) ⇒
-               NodeMap a → g a b → NodeMapT a b g m r →
-               m (r, (NodeMap a, g a b))
-runNodeMapT nm g m = Strict.runStateT (unNodeMapT m) (nm, g)
-
-execNodeMapT  ∷ (DynGraph g, Ord a, Monad m) ⇒
-                NodeMap a → g a b → NodeMapT a b g m r →
-                m (g a b)
-execNodeMapT nm g m = (snd . snd) `liftM` runNodeMapT nm g m
-
-runNodeMapT_ ∷ (DynGraph g, Ord a, Monad m) ⇒
-               g a b → NodeMapT a b g m r →
-               m (g a b)
-runNodeMapT_ g m = (snd . snd) `liftM` runNodeMapT (fromGraph g) g m

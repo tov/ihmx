@@ -38,8 +38,6 @@ import Control.Monad.Writer.Lazy   as Lazy
 import System.IO.Unsafe
 
 import Eq1
-import qualified NodeMap as Gr
-import qualified Graph   as Gr
 
 -- | A class for monads with mutable references. Provides generic
 --   operations for creating, reading, writing, and modifying
@@ -206,12 +204,6 @@ instance (Monoid w, MonadRef p m) ⇒ MonadRef p (Strict.WriterT w m) where
   writeRef r a = lift $ writeRef r a
 
 instance (Monoid w, MonadRef p m) ⇒ MonadRef p (Lazy.WriterT w m) where
-  newRef a     = lift $ newRef a
-  readRef r    = lift $ readRef r
-  writeRef r a = lift $ writeRef r a
-
-instance (Ord a, Gr.DynGraph g, MonadRef p m) ⇒
-         MonadRef p (Gr.NodeMapT a b g m) where
   newRef a     = lift $ newRef a
   readRef r    = lift $ readRef r
   writeRef r a = lift $ writeRef r a

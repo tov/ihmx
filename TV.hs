@@ -47,8 +47,6 @@ import Syntax
 import Ppr
 import Util
 import MonadRef
-import qualified NodeMap as NM
-import qualified Graph as Gr
 import Trace
 
 ---
@@ -459,27 +457,6 @@ instance (MonadTV tv p m, Monoid w) ⇒
 instance (MonadTV tv r' m, Monoid w) ⇒
          MonadReadTV tv (RWST r w s m) where
   readTV = lift . readTV
-
-instance (MonadTV tv s m, Ord a, Gr.DynGraph g) ⇒
-         MonadTV tv s (NM.NodeMapT a b g m) where
-  newTV_   = lift <$> newTV_
-  writeTV_ = lift <$$> writeTV_
-  readTV_  = lift <$> readTV_
-  collectTV     = NM.mapNodeMapT (mapListen2 collectTV)
-  reportTV      = lift . reportTV
-  monitorChange = NM.mapNodeMapT (mapListen2 monitorChange)
-  getTVRank_ = lift <$> getTVRank_
-  setTVRank_ = lift <$$> setTVRank_
-  setChanged = lift setChanged
-
-instance (MonadTV tv r m, Ord a, Gr.DynGraph g) ⇒
-         MonadReadTV tv (NM.NodeMapT a b g m) where
-  readTV = lift . readTV
-
-instance (MonadTrace m, Ord a, Gr.DynGraph g) ⇒
-         MonadTrace (NM.NodeMapT a b g m) where
-  getTraceIndent = lift getTraceIndent
-  putTraceIndent = lift . putTraceIndent
 
 ---
 --- Debugging
