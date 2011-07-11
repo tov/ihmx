@@ -17,7 +17,7 @@ module NodeMap (
   NodeMapT(..), mapNodeMapT, runNodeMapT, execNodeMapT, runNodeMapT_,
 ) where
 
-import Data.Graph.Inductive (DynGraph, LNode, LEdge, insNode, lab, empty)
+import Data.Graph.Inductive (DynGraph, LNode, LEdge, insNode, lab)
 import Data.Graph.Inductive.NodeMap
   hiding (mkNodeM, mkNodesM, mkEdgeM, mkEdgesM,
           insMapNodeM, insMapEdgeM, delMapNodeM, delMapEdgeM,
@@ -31,8 +31,6 @@ import Control.Monad.RWS.Lazy as Lazy
 import Control.Monad.RWS.Strict as Strict
 import Control.Applicative hiding (empty)
 import Control.Arrow
-
-import Defaultable
 
 insNewMapNode ∷ (Ord a, DynGraph gr) ⇒
                 NodeMap a → a → gr a b → (gr a b, NodeMap a, LNode a)
@@ -177,9 +175,6 @@ newtype NodeMapT a b g m r
 mapNodeMapT   ∷ (∀s. m (y, s) → n (z, s)) →
                 NodeMapT a b g m y → NodeMapT a b g n z
 mapNodeMapT f = NodeMapT . Strict.mapStateT f . unNodeMapT
-
-instance (Ord a, DynGraph g) ⇒ ExtractableT (NodeMapT a b g) where
-  extractT   = liftM fst . runNodeMapT new empty
 
 instance (Ord a, DynGraph g, Monad m) ⇒ MonadNM a b g (NodeMapT a b g m) where
   getNMState = NodeMapT get

@@ -98,7 +98,7 @@ instance (MonadC tv s m, Monoid w) ⇒ MonadC tv s (WriterT w m) where
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
 
-instance (MonadC tv r m, Defaultable s) ⇒ MonadC tv r (StateT s m) where
+instance (MonadC tv r m) ⇒ MonadC tv r (StateT s m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
@@ -109,7 +109,7 @@ instance (MonadC tv r m, Defaultable s) ⇒ MonadC tv r (StateT s m) where
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
 
-instance (MonadC tv p m, Defaultable r) ⇒ MonadC tv p (ReaderT r m) where
+instance (MonadC tv p m) ⇒ MonadC tv p (ReaderT r m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
   (⊏:) = lift <$$> (⊏:)
@@ -120,7 +120,7 @@ instance (MonadC tv p m, Defaultable r) ⇒ MonadC tv p (ReaderT r m) where
   saveConstraint = lift <$> lift saveConstraint
   showConstraint = lift showConstraint
 
-instance (MonadC tv p m, Defaultable r, Monoid w, Defaultable s) ⇒
+instance (MonadC tv p m, Monoid w) ⇒
          MonadC tv p (RWST r w s m) where
   (<:) = lift <$$> (<:)
   (=:) = lift <$$> (=:)
@@ -253,7 +253,6 @@ instance MonadRef r m ⇒ MonadRef r (ConstraintT tv r m) where
   newRef        = lift <$> newRef
   readRef       = lift <$> readRef
   writeRef      = lift <$$> writeRef
-  unsafeIOToRef = lift <$> unsafeIOToRef
 
 -- | Pass through for unification operations
 instance MonadTV tv r m ⇒ MonadTV tv r (ConstraintT tv r m) where
@@ -270,8 +269,6 @@ instance MonadTV tv r m ⇒ MonadTV tv r (ConstraintT tv r m) where
   getTVRank_    = lift <$> getTVRank_
   setTVRank_    = lift <$$> setTVRank_
   setChanged    = lift setChanged
-  unsafePerformTV = error "BUG! No MonadTV.unsafePerformU for ConstraintT"
-  unsafeIOToTV  = lift <$> unsafeIOToTV
 
 instance MonadTV tv r m ⇒ MonadReadTV tv (ConstraintT tv r m) where
   readTV = lift . readTV
